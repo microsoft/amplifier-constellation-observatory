@@ -1,0 +1,16 @@
+{
+  "name": "agent-observatory-ui-checks",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/browser.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.58.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/amplifier-constellation-observatory.git"
+  }
+}

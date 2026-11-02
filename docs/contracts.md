@@ -1,0 +1,183 @@
+# Public boundaries
+
+All routes below are relative to `/api/v1`. Browser sessions use machine authentication, secure cookies, and same-origin CSRF protection. API credentials are bearer tokens with explicit scopes; `admin` includes all scopes. TLS validation remains enabled for remote providers, with an optional locally supplied CA file. Redirects are not followed with remote credentials.
+
+| Scope | Operations |
+| --- | --- |
+| `observe` | descriptor, status, endpoint/host inventory, inspections, relationships, experiment reports, activity |
+| `work` | read responsibility and organization data through optional providers |
+| `work:execute` | explicitly authorize background work and change scheduler settings through optional providers |
+| `memory:read` | read attributed memory through optional providers |
+| `memory` | read and write attributed memory through optional providers |
+| `manage` | connect/edit/detach endpoints, store credentials, invoke configuration and work-record writes, submit experiment reports |
+| `interact` | ACP negotiation, sessions, prompts, disconnect |
+| `provision` | authorize/edit hosts, plan/install, job records and output |
+| `ui` | read and control browser view state |
+| `admin` | create/revoke scoped tokens and all operations |
+
+An observation credential does not permit agent prompts, configuration, private work details, installation execution, or reading installation logs. The remote endpoint's credential imposes its own independent limits. An inventory relationship does not grant access or configure a live connection.
+
+## Endpoint registry
+
+`GET/POST endpoints`, `GET/PUT/DELETE endpoints/{id}`. PUT and DELETE require `expected_revision`. POST accepts:
+
+```json
+{
+  "label": "Release agent",
+  "kind": "agent",
+  "ui_url": "https://agent.example:18443",
+  "acp": {
+    "transport": "stdio",
+    "command": "/path/to/attach",
+    "args": [],
+    "cwd": "/path/to/workspace",
+    "env": {},
+    "secret_env": {}
+  },
+  "management": {
+    "provider": "agent-instance",
+    "base_url": "https://agent.example:18443",
+    "credential_ref": "release-management",
+    "access": "manage",
+    "expected_id": "independently-verified-installation-id"
+  }
+}
+```
+
+ACP, management and UI are individually optional, but at least one is required. `POST endpoints/{id}/inspect` records a dated management observation. `POST endpoints/{id}/probe` negotiates standard ACP. Neither test implies successful work or persona fidelity. The UI pins a newly inspected installation ID when connecting; API callers should inspect and pin deliberately.
+
+Agent entries use `kind: "agent"` even when they offer ACP alone. Register their
+conversation adapters separately with `kind: "adapter"` and a `uses` relationship
+from adapter to agent. An adapter entry does not automatically register its agent;
+its management credentials do not confer access to the agent's ACP endpoint.
+
+Both inventory GET routes return `observation` for management and
+`acp_observation` for ACP. ACP observations persist successful handshakes or failed
+checks, their timestamp, negotiated implementation/capabilities, and the checked
+endpoint revision. After an endpoint edit, a prior ACP observation is omitted
+until that revision is checked. A failed ACP check still returns an HTTP error
+and leaves a durable failure observation. Neither check replaces the other's
+data. The dashboard checks every attached interface, includes ACP-only agents,
+and continues checking the other endpoints when one fails. Running an ACP check
+still requires `interact`; reading its recorded result requires `observe`.
+
+`POST endpoints/{id}/operations/{operation}` sends a body to an explicit management mapping. The provider's registry chooses the HTTP method/path and required Observatory scope; callers cannot select an arbitrary URL. Built-in operations include `config`, `validate-config`, `apply-config`, `lifecycle`, `work`, `organization`, `profile-use`, `sessions`, `activity` and `permissions` where the particular provider implements them. Unsupported remote features return an explicit failure; they do not fall back to private files.
+
+For `generic-json`, `management.operations` contains `{id,method,path,access}`. Paths are bounded relative API paths; observe and work operations must be GET; descriptor/status always require observe access and GET. Any write also requires a management connection explicitly set to `manage`. The operator can map a different implementation's explicit interfaces while leaving ACP unchanged.
+
+### Optional memory, continued work and engine settings
+
+Agent Instance's additional operations are offered only when its current descriptor advertises their exact path and method. A legacy descriptor without an operation list does not imply support. Calls recheck the pinned remote identity and advertised operation before using the configured credential. The Observatory never substitutes a private file or database read.
+
+Mappings include `memory`, `remember`, `memory-item`, `memory-command`, `scheduler`, `configure-scheduler`, `work-item`, `work-command`, `work-execution`, `execute-work`, `native-config`, `native-schema`, `validate-native-config`, and `apply-native-config`. Operations for a particular memory/work record take `{resource_id:<UUID>,payload?:<remote request>}`; other operations accept the remote request directly. The UUID is substituted into a fixed provider path and cannot select an arbitrary URL.
+
+For example, the execution body is forwarded without changing its explicit revision, reason, request ID or budget:
+
+```json
+{
+  "resource_id": "13408493-34ab-4ee4-b723-3edd8b3e3cf6",
+  "payload": {
+    "type": "resume",
+    "run_id": "a3c04fb0-c176-4399-97ac-7f9a2d9e8586",
+    "expected_revision": 3,
+    "expected_work_revision": 4,
+    "request_id": "deliberate-continuation",
+    "reason": "Continue from the inspected planning checkpoint.",
+    "budget": {"max_turns":4,"max_seconds":300,"max_output_bytes":131072,"max_tool_calls":30}
+  }
+}
+```
+
+Send this to `POST endpoints/{id}/operations/execute-work`. `work` and `manage` grants do not authorize execution. Memory grants are also separate from observation and work. The target service independently enforces the credential's scopes and its saved authorization policy. Native configuration mappings require management access; schema and configuration formats belong to the target engine, not the fleet.
+
+The Memory tab shows attributed alternatives, audience, source counts and source details. The Background work tab shows real run states, cumulative turns/tool calls, budgets and reports awaiting review. Both tabs require advertised operations. Their edit buttons open the independent agent's own UI; model/native capability settings use that same embedded service UI. The parent sends only the published `agent-instance.ui/1` navigation command to the exact configured origin. The child must separately allow that origin and authenticate the browser. A visible retry button accommodates delayed sign-in. This sends no model prompt and grants no domain authority.
+
+These new views are programmable: use `tab: "memory"` or `"background"`; `draft.memory_details` and `draft.run_report` select source/report disclosures. Use `tab: "embedded"` and `draft.embedded_route: "memory"`, `"work"`, or `"configuration"` to display the corresponding independent screen. All domain changes remain available through the operation mappings above, without driving browser pixels.
+
+`GET credentials` returns names only. `POST credentials {name,value}` writes a private credential. Environment secret references name those files. The host control credential cannot be referenced by an attached endpoint.
+
+## Conversations
+
+`GET/POST sessions`, `GET sessions/{id}`, `POST sessions/{id}/prompt`, `POST sessions/{id}/close`.
+
+Create with `{endpoint_id,title?}`. Prompt with `{text,request_id:<UUID>}`. Duplicate identical requests return the saved record; a reused request ID with different text is rejected. A prompt is asynchronous and persists its running/result state before the UI disconnects. Poll the session for completion. No automatic retries occur after an ambiguous failure.
+
+Each conversation retains a separate live ACP process. Inactive processes expire after 15 minutes; at most 32 are held. An endpoint advertising `loadSession` can restore its session after disconnect/restart. Other endpoints can carry on through their existing connection; after it closes, their saved transcript remains readable and a new conversation is required. The Observatory does not claim to restore a session by silently replaying text into a new one.
+
+The client supports text, live tool/plan progress, explicit permission decisions, and saved session loading. It advertises no client filesystem/terminal callbacks; native agent-side tools remain governed by that endpoint. Prompts time out after ten minutes. Stop and timeout send standard ACP `session/cancel`, allow a short completion window, then close the subprocess; work already performed is not undone. Closing an idle connection preserves the transcript.
+
+`GET /api/v1/sessions/{id}` includes bounded `progress` (text, tool status, plan, revision), the initiating actor's pending `permissions`, and `can_cancel`. Private reasoning chunks and updates for another ACP session are not exposed. The UI polls progress without replacing the message draft. Completed turn progress is retained with the session; approval arguments remain in memory only.
+
+`POST /api/v1/sessions/{id}/permissions/{request_id}` with `{"option_id":"offered-option-id"}` returns that exact agent-offered choice. Use `{"option_id":null}` to cancel the request. Requests expire within three minutes, are bound to this conversation and the user/credential that started the turn, and are single use. Other actors cannot see or answer them. Expiry, disconnection, cancellation and restart never grant permission. Audit entries omit tool arguments and option text. An `allow_always` choice is explicitly labelled in the UI and delegates that remembered policy to the agent; the client does not silently choose it.
+
+`POST /api/v1/sessions/{id}/cancel` stops a turn started by the same actor. Both decision and cancellation require `interact` and the normal CSRF protection for browser sessions. API automation uses its own credential identity; a different credential does not inherit a human's pending decisions. View commands can set `permission_details` to a pending request UUID (or null) to show/hide action details, and `focus` can target `permission-<UUID>-details`, `permission-<UUID>-option-<index>`, or `permission-<UUID>-cancel` to focus the displayed controls. Generic ACP negotiation is unchanged.
+
+## Machines and installers
+
+`GET/POST hosts`, `PUT/DELETE hosts/{id}`. Editing/deleting requires `expected_revision`.
+
+```json
+{
+  "label": "agent-host",
+  "transport": "ssh",
+  "address": "agent-host",
+  "install_roots": ["/home/operator/.local/share/agents"],
+  "recipes": [{
+    "id": "agent-instance",
+    "version": "specific-release-id",
+    "argv": ["/path/to/pinned/installer", "--home", "{home}", "--name", "{name}", "--port", "{port}"],
+    "timeout_seconds": 1800
+  }]
+}
+```
+
+The host/recipe is a privileged operator configuration. Pin actual executables or release directories; a version label alone does not verify a mutable executable. `local` uses an argument array directly. `ssh` runs a fixed Python dispatcher with JSON on stdin; it does not evaluate a model-supplied shell command. SSH requires a working configured key and known host, plus remote Python. The initial SSH dispatcher targets POSIX hosts; native Windows installers can be invoked through another explicit host recipe or their own management wrapper.
+
+`POST install/plan {host_id,recipe_id,name,home,port}` returns a revisioned plan and `plan_digest`. `POST install` takes the same fields plus that digest and `request_id:<UUID>`. One pending/running installation per host is allowed. `GET jobs`, `GET jobs/{id}`, `GET jobs/{id}/log/{stdout|stderr}` observe it. Logs are bounded to 1 MB each and require provisioning scope. The dispatcher stops the installer process group on timeout or control-connection loss, including descendants. Successful installers must register long-running services separately (for example, with systemd), rather than leave background children. Interrupted installations are never automatically rerun.
+
+## Views, reports and links
+
+`POST views`, `GET views/{id}`, `POST views/{id}/commands`, `POST views/{id}/ack`.
+
+```json
+{
+  "expected_revision": 7,
+  "controller": "voice-assistant",
+  "commands": [
+    {"op":"set","field":"screen","value":"agents"},
+    {"op":"set","field":"selected_id","value":"endpoint-uuid"},
+    {"op":"set","field":"tab","value":"work"}
+  ]
+}
+```
+
+Other fields are `session_id`, `filter`, `modal`, `draft`, `focus`, and `scroll:{x,y}`. The browser acknowledges the rendered revision with `{revision}`. Stale mutations return 409. A selected conversation must belong to the selected endpoint; contradictory commands fail atomically. Selecting another endpoint clears the previous conversation unless a matching conversation is explicitly supplied. Installation results can be opened with `modal: "job"` and `draft: {job_id}`. View acknowledgments and ordinary navigation are not activity events. Passwords and credential values are never form draft fields.
+
+`GET/POST links`, `PUT/DELETE links/{id}` describe `{label,from,to,relation,notes?}`, with relation `connects`, `uses`, `observes`, or `coordinates`. These are inventory descriptions, not a delegation authority or a network connection setup shortcut.
+
+`GET/POST experiments`: `{label,run_id,status,summary,measurements,participants?,report_url?}`. Measurements can distinguish social participation, task outcomes, technical reliability, and actual human feedback. The service marks each as a submitted report; it does not independently certify the evaluator's claims.
+
+`GET activity?limit=&before=` returns bounded operational events. `POST tokens {scopes,expires_in_seconds?}` returns a token once; `DELETE tokens/{id}` revokes it.
+## Recorded experiment conversations
+
+`PUT /api/v1/experiments/{id}/transcript` attaches or replaces a public transcript
+on an existing experiment. It requires `manage` and a current
+`expected_revision`. The body contains `messages`, an ordered array with `id`,
+`speaker`, `kind`, `room`, `text`, and optional `at` (display timestamp). Kinds are
+`simulated_human`, `support_agent`, `human`, `operator_cue`, `membership`, and
+`protocol_fixture`.
+Publishers must supply only contributions that were actually delivered, exclude
+private drafts, tools, hidden reasoning and credentials, and label simulations
+and operator cues honestly. Extra fields and unknown kinds are rejected.
+
+Transcripts are bounded to 500 distinct messages, 128 KB per message and 1 MB of
+message text total. An empty array removes the attached transcript.
+`GET /api/v1/experiments/{id}/transcript` requires `observe` and returns the stored
+revision and messages. The experiment index returns only `transcript_count`,
+so opening the index does not send every transcript to the browser.
+
+The packaged UI renders the transcript through the same Markdown renderer as
+agent replies. Simulation and operator labels remain visible. It never executes
+submitted report HTML. View commands can set `experiment_id` and
+`experiment_measurements`; selection, disclosure, focus and scroll survive
+reload. Existing CLI `api` commands can call both transcript endpoints.

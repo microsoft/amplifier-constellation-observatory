@@ -1,0 +1,70 @@
+name: Check and package Observatory
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install prerequisites
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
+      - name: Install Rust
+        run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt --component clippy
+      - run: cargo +1.93.0 fmt --check
+      - run: cargo +1.93.0 test --locked
+      - run: cargo +1.93.0 clippy --locked --all-targets -- -D warnings
+      - run: cargo +1.93.0 build --release --locked
+      - name: Package standalone executable
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version=$(target/release/agent-observatory --version | cut -d' ' -f2)
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then test "$GITHUB_REF_NAME" = "v$version"; fi
+          mkdir dist
+          archive="agent-observatory-$version-$TARGET.tar.gz"
+          tar -czf "dist/$archive" -C target/release agent-observatory
+          (cd dist && sha256sum "$archive" > "$archive.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: linux
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Create draft release and attach verified builds
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Agent Observatory $RELEASE_TAG" --notes "Independent fleet surface with optional negotiated management. Standalone Linux x86-64 and ARM64 executables."
+          fi
+          gh release upload "$RELEASE_TAG" dist/*
