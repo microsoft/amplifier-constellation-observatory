@@ -11,7 +11,7 @@ When an installation advertises them, Memory shows its attributed knowledge and 
 ## Install on Linux
 
 ```sh
-gh repo clone microsoft/amplifier-constellation-observatory
+git clone https://github.com/microsoft/amplifier-constellation-observatory.git
 cd amplifier-constellation-observatory
 ./install.sh --home "$HOME/.local/share/agent-observatory/default"
 ```
