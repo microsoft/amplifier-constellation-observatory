@@ -102,9 +102,9 @@ These new views are programmable: use `tab: "memory"` or `"background"`; `draft.
 
 Create with `{endpoint_id,title?}`. Prompt with `{text,request_id:<UUID>}`. Duplicate identical requests return the saved record; a reused request ID with different text is rejected. A prompt is asynchronous and persists its running/result state before the UI disconnects. Poll the session for completion. No automatic retries occur after an ambiguous failure.
 
-Each conversation retains a separate live ACP process. Inactive processes expire after 15 minutes; at most 32 are held. An endpoint advertising `loadSession` can restore its session after disconnect/restart. Other endpoints can carry on through their existing connection; after it closes, their saved transcript remains readable and a new conversation is required. The Observatory does not claim to restore a session by silently replaying text into a new one.
+Each conversation retains a separate live ACP process. Inactive processes expire after 15 minutes; at most 32 are held. An endpoint advertising `sessionCapabilities.resume` can restore without replay; otherwise `loadSession` restores with replay. Other endpoints can carry on through their existing connection; after it closes, their saved transcript remains readable and a new conversation is required. The Observatory does not claim to restore a session by silently replaying text into a new one.
 
-The client supports text, live tool/plan progress, explicit permission decisions, and saved session loading. It advertises no client filesystem/terminal callbacks; native agent-side tools remain governed by that endpoint. Prompts time out after ten minutes. Stop and timeout send standard ACP `session/cancel`, allow a short completion window, then close the subprocess; work already performed is not undone. Closing an idle connection preserves the transcript.
+The client supports text, live tool/plan progress, explicit permission decisions, form/URL elicitation, agent-method authentication, and saved session loading. It advertises no client filesystem/terminal callbacks; native agent-side tools remain governed by that endpoint. Prompts time out after ten minutes. Stop and timeout send standard ACP `session/cancel`, allow a short completion window, then close the subprocess; work already performed is not undone. Closing an idle connection preserves the transcript.
 
 `GET /api/v1/sessions/{id}` includes bounded `progress` (text, tool status, plan, revision), the initiating actor's pending `permissions`, and `can_cancel`. Private reasoning chunks and updates for another ACP session are not exposed. The UI polls progress without replacing the message draft. Completed turn progress is retained with the session; approval arguments remain in memory only.
 
@@ -181,3 +181,38 @@ agent replies. Simulation and operator labels remain visible. It never executes
 submitted report HTML. View commands can set `experiment_id` and
 `experiment_measurements`; selection, disclosure, focus and scroll survive
 reload. Existing CLI `api` commands can call both transcript endpoints.
+
+
+## Agent questions, authentication, and optional session controls
+
+Pending `elicitations` appear only for the initiating actor in `GET sessions/{id}`.
+Answer through `POST sessions/{id}/elicitations/{request}` with
+`{action: "accept"|"decline"|"cancel", content?: {...}}`. Flat primitive/enum
+forms are validated against the agent's schema. URL requests display the full
+address and open only after an explicit choice; opening does not prove that
+external authentication completed. Values and authorization URLs stay out of
+audit records. Expiry, cancellation, and restart cancel unanswered requests.
+
+During session setup, AUTH_REQUIRED can offer supported agent authentication
+methods. A chosen method runs `authenticate` and then retries setup once; prompts
+are never replayed. Terminal-only authentication still requires the agent's
+own setup flow. Auth callbacks remain attached to the initiating actor.
+
+`POST endpoints/{id}/acp-sessions` requires `manage`. `{action:"list",cursor?:...}`
+negotiates `sessionCapabilities.list`, filters to the configured working folder,
+and returns bounded entries and an optional next cursor. `{action:"delete",
+session_id:"...",confirm:true}` requires advertised delete support and explicit
+confirmation. It removes an entry from the agent's list, not transcripts held by
+this or other clients. Known active local sessions cannot be removed; external
+clients may still be affected. Agent-specific retention remains the agent's
+responsibility. Listing uses a separate connection and may require the agent's
+persistent authentication to be configured first.
+
+Closing an idle conversation calls `session/close` when advertised, releases the
+client connection, and retains its transcript. Reopening prefers `session/resume`
+when advertised, otherwise `session/load`. Unknown-session close/delete errors
+are treated as already closed/removed. No unsupported methods are sent.
+
+Views expose `agent_history_open`, `agent_history_cursor`,
+`agent_history_delete`, and non-secret `elicitation_drafts`. Agents can drive
+these controls through the same revisioned view API as other screens.

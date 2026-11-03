@@ -72,8 +72,13 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/jobs/{id}/log/{stream}", get(job_log))
         .route("/api/v1/sessions", get(sessions).post(new_session))
         .route("/api/v1/sessions/{id}", get(session))
+        .route("/api/v1/endpoints/{id}/acp-sessions", post(agent_sessions))
         .route("/api/v1/sessions/{id}/prompt", post(prompt))
         .route("/api/v1/sessions/{id}/close", post(close_session))
+        .route(
+            "/api/v1/sessions/{id}/elicitations/{request}",
+            post(decide_elicitation),
+        )
         .route("/api/v1/sessions/{id}/cancel", post(cancel_turn))
         .route(
             "/api/v1/sessions/{id}/permissions/{permission}",
@@ -472,6 +477,61 @@ async fn job_log(
     let text = std::fs::read_to_string(path).unwrap_or_default();
     Ok(Json(json!({"text":text})))
 }
+async fn agent_sessions(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::check(&s, &h, "manage", true)?;
+    let endpoint = s.read("endpoints", &id)?;
+    let action = body["action"].as_str().unwrap_or("list");
+    if !["list", "delete"].contains(&action) {
+        return Err(ApiError::bad("Choose list or delete"));
+    }
+    let delete = if action == "delete" {
+        if body["confirm"] != true {
+            return Err(ApiError::bad(
+                "Confirm removal from the agent's history; saved client transcripts are separate",
+            ));
+        }
+        let sid = body["session_id"]
+            .as_str()
+            .ok_or_else(|| ApiError::bad("Choose a session"))?;
+        let active = s.active_sessions.lock().unwrap();
+        if s.list("sessions")?.iter().any(|v| {
+            v["endpoint_id"] == id
+                && v["acp_session_id"] == sid
+                && active.contains(v["id"].as_str().unwrap_or(""))
+        }) {
+            return Err(ApiError::busy());
+        }
+        Some(sid)
+    } else {
+        None
+    };
+    let result = acp::catalog(&s, &endpoint["acp"], body["cursor"].as_str(), delete).await?;
+    if let Some(sid) = delete {
+        s.audit(
+            "agent.session_removed",
+            Some(&id),
+            json!({"session_id":sid}),
+        )?;
+        for mut local in s
+            .list("sessions")?
+            .into_iter()
+            .filter(|v| v["endpoint_id"] == id && v["acp_session_id"] == sid)
+        {
+            s.acp_clients
+                .lock()
+                .unwrap()
+                .remove(local["id"].as_str().unwrap());
+            local["agent_history_removed"] = json!(true);
+            s.save("sessions", local.clone(), local["revision"].as_u64())?;
+        }
+    }
+    Ok(Json(result))
+}
 async fn sessions(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "interact", false)?;
     Ok(Json(json!({"sessions":s.list("sessions")?})))
@@ -487,6 +547,7 @@ async fn session(
         record["progress"] = progress.clone();
     }
     record["permissions"] = json!(s.permissions.list(&id, &p.actor));
+    record["elicitations"] = json!(s.elicitations.list(&id, &p.actor));
     record["can_cancel"] = json!(
         s.cancellations
             .lock()
@@ -517,15 +578,37 @@ async fn close_session(
 ) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "interact", true)?;
     let mut session = s.read("sessions", &id)?;
-    let active = s.active_sessions.lock().unwrap();
-    if active.contains(&id) {
-        return Err(ApiError::busy());
+    {
+        let mut active = s.active_sessions.lock().unwrap();
+        if !active.insert(id.clone()) {
+            return Err(ApiError::busy());
+        }
     }
-    s.acp_clients.lock().unwrap().remove(&id);
+    let closed = acp::disconnect(&s, &id).await;
+    s.active_sessions.lock().unwrap().remove(&id);
+    closed?;
     session["status"] = json!("disconnected");
     let v = s.save("sessions", session.clone(), session["revision"].as_u64())?;
-    drop(active);
     Ok(Json(v))
+}
+async fn decide_elicitation(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path((id, request)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let p = auth::check(&s, &h, "interact", true)?;
+    s.read("sessions", &id)?;
+    let action = body["action"].as_str().unwrap_or("");
+    s.elicitations
+        .resolve(&id, &p.actor, &request, action, body.get("content"))
+        .map_err(|e| ApiError(axum::http::StatusCode::CONFLICT, e.into()))?;
+    s.audit(
+        "elicitation.decided",
+        Some(&id),
+        json!({"actor":p.actor,"request_id":request,"action":action}),
+    )?;
+    Ok(Json(json!({"accepted":true})))
 }
 async fn decide_permission(
     State(s): State<Arc<AppState>>,
@@ -580,6 +663,11 @@ async fn prompt(
         ));
     }
     let mut session = s.read("sessions", &id)?;
+    if session["agent_history_removed"] == true {
+        return Err(ApiError::bad(
+            "This agent session was removed. Its client transcript remains readable; start a new conversation.",
+        ));
+    }
     let messages = session["messages"].as_array().cloned().unwrap_or_default();
     if let Some(old) = messages
         .iter()

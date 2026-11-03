@@ -1073,7 +1073,7 @@ async fn bare_agent_auth_failure_reaches_the_ui_without_raw_provider_error() {
     std::fs::write(dir.path().join("fixture.py"), r#"import json,sys
 for line in sys.stdin:
  r=json.loads(line)
- result={'protocolVersion':1,'authMethods':[{'id':'login','name':'Browser login'}]} if r['method']=='initialize' else None
+ result={'protocolVersion':1,'authMethods':[{'id':'login','name':'Host login','type':'terminal'}]} if r['method']=='initialize' else None
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],**({'result':result} if result else {'error':{'code':-32000,'message':'DO NOT DISPLAY SECRET'}})}),flush=True)
 "#).unwrap();
     let discovery = acp::probe(&state, &config).await.unwrap();
@@ -1087,4 +1087,170 @@ for line in sys.stdin:
         .unwrap_err();
     assert!(error.1.contains("same service account"));
     assert!(!error.1.contains("SECRET"));
+}
+
+#[tokio::test]
+async fn interactive_auth_and_forms_use_the_initiators_connection() {
+    let (dir, state, token) = state();
+    let app = server::router(state.clone());
+    let fixture = dir.path().join("interactions.py");
+    std::fs::write(&fixture, include_str!("fixture_interactions.py")).unwrap();
+    let (_,e)=request(&app,&token,"POST","/api/v1/endpoints",json!({"label":"Question fixture","acp":{"command":"python3","args":[fixture],"cwd":dir.path()}})).await;
+    let (_, s) = request(
+        &app,
+        &token,
+        "POST",
+        "/api/v1/sessions",
+        json!({"endpoint_id":e["id"]}),
+    )
+    .await;
+    let path = format!("/api/v1/sessions/{}", s["id"].as_str().unwrap());
+    let (_, other) = request(
+        &app,
+        &token,
+        "POST",
+        "/api/v1/tokens",
+        json!({"name":"another actor","scopes":["interact"]}),
+    )
+    .await;
+    request(
+        &app,
+        &token,
+        "POST",
+        &format!("{path}/prompt"),
+        json!({"text":"Help","request_id":uuid::Uuid::new_v4()}),
+    )
+    .await;
+    for (mode, content) in [
+        ("form", json!({"method_id":"browser"})),
+        ("url", json!({"ignored":"never forwarded"})),
+        ("form", json!({"direction":"small"})),
+    ] {
+        let mut form = Value::Null;
+        for _ in 0..200 {
+            let (_, s) = request(&app, &token, "GET", &path, Value::Null).await;
+            if s["elicitations"].as_array().is_some_and(|v| !v.is_empty()) {
+                form = s["elicitations"][0].clone();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(form["mode"], mode);
+        assert_eq!(
+            request(
+                &app,
+                other["token"].as_str().unwrap(),
+                "GET",
+                &path,
+                Value::Null
+            )
+            .await
+            .1["elicitations"],
+            json!([])
+        );
+        let route = format!("{path}/elicitations/{}", form["id"].as_str().unwrap());
+        assert_eq!(
+            request(
+                &app,
+                other["token"].as_str().unwrap(),
+                "POST",
+                &route,
+                json!({"action":"accept","content":content})
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            request(
+                &app,
+                &token,
+                "POST",
+                &route,
+                json!({"action":"accept","content":content})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    for _ in 0..200 {
+        let (_, s) = request(&app, &token, "GET", &path, Value::Null).await;
+        if s["status"] != "running" {
+            assert!(s.to_string().contains("Authorized and answered"), "{s}");
+            assert!(!s.to_string().contains("example.test"));
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("Interactive turn did not finish");
+}
+
+#[tokio::test]
+async fn optional_session_controls_negotiate_and_keep_workspace_scope() {
+    let (dir, state, _) = state();
+    let file = dir.path().join("sessions.py");
+    let log = dir.path().join("frames.jsonl");
+    std::fs::write(&file,r#"import sys,json,os
+for line in sys.stdin:
+ r=json.loads(line);m=r.get('method');p=r.get('params',{});open(os.environ['LOG'],'a').write(json.dumps(r)+'\n')
+ if m=='initialize': result={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{} if os.environ.get('DISABLED') else {'list':{},'delete':{},'resume':{},'close':{}}}}
+ elif m=='session/list': result={'sessions':[{'sessionId':'saved','title':'Saved work','cwd':p['cwd']},{'sessionId':'private-other','title':'Different folder','cwd':'/different'}],'nextCursor':'page-two' if 'cursor' not in p else None}
+ elif m in ('session/close','session/delete'):
+  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32002}}),flush=True);continue
+ elif m=='session/new':result={'sessionId':'saved'}
+ elif m=='session/resume':result={}
+ elif m=='session/prompt':result={'stopReason':'end_turn'}
+ else:raise RuntimeError(m)
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
+"#).unwrap();
+    let mut config = json!({"command":"python3","args":[file],"cwd":dir.path(),"env":{"LOG":log}});
+    let first = acp::catalog(&state, &config, None, None).await.unwrap();
+    assert_eq!(first["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(first["nextCursor"], "page-two");
+    assert_eq!(first["can_delete"], true);
+    assert!(
+        acp::catalog(&state, &config, Some("page-two"), None)
+            .await
+            .unwrap()["nextCursor"]
+            .is_null()
+    );
+    assert_eq!(
+        acp::catalog(&state, &config, None, Some("saved"))
+            .await
+            .unwrap()["removed_from_agent_history"],
+        true
+    );
+    let turn = acp::prompt(&state, "room", &config, None, "hello", "test")
+        .await
+        .unwrap();
+    assert_eq!(turn["resumable"], true);
+    acp::disconnect(&state, "room").await.unwrap();
+    let turn = acp::prompt(&state, "room", &config, Some("saved"), "again", "test")
+        .await
+        .unwrap();
+    assert_eq!(turn["resumed"], true);
+    let frames: Vec<Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(frames.iter().any(|f| f["method"] == "session/resume"));
+    assert!(frames.iter().any(|f| f["method"] == "session/close"));
+    assert!(!frames.iter().any(|f| f["method"] == "session/load"));
+    config["env"]["DISABLED"] = json!("1");
+    assert!(acp::catalog(&state, &config, None, None).await.is_err());
+    assert!(
+        acp::catalog(&state, &config, None, Some("saved"))
+            .await
+            .is_err()
+    );
+    let raw = std::fs::read_to_string(&log).unwrap();
+    let tail: Vec<Value> = raw
+        .lines()
+        .rev()
+        .take(2)
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(tail.iter().all(|f| f["method"] == "initialize"));
 }

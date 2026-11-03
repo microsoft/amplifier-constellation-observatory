@@ -59,6 +59,8 @@ struct Client {
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     next: u64,
+    auth_methods: Value,
+    auth_attempted: bool,
     #[cfg(unix)]
     pid: i32,
 }
@@ -134,6 +136,8 @@ impl Client {
             output: BufReader::new(child.stdout.take().context("Missing ACP output")?),
             child,
             next: 0,
+            auth_methods: json!([]),
+            auth_attempted: false,
             #[cfg(unix)]
             pid,
         })
@@ -199,8 +203,15 @@ impl Client {
                 .map(|(_, tx)| tx.subscribe())
         });
         let mut update_bytes = 0usize;
+        let mut forms = crate::elicitation::Callbacks::default();
+        let mut known_tools = std::collections::HashSet::new();
         loop {
             let v = tokio::select! {
+                ready=forms.completed(), if !forms.is_empty()=>{
+                    let (callback, result)=ready?;
+                    self.send(json!({"jsonrpc":"2.0","id":callback,"result":result})).await?;
+                    continue;
+                }
                 value=self.read()=>value?,
                 _=cancel_signal(&mut cancellation)=>{
                     if let Some(ctx)=interaction { self.cancel(id,ctx.sid).await; }
@@ -213,12 +224,52 @@ impl Client {
             };
             if v.get("method").is_none() && v["id"] == id {
                 if let Some(error) = v.get("error") {
+                    if error["code"] == -32002
+                        && matches!(method, "session/close" | "session/delete")
+                    {
+                        return Ok(json!({}));
+                    }
                     return Err(crate::acp_auth::rejected(error, method));
                 }
                 return Ok(v["result"].clone());
             }
             if v.get("id").is_some() && v.get("method").is_some() {
-                if v["method"] == "session/request_permission" {
+                if v["method"] == "elicitation/create" {
+                    let result = (|| -> Result<_> {
+                        let ctx = interaction.context("No initiating person")?;
+                        let p = &v["params"];
+                        let session_scope = !ctx.sid.is_empty()
+                            && p["sessionId"] == ctx.sid
+                            && p.get("requestId").is_none();
+                        let request_scope = p["requestId"] == id
+                            && p.get("sessionId").is_none()
+                            && p.get("toolCallId").is_none();
+                        ensure!(session_scope || request_scope, "Invalid elicitation scope");
+                        if let Some(tool) = p.get("toolCallId") {
+                            ensure!(
+                                tool.as_str().is_some_and(|t| known_tools.contains(t)),
+                                "Unknown tool scope"
+                            );
+                        }
+                        ctx.state
+                            .elicitations
+                            .request(
+                                ctx.room,
+                                ctx.actor,
+                                "Agent",
+                                p,
+                                Duration::from_secs(300).min(
+                                    ctx.deadline
+                                        .saturating_duration_since(tokio::time::Instant::now()),
+                                ),
+                            )
+                            .map_err(anyhow::Error::msg)
+                    })();
+                    match result.and_then(|request| forms.start(v["id"].clone(),request)) {
+                        Ok(()) => (),
+                        Err(_) => self.send(json!({"jsonrpc":"2.0","id":v["id"],"error":{"code":-32602,"message":"Unsupported or incorrectly scoped interaction"}})).await?,
+                    }
+                } else if v["method"] == "session/request_permission" {
                     let result = if let Some(ctx) =
                         interaction.filter(|c| v["params"]["sessionId"] == c.sid)
                     {
@@ -261,6 +312,8 @@ impl Client {
                 } else {
                     self.send(json!({"jsonrpc":"2.0","id":v["id"],"error":{"code":-32601,"message":"This observatory client does not offer that capability"}})).await?;
                 }
+            } else if v["method"] == "$/cancel_request" {
+                forms.cancel(&v["params"]["requestId"]);
             } else if v["method"] == "session/update" {
                 if v["params"]["update"]["sessionUpdate"] == "agent_thought_chunk" {
                     continue;
@@ -271,15 +324,74 @@ impl Client {
                     "Too many ACP updates"
                 );
                 if let Some(ctx) = interaction.filter(|c| v["params"]["sessionId"] == c.sid) {
+                    if let Some(tool) = v["params"]["update"]["toolCallId"].as_str()
+                        && v["params"]["update"]["sessionUpdate"] == "tool_call"
+                    {
+                        known_tools.insert(tool.to_owned());
+                    }
                     progress(ctx.state, ctx.room, &v["params"]["update"])?;
                 }
                 updates.push(v["params"].clone());
             }
         }
     }
-    async fn initialize(&mut self) -> Result<Value> {
-        let init=self.request("initialize",json!({"protocolVersion":1,"clientInfo":{"name":"agent-observatory","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{}}),&mut vec![], None).await?;
+    async fn session_request(
+        &mut self,
+        method: &str,
+        params: Value,
+        updates: &mut Vec<Value>,
+        ctx: &Interaction<'_>,
+    ) -> Result<Value> {
+        let first = self
+            .request(method, params.clone(), updates, Some(ctx))
+            .await;
+        if !first
+            .as_ref()
+            .err()
+            .is_some_and(crate::acp_auth::authentication_required)
+            || self.auth_attempted
+        {
+            return first;
+        }
+        self.auth_attempted = true;
+        let choice = crate::acp_auth::choice(&self.auth_methods)
+            .map_err(|_| crate::acp_auth::AuthenticationRequired)?;
+        let request = ctx
+            .state
+            .elicitations
+            .request(
+                ctx.room,
+                ctx.actor,
+                "Agent",
+                &choice,
+                Duration::from_secs(300).min(
+                    ctx.deadline
+                        .saturating_duration_since(tokio::time::Instant::now()),
+                ),
+            )
+            .map_err(anyhow::Error::msg)?;
+        let mut cancellation = ctx
+            .state
+            .cancellations
+            .lock()
+            .unwrap()
+            .get(ctx.room)
+            .map(|(_, tx)| tx.subscribe());
+        let answer = tokio::select! {v=request.wait()=>v,_=cancel_signal(&mut cancellation)=>crate::elicitation::cancelled(),_=self.child.wait()=>anyhow::bail!("Agent disconnected during sign-in")};
+        ensure!(answer["action"] == "accept", "Agent sign-in cancelled");
+        self.request(
+            "authenticate",
+            json!({"methodId":answer["content"]["method_id"]}),
+            updates,
+            Some(ctx),
+        )
+        .await?;
+        self.request(method, params, updates, Some(ctx)).await
+    }
+    async fn initialize(&mut self, ctx: Option<&Interaction<'_>>) -> Result<Value> {
+        let init=self.request("initialize",json!({"protocolVersion":1,"clientInfo":{"name":"agent-observatory","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":if ctx.is_some(){json!({"elicitation":{"form":{},"url":{}}})}else{json!({})}}),&mut vec![], ctx).await?;
         ensure!(init["protocolVersion"] == 1, "Unsupported ACP version");
+        self.auth_methods = init["authMethods"].clone();
         let mut init = init;
         init["_meta"]["io.github.bkrabach.agent-observatory"]["authentication"] =
             crate::acp_auth::authentication(&init);
@@ -289,7 +401,7 @@ impl Client {
 pub async fn probe(state: &AppState, config: &Value) -> ApiResult<Value> {
     let work = async {
         let mut client = Client::start(state, config).await?;
-        client.initialize().await
+        client.initialize(None).await
     };
     tokio::time::timeout(Duration::from_secs(30), work)
         .await
@@ -302,6 +414,82 @@ pub async fn probe(state: &AppState, config: &Value) -> ApiResult<Value> {
                 "ACP negotiation failed; check its executable, account, and working folder",
             )
         })
+}
+/// Operator-only discovery. No transcript or credentials are copied between
+/// clients; this lists only the configured working directory.
+pub async fn catalog(
+    state: &AppState,
+    config: &Value,
+    cursor: Option<&str>,
+    delete: Option<&str>,
+) -> ApiResult<Value> {
+    let work = async {
+        let mut client = Client::start(state, config).await?;
+        let init = client.initialize(None).await?;
+        let capability = if delete.is_some() { "delete" } else { "list" };
+        ensure!(
+            init["agentCapabilities"]["sessionCapabilities"][capability].is_object(),
+            "Agent does not advertise this session operation"
+        );
+        let mut params = json!({"cwd":config.get("session_cwd").unwrap_or(&config["cwd"])});
+        if let Some(cursor) = cursor {
+            ensure!(cursor.len() <= 8192, "Invalid session cursor");
+            params["cursor"] = json!(cursor);
+        }
+        let result = if let Some(sid) = delete {
+            ensure!(!sid.is_empty() && sid.len() <= 1024, "Invalid session id");
+            client
+                .request(
+                    "session/delete",
+                    json!({"sessionId":sid}),
+                    &mut vec![],
+                    None,
+                )
+                .await?
+        } else {
+            client
+                .request("session/list", params.clone(), &mut vec![], None)
+                .await?
+        };
+        if delete.is_some() {
+            return Ok::<_, anyhow::Error>(json!({"removed_from_agent_history":true}));
+        }
+        let entries = result["sessions"]
+            .as_array()
+            .context("Invalid session catalog")?;
+        ensure!(entries.len() <= 1000, "Agent session page exceeds limit");
+        let entries:Vec<Value>=entries.iter().filter(|v|v["cwd"]==params["cwd"]).filter_map(|v|{
+            let sid=v["sessionId"].as_str().filter(|s|!s.is_empty()&&s.len()<=1024)?;
+            Some(json!({"sessionId":sid,"title":v["title"].as_str().unwrap_or("Untitled session").chars().take(200).collect::<String>(),"updatedAt":v["updatedAt"].as_str().unwrap_or("").chars().take(100).collect::<String>()}))
+        }).collect();
+        let next = result["nextCursor"].as_str().filter(|s| s.len() <= 8192);
+        Ok(
+            json!({"sessions":entries,"nextCursor":next,"can_delete":init["agentCapabilities"]["sessionCapabilities"]["delete"].is_object()}),
+        )
+    };
+    tokio::time::timeout(Duration::from_secs(30),work).await.map_err(|_|ApiError::bad("Session operation timed out; inspect the agent before retrying"))?.map_err(|e|ApiError::bad(if crate::acp_auth::authentication_required(&e){"Agent sign-in required; use Talk to complete sign-in first"}else{"Agent session operation unavailable; check its advertised capabilities and connection"}))
+}
+pub async fn disconnect(state: &AppState, context: &str) -> ApiResult<()> {
+    let live = state.acp_clients.lock().unwrap().remove(context);
+    if let Some(live) = live {
+        let mut live = live.lock().await;
+        if live.init["agentCapabilities"]["sessionCapabilities"]["close"].is_object() {
+            let sid = live.sid.clone();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                live.client
+                    .request("session/close", json!({"sessionId":sid}), &mut vec![], None),
+            )
+            .await
+            .map_err(|_| ApiError::bad("Disconnect timed out; the local connection was released"))?
+            .map_err(|_| {
+                ApiError::bad(
+                    "Agent did not confirm closing the session; the local connection was released",
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 pub struct LiveSession {
     client: Client,
@@ -341,23 +529,37 @@ pub async fn prompt(
                 .get(context)
                 .map(|(_, tx)| tx.subscribe());
             let mut client = Client::start(state, config).await?;
+            let setup = Interaction {
+                state,
+                room: context,
+                actor,
+                sid: prior.unwrap_or(""),
+                deadline,
+            };
             let init = tokio::select! {
                 _=cancel_signal(&mut setup_cancel)=>anyhow::bail!("Turn cancelled"),
-                result=client.initialize()=>result?,
+                result=client.initialize(Some(&setup))=>result?,
             };
             let mut updates = vec![];
             let sid = if let Some(prior) = prior {
-                ensure!(
-                    init["agentCapabilities"]["loadSession"] == true,
-                    "This endpoint cannot restore a disconnected session. Its transcript is saved; start a new conversation."
-                );
+                let restore = if init["agentCapabilities"]["sessionCapabilities"]["resume"]
+                    .is_object()
+                {
+                    "session/resume"
+                } else if init["agentCapabilities"]["loadSession"] == true {
+                    "session/load"
+                } else {
+                    anyhow::bail!(
+                        "This endpoint cannot restore a disconnected session. Its transcript is saved; start a new conversation."
+                    )
+                };
                 tokio::select! {
                   _=cancel_signal(&mut setup_cancel)=>anyhow::bail!("Turn cancelled"),
-                  result=client.request(
-                        "session/load",
+                  result=client.session_request(
+                        restore,
                         json!({"sessionId":prior,"cwd":config.get("session_cwd").unwrap_or(&config["cwd"]),"mcpServers":[]}),
                         &mut updates,
-                        None,
+                        &setup,
                     )=>result?,
                 };
                 resumed = true;
@@ -365,11 +567,11 @@ pub async fn prompt(
             } else {
                 let created = tokio::select! {
                   _=cancel_signal(&mut setup_cancel)=>anyhow::bail!("Turn cancelled"),
-                  result=client.request(
+                  result=client.session_request(
                         "session/new",
                         json!({"cwd":config.get("session_cwd").unwrap_or(&config["cwd"]),"mcpServers":[]}),
                         &mut updates,
-                        None,
+                        &setup,
                     )=>result?,
                 };
                 created["sessionId"]
@@ -416,7 +618,7 @@ pub async fn prompt(
         live.used_at = crate::state::now_ms();
         let reply = reply_text(&updates, &sid);
         Ok::<_, anyhow::Error>(
-            json!({"session_id":sid,"resumed":resumed,"resumable":live.init["agentCapabilities"]["loadSession"]==true,"reply":reply,"media":reply_media(&updates,&sid),"stop_reason":result["stopReason"],"capabilities":live.init["agentCapabilities"],"updates":updates}),
+            json!({"session_id":sid,"resumed":resumed,"resumable":live.init["agentCapabilities"]["loadSession"]==true || live.init["agentCapabilities"]["sessionCapabilities"]["resume"].is_object(),"reply":reply,"media":reply_media(&updates,&sid),"stop_reason":result["stopReason"],"capabilities":live.init["agentCapabilities"],"updates":updates}),
         )
     };
     let result = match tokio::time::timeout(Duration::from_secs(605), work).await {

@@ -41,7 +41,10 @@ fn valid(key: &str, v: &Value) -> bool {
         "selected_id" | "session_id" | "permission_details" | "experiment_id" => {
             v.is_null() || v.as_str().is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
         }
-        "experiment_measurements" => v.is_boolean(),
+        "experiment_measurements" | "agent_history_open" => v.is_boolean(),
+        "agent_history_cursor" => v.is_null() || text(v, 8192),
+        "agent_history_delete" => v.is_null() || text(v, 1024),
+        "elicitation_drafts" => v.is_object() && v.to_string().len() <= 65536,
         "tab" => v.as_str().is_some_and(|s| {
             [
                 "overview",
@@ -131,6 +134,10 @@ pub fn commands(s: &AppState, id: &str, body: &Value) -> ApiResult<Value> {
         v[k] = c["value"].clone();
     }
     // Navigating to another individual does not carry over the prior individual's chat.
+    if v["selected_id"] != previous_selection {
+        v["agent_history_cursor"] = Value::Null;
+        v["agent_history_delete"] = Value::Null;
+    }
     if v["selected_id"] != previous_selection
         && !commands.iter().any(|c| c["field"] == "session_id")
     {
