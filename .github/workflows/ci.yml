@@ -22,6 +22,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check release retries preserve published assets
+        run: python3 scripts/test-upload-release.py
       - name: Install prerequisites
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
       - name: Install Rust
@@ -57,14 +59,11 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
       - name: Create draft release and attach verified builds
-        run: |
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Agent Observatory $RELEASE_TAG" --notes "Independent fleet surface with optional negotiated management. Standalone Linux x86-64 and ARM64 executables."
-          fi
-          gh release upload "$RELEASE_TAG" dist/*
+        run: python3 scripts/upload-release.py --tag "$RELEASE_TAG" --directory dist
