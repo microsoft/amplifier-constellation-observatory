@@ -88,9 +88,8 @@ fn valid(key: &str, v: &Value) -> bool {
                 && m.iter().all(|(k, v)| match k.as_str() {
                     "label" | "kind" | "address" | "provider" | "access" | "command" | "cwd"
                     | "host_id" | "recipe_id" | "name" | "home" | "version" | "credential_ref"
-                    | "ui_url" | "job_id" | "embedded_route" | "memory_details" | "run_report" => {
-                        text(v, 4096)
-                    }
+                    | "ui_url" | "job_id" | "embedded_route" | "embedded_work"
+                    | "memory_details" | "run_report" => text(v, 4096),
                     "args" | "configuration" | "prompt" | "host_config" | "operation_body" => {
                         text(v, 32000)
                     }
