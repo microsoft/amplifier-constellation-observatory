@@ -4,7 +4,7 @@ def callback(i,method,params):
  send(dict(id=i,method=method,params=params)); return json.loads(sys.stdin.readline())
 for line in sys.stdin:
  r=json.loads(line);m=r.get('method')
- if m=='initialize': result={'protocolVersion':1,'agentCapabilities':{'loadSession':True}}; assert r['params']['clientCapabilities']=={}
+ if m=='initialize': result={'protocolVersion':1,'agentCapabilities':{'loadSession':True}}; assert r['params']['clientCapabilities']=={'elicitation':{'form':{},'url':{}}}
  elif m in ('session/new','session/load'): result={'sessionId':'session'}
  elif m=='session/prompt':
   send(dict(method='session/update',params={'sessionId':'session','update':{'sessionUpdate':'agent_message_chunk','content':{'text':'Preparing.'}}}))

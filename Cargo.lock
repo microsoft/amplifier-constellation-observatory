@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-observatory"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -24,6 +24,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "time",
  "tokio",
  "tower",
  "uuid",

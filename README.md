@@ -6,6 +6,8 @@ A standalone place to connect, create, inspect, and work with independent agents
 
 An ordinary ACP stdio command is enough to attach an agent. An optional management provider adds configuration, status, responsibilities, and links to the agent's own dashboard. Machine installation is a separate host grant, using explicit versioned installer recipes.
 
+Work cards summarize acceptance criteria, delivered versions and named reviewers when the agent provides that optional contract. **Inspect work and review** opens the exact responsibility in the agent’s own dashboard. The embedding command and selected work are programmatic view state; authentication and approval still belong to that agent.
+
 When an installation advertises them, Memory shows its attributed knowledge and conflicts, and Background work shows saved progress, bounded turns and reports awaiting review. Configuration can open the agent's own model/capabilities editor. The fleet discovers these optional interfaces without assuming that an ACP agent shares its implementation. Memory access, work observation and work execution have separate grants.
 
 ## Install on Linux

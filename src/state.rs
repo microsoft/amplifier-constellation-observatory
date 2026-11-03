@@ -20,6 +20,7 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 pub struct AppState {
+    pub elicitations: crate::elicitation::Elicitations,
     pub permissions: crate::permissions::Permissions,
     pub home: PathBuf,
     pub config: Config,
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGE
         )?;
         Ok(Arc::new(Self {
             permissions: crate::permissions::Permissions::default(),
+            elicitations: crate::elicitation::Elicitations::default(),
             home,
             config,
             db: Mutex::new(db),

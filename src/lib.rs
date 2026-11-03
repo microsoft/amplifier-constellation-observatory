@@ -3,6 +3,7 @@ pub mod acp_auth;
 pub mod auth;
 pub mod config;
 pub mod context;
+pub mod elicitation;
 pub mod error;
 pub mod experiments;
 pub mod permissions;

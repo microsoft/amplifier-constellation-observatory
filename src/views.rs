@@ -41,7 +41,10 @@ fn valid(key: &str, v: &Value) -> bool {
         "selected_id" | "session_id" | "permission_details" | "experiment_id" => {
             v.is_null() || v.as_str().is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
         }
-        "experiment_measurements" => v.is_boolean(),
+        "experiment_measurements" | "agent_history_open" => v.is_boolean(),
+        "agent_history_cursor" => v.is_null() || text(v, 8192),
+        "agent_history_delete" => v.is_null() || text(v, 1024),
+        "elicitation_drafts" => v.is_object() && v.to_string().len() <= 65536,
         "tab" => v.as_str().is_some_and(|s| {
             [
                 "overview",
@@ -88,9 +91,8 @@ fn valid(key: &str, v: &Value) -> bool {
                 && m.iter().all(|(k, v)| match k.as_str() {
                     "label" | "kind" | "address" | "provider" | "access" | "command" | "cwd"
                     | "host_id" | "recipe_id" | "name" | "home" | "version" | "credential_ref"
-                    | "ui_url" | "job_id" | "embedded_route" | "memory_details" | "run_report" => {
-                        text(v, 4096)
-                    }
+                    | "ui_url" | "job_id" | "embedded_route" | "embedded_work"
+                    | "memory_details" | "run_report" => text(v, 4096),
                     "args" | "configuration" | "prompt" | "host_config" | "operation_body" => {
                         text(v, 32000)
                     }
@@ -132,6 +134,10 @@ pub fn commands(s: &AppState, id: &str, body: &Value) -> ApiResult<Value> {
         v[k] = c["value"].clone();
     }
     // Navigating to another individual does not carry over the prior individual's chat.
+    if v["selected_id"] != previous_selection {
+        v["agent_history_cursor"] = Value::Null;
+        v["agent_history_delete"] = Value::Null;
+    }
     if v["selected_id"] != previous_selection
         && !commands.iter().any(|c| c["field"] == "session_id")
     {
