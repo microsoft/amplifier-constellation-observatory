@@ -9,7 +9,7 @@ const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright');
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const binary=process.env.OBSERVATORY_BINARY||path.join(root,'target/debug/agent-observatory');
 const home=await fs.mkdtemp(path.join(os.tmpdir(),'observatory-management-'));
-let child,browser,fixture,advertised=false,executionPayload;
+let child,browser,fixture,advertised=false,executionPayload,updatePayload;
 const errors=[],checks=[];
 const pass=s=>{checks.push(s);console.log(`PASS ${s}`);};
 try {
@@ -20,13 +20,14 @@ try {
   const memoryId='d2f00bd9-ab40-4eb6-b333-a8dd8f833f48',workId='13408493-34ab-4ee4-b723-3edd8b3e3cf6',runId='a3c04fb0-c176-4399-97ac-7f9a2d9e8586';
   const memory={id:memoryId,key:'Release date',revision:2,state:'conflicted',audience:{kind:'conversation',provider_id:'fixture-chat',conversation_id:'work'},selected_candidate_id:null,candidates:[{id:'a',statement:'Release on **Monday**.',sources:[{note:'Initial planning agreement',recorded_by:'fixture-human',recorded_at:1793500000000}]},{id:'b',statement:'Release on **Tuesday**.',sources:[{note:'Later correction',recorded_by:'fixture-human',recorded_at:1793500001000}]}]};
   const scheduler={settings:{enabled:true,paused:false,concurrency:1},limits:{turns_per_run:12},runs:[{id:runId,work_id:workId,state:'paused_limit',work_snapshot:{title:'Prepare the product'},turns_completed:3,budget:{max_turns:3,max_seconds:120},tool_calls:7,progress:'Plan and checks saved; implementation continues next.',report:'## Product report\n\nA **checked** planning artifact awaits review.'}]};
-  const operations=[{path:'work',methods:['GET']},{path:'memory',methods:['GET','POST']},{path:'memory/{id}',methods:['GET']},{path:'memory/{id}/commands',methods:['POST']},{path:'scheduler',methods:['GET','PUT']},{path:'work/{id}/execution',methods:['GET','POST']},{path:'config',methods:['GET','PUT']},{path:'native-config',methods:['GET','PUT']},{path:'native-config/schema',methods:['GET']},{path:'native-config/validate',methods:['POST']}];
+  const operations=[{path:'updates',methods:['GET','POST']},{path:'updates/policy',methods:['PUT']},{path:'work',methods:['GET']},{path:'memory',methods:['GET','POST']},{path:'memory/{id}',methods:['GET']},{path:'memory/{id}/commands',methods:['POST']},{path:'scheduler',methods:['GET','PUT']},{path:'work/{id}/execution',methods:['GET','POST']},{path:'config',methods:['GET','PUT']},{path:'native-config',methods:['GET','PUT']},{path:'native-config/schema',methods:['GET']},{path:'native-config/validate',methods:['POST']}];
   fixture=https.createServer({key:await fs.readFile(config.tls_key),cert:await fs.readFile(config.tls_cert)},async(req,res)=>{
     if(req.url==='/') {res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Independent agent</title><p>Independent agent dashboard</p><script>addEventListener("message",e=>{if(e.data?.protocol==="agent-instance.ui/1"&&e.data.type==="command")document.body.textContent="Selected agent screen: "+e.data.command.route+(e.data.command.work_id?" / "+e.data.command.work_id:"");});</script>');return;}
     if(req.headers.authorization!=='Bearer fixture-value'){res.writeHead(401);res.end('{}');return;}
     let text='';for await(const chunk of req)text+=chunk;
     let value;
     if(req.url==='/api/v1/descriptor')value={instance_id:'management-fixture',operations:advertised?operations:[],capabilities:advertised?['agent-instance.memory/1','agent-instance.scheduler/1','agent-instance.native-config/1']:[]};
+    else if(req.url==='/api/v1/updates'){if(req.method==='POST'){updatePayload=JSON.parse(text);value={pending:true};}else value={schema:'constellation.installation-updates/1',helper_connected:true,policy:{check_minutes:60,channel:'stable',agent_initiated:true},helper:{state:'up_to_date',components:[{id:'runtime',version:'1.2.3',available:false}]}};}
     else if(req.url==='/api/v1/status')value={instance_id:'management-fixture',version:'fixture'};
     else if(req.url==='/api/v1/memory')value={items:[memory]};
     else if(req.url==='/api/v1/work')value={items:[{id:workId,title:'Deliver fixture',goal:'Review the requested file',state:'review',completion_contract:{brief:{acceptance_criteria:['Correct file'],reviewer_actors:['fixture-reviewer']},artifact_set:{artifacts:[{artifact:'file'}]}}}]};
@@ -49,7 +50,12 @@ try {
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(base);await page.getByRole('button',{name:'Open',exact:true}).click();
   assert.equal(await page.getByRole('button',{name:'Memory',exact:true}).count(),0);assert.equal(await page.getByRole('button',{name:'Background work',exact:true}).count(),0);
   pass('Optional controls stay hidden until this installation advertises them');
-  advertised=true;await page.getByRole('button',{name:'Check connection',exact:true}).click();await page.getByRole('button',{name:'Memory',exact:true}).click();
+  advertised=true;await page.getByRole('button',{name:'Check connection',exact:true}).click();
+  await page.getByRole('button',{name:'Updates',exact:true}).click();await page.getByText('1.2.3',{exact:true}).waitFor();
+  await Promise.all([page.waitForResponse(r=>r.url().endsWith('/operations/request-update')&&r.status()===200),page.getByRole('button',{name:'Update now',exact:true}).click()]);assert.equal(updatePayload.action,'update');assert.match(updatePayload.request_id,/^[0-9a-f-]{36}$/);
+  await page.getByRole('button',{name:'Machines',exact:true}).click();await page.getByRole('button',{name:'Check status',exact:true}).click();await page.getByRole('button',{name:'Open updates',exact:true}).click();await page.getByText('1.2.3',{exact:true}).waitFor();
+  pass('Per-agent updates and fleet inventory use the installation API without a shared updater');
+  await page.getByRole('button',{name:'Memory',exact:true}).click();
   await page.getByRole('heading',{name:'Release date',exact:true}).waitFor();assert.equal(await page.locator('.memory-candidate strong').count(),2);await page.getByRole('button',{name:'Show sources',exact:true}).click();await page.getByText('Initial planning agreement',{exact:false}).waitFor();
   const vid=await page.evaluate(()=>sessionStorage.getItem('observatory-view'));let view=await api(`views/${vid}`,undefined,'GET');assert.equal(view.draft.memory_details,memoryId);
   await page.reload();await page.getByText('Initial planning agreement',{exact:false}).waitFor();

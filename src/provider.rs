@@ -30,6 +30,9 @@ pub fn operations(endpoint: &Value) -> Vec<Operation> {
     ];
     match provider {
         "agent-instance" => ops.extend([
+            op("updates", "GET", "updates", "observe"),
+            op("request-update", "POST", "updates", "manage"),
+            op("update-policy", "PUT", "updates/policy", "manage"),
             op("activity", "GET", "activity", "observe"),
             op("sessions", "GET", "sessions", "observe"),
             op("connections", "GET", "connections", "observe"),
@@ -315,6 +318,9 @@ pub fn available_operations(endpoint: &Value, descriptor: &Value) -> Vec<Operati
 }
 fn optional_operation(id: &str) -> bool {
     [
+        "updates",
+        "request-update",
+        "update-policy",
         "memory",
         "remember",
         "memory-item",

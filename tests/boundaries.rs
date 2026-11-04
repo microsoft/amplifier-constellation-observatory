@@ -950,7 +950,16 @@ fn provider_discovery_does_not_offer_missing_remote_operations() {
     assert!(!ops.iter().any(|o| o.id == "memory"));
     let legacy = provider::available_operations(&endpoint, &json!({}));
     assert!(!legacy.iter().any(|o| {
-        ["memory", "scheduler", "native-config", "execute-work"].contains(&o.id.as_str())
+        [
+            "memory",
+            "scheduler",
+            "native-config",
+            "execute-work",
+            "updates",
+            "request-update",
+            "update-policy",
+        ]
+        .contains(&o.id.as_str())
     }));
     let extended = provider::available_operations(
         &endpoint,
@@ -979,6 +988,20 @@ fn provider_discovery_does_not_offer_missing_remote_operations() {
         !provider::operations(&json!({"management":{"provider":"slack-adapter"}}))
             .iter()
             .any(|o| o.id == "validate-config")
+    );
+    let update_ops = provider::available_operations(
+        &endpoint,
+        &json!({"operations":[{"path":"updates","methods":["GET","POST"]},{"path":"updates/policy","methods":["PUT"]}]}),
+    );
+    assert!(
+        update_ops
+            .iter()
+            .any(|o| o.id == "updates" && o.access == "observe")
+    );
+    assert!(
+        update_ops
+            .iter()
+            .any(|o| o.id == "request-update" && o.access == "manage")
     );
     let generic = json!({"management":{"provider":"generic-json","operations":[{"id":"descriptor","method":"GET","path":"meta","access":"observe"}]}});
     let ops = provider::operations(&generic);

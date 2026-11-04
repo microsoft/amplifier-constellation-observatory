@@ -48,6 +48,7 @@ fn valid(key: &str, v: &Value) -> bool {
         "tab" => v.as_str().is_some_and(|s| {
             [
                 "overview",
+                "updates",
                 "sessions",
                 "memory",
                 "background",
