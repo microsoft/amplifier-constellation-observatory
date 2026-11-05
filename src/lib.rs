@@ -6,6 +6,7 @@ pub mod context;
 pub mod elicitation;
 pub mod error;
 pub mod experiments;
+pub mod intake;
 pub mod permissions;
 pub mod provider;
 pub mod provision;

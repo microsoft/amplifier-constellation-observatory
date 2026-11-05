@@ -102,6 +102,62 @@ These new views are programmable: use `tab: "memory"` or `"background"`; `draft.
 
 Create with `{endpoint_id,title?}`. Prompt with `{text,request_id:<UUID>}`. Duplicate identical requests return the saved record; a reused request ID with different text is rejected. A prompt is asynchronous and persists its running/result state before the UI disconnects. Poll the session for completion. No automatic retries occur after an ambiguous failure.
 
+Send remains available during work. Every accepted message has a stable
+`request_id`, author, increasing `sequence`, and durable `delivery` state. Retries
+with the same ID, text and actor return the existing message; changing the text
+or actor is rejected. Each conversation has one worker and at most one normal
+ACP prompt in flight. Up to 32 pending inputs and 1 MiB of pending text are
+accepted; excess messages are rejected before recording acceptance. Individual
+messages remain limited to 100,000 UTF-8 bytes.
+
+An endpoint advertising `_meta.steering.supported` and `promptRequired` idle
+behavior receives `_session/steering` with the stable input ID, original author,
+sequence, and existing ACP session. Only one steering request is unresolved at a
+time. Native receipt updates/final receipts are applied only to the matching
+conversation and original turn. Generic ACP uses a FIFO next-prompt queue.
+`promptRequired` is the only automatic steering-to-prompt fallback; failed,
+malformed, timed-out, unexpected `startedNewTurn`, and lost outcomes become
+uncertain and are never blindly replayed. The original prompt can complete while
+an outstanding steering response settles.
+
+| Delivery value | Meaning |
+| --- | --- |
+| `received` | Saved locally, waiting to send |
+| `submitted` | Sending; acceptance is not yet known |
+| `received_remote`, `remoteQueued` | Agent acknowledged input or model queued it; incorporation is not claimed |
+| `incorporated` | An explicit runtime receipt confirms inclusion in model context |
+| `completed` | A normal prompt completed, displayed as “Sent” |
+| `delivered` | A generic steering acknowledgment and normal turn completion, without a model-incorporation claim |
+| `promptRequired` | Definite unapplied input waiting for an ordinary next prompt |
+| `unknown` | Delivery needs review; do not replay |
+| `notAccepted`, `cancelled` | Not admitted or explicitly stopped; do not retry automatically |
+
+On process restart, unfinished submitted inputs become `unknown`; unsent inputs
+keep their order. `POST sessions/{id}/inputs/resume` with
+`{acknowledge_unknown:true}` is an explicit decision to continue **without
+replaying uncertain inputs**, after inspecting actual work. If the endpoint
+advertises `_session/input_receipts` and `_session/acknowledge_inputs`, this
+loads the existing session, reads its receipts and acknowledges the matching
+uncertain inputs with `proceed_without_replay`. It performs recovery even with
+no new queued message and does not issue a model prompt for that recovery.
+Unknown transcript entries retain their truthful state plus `acknowledged:true`.
+Without those optional methods, the local acknowledgment permits only the
+saved, definitely unsent queue to continue. Unsupported restoration still fails
+visibly; it never creates a replacement session and replays history.
+
+Use `{acknowledge_unknown:false}` to resume an interrupted but definitely unsent
+queue. This route requires `interact` and ordinary browser CSRF protection.
+Queued inputs retain their original credential reference privately. Expiry,
+revocation or scope removal before dispatch changes their state to `notAccepted`;
+recovery does not renew authority. Endpoint revision changes also block queued
+work. Ordinary follow-up messages never cancel the current prompt or its pending
+approval; explicit Stop cancels the active turn and pending local inputs.
+
+All controls are API-accessible. The browser stores unconfirmed sends with their
+original request ID in session storage, preserves the composer draft across
+polling/refresh, and offers exact-message retry after a lost HTTP response.
+Receipt labels and recovery controls render from the saved session record.
+
 Each conversation retains a separate live ACP process. Inactive processes expire after 15 minutes; at most 32 are held. An endpoint advertising `sessionCapabilities.resume` can restore without replay; otherwise `loadSession` restores with replay. Other endpoints can carry on through their existing connection; after it closes, their saved transcript remains readable and a new conversation is required. The Observatory does not claim to restore a session by silently replaying text into a new one.
 
 The client supports text, live tool/plan progress, explicit permission decisions, form/URL elicitation, agent-method authentication, and saved session loading. It advertises no client filesystem/terminal callbacks; native agent-side tools remain governed by that endpoint. Prompts time out after ten minutes. Stop and timeout send standard ACP `session/cancel`, allow a short completion window, then close the subprocess; work already performed is not undone. Closing an idle connection preserves the transcript.

@@ -74,6 +74,7 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/sessions/{id}", get(session))
         .route("/api/v1/endpoints/{id}/acp-sessions", post(agent_sessions))
         .route("/api/v1/sessions/{id}/prompt", post(prompt))
+        .route("/api/v1/sessions/{id}/inputs/resume", post(resume_inputs))
         .route("/api/v1/sessions/{id}/close", post(close_session))
         .route(
             "/api/v1/sessions/{id}/elicitations/{request}",
@@ -577,18 +578,26 @@ async fn close_session(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "interact", true)?;
-    let mut session = s.read("sessions", &id)?;
     {
+        let _gate = s.talk_gate.lock().unwrap();
+        let mut session = s.read("sessions", &id)?;
         let mut active = s.active_sessions.lock().unwrap();
         if !active.insert(id.clone()) {
             return Err(ApiError::busy());
         }
+        session["status"] = json!("disconnecting");
+        if let Err(error) = s.save("sessions", session.clone(), session["revision"].as_u64()) {
+            active.remove(&id);
+            return Err(error);
+        }
     }
     let closed = acp::disconnect(&s, &id).await;
+    let _gate = s.talk_gate.lock().unwrap();
     s.active_sessions.lock().unwrap().remove(&id);
-    closed?;
+    let mut session = s.read("sessions", &id)?;
     session["status"] = json!("disconnected");
     let v = s.save("sessions", session.clone(), session["revision"].as_u64())?;
+    closed?;
     Ok(Json(v))
 }
 async fn decide_elicitation(
@@ -655,133 +664,23 @@ async fn prompt(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let p = auth::check(&s, &h, "interact", true)?;
-    let text = body["text"].as_str().unwrap_or("").trim().to_owned();
-    let request_id = body["request_id"].as_str().unwrap_or("").to_owned();
-    if text.is_empty() || text.len() > 100000 || uuid::Uuid::parse_str(&request_id).is_err() {
-        return Err(ApiError::bad(
-            "A message and unique request ID are required",
-        ));
-    }
-    let mut session = s.read("sessions", &id)?;
-    if session["agent_history_removed"] == true {
-        return Err(ApiError::bad(
-            "This agent session was removed. Its client transcript remains readable; start a new conversation.",
-        ));
-    }
-    let messages = session["messages"].as_array().cloned().unwrap_or_default();
-    if let Some(old) = messages
-        .iter()
-        .find(|m| m["request_id"] == request_id && m["role"] == "user")
-    {
-        if old["text"] != text {
-            return Err(ApiError::bad(
-                "This request ID belongs to a different message",
-            ));
-        }
-        return Ok(Json(session));
-    }
-    let endpoint = s.read("endpoints", session["endpoint_id"].as_str().unwrap_or(""))?;
-    if endpoint["revision"] != session["endpoint_revision"] {
-        return Err(ApiError::bad(
-            "The endpoint configuration changed. Start a new conversation to use it.",
-        ));
-    }
-    let permit = s
-        .operation_gate
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError::busy())?;
-    {
-        let mut active = s.active_sessions.lock().unwrap();
-        if !active.insert(id.clone()) {
-            return Err(ApiError::busy());
-        }
-    }
-    session["messages"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"role":"user","text":text,"request_id":request_id,"at":now_ms()}));
-    session["status"] = json!("running");
-    session.as_object_mut().unwrap().remove("error");
-    session.as_object_mut().unwrap().remove("progress");
-    let session = match s.save("sessions", session.clone(), session["revision"].as_u64()) {
-        Ok(v) => v,
-        Err(e) => {
-            s.active_sessions.lock().unwrap().remove(&id);
-            return Err(e);
-        }
-    };
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    s.cancellations
-        .lock()
-        .unwrap()
-        .insert(id.clone(), (p.actor.clone(), cancel_tx));
-    s.progress.lock().unwrap().insert(
-        id.clone(),
-        json!({"text":"","tools":[],"plan":[],"revision":0}),
-    );
-    let result = session.clone();
-    tokio::spawn(async move {
-        let _permit = permit;
-        let previous = session["acp_session_id"].as_str();
-        let response = acp::prompt(&s, &id, &endpoint["acp"], previous, &text, &p.actor).await;
-        let response = if *cancel_rx.borrow() {
-            Err(ApiError::bad(
-                "You stopped this turn. Work already performed is not undone.",
-            ))
-        } else {
-            response
-        };
-        if response.is_err() {
-            s.acp_clients.lock().unwrap().remove(&id);
-        }
-        let progress = s.progress.lock().unwrap().remove(&id);
-        s.cancellations.lock().unwrap().remove(&id);
-        let mut current = s.read("sessions", &id).unwrap_or(session);
-        if let Some(mut progress) = progress {
-            if response.is_err()
-                && let Some(tools) = progress["tools"].as_array_mut()
-            {
-                for tool in tools {
-                    if matches!(tool["status"].as_str(), Some("pending" | "in_progress")) {
-                        // This is the client's final observation, not a claim
-                        // that any side effect already performed was undone.
-                        tool["status"] = json!(if *cancel_rx.borrow() {
-                            "cancelled"
-                        } else {
-                            "interrupted"
-                        });
-                    }
-                }
-            }
-            current["progress"] = progress;
-        }
-        match response {
-            Ok(r) => {
-                current["acp_session_id"] = r["session_id"].clone();
-                current["resumable"] = r["resumable"].clone();
-                current["status"] = json!("idle");
-                current["messages"].as_array_mut().unwrap().push(json!({"role":"assistant","text":r["reply"],"media":r["media"],"stop_reason":r["stop_reason"],"request_id":request_id,"at":now_ms()}));
-            }
-            Err(e) => {
-                current["status"] = json!(if *cancel_rx.borrow() {
-                    "cancelled"
-                } else {
-                    "failed"
-                });
-                current["error"] = json!(e.1);
-            }
-        }
-        let _ = s.save("sessions", current.clone(), current["revision"].as_u64());
-        let _ = s.audit(
-            "acp.turn_finished",
-            Some(&id),
-            json!({"actor":p.actor,"endpoint_id":endpoint["id"],"status":current["status"]}),
-        );
-        s.active_sessions.lock().unwrap().remove(&id);
-    });
-    Ok(Json(result))
+    Ok(Json(crate::intake::submit(s, &id, &p, &body)?))
 }
+async fn resume_inputs(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let p = auth::check(&s, &h, "interact", true)?;
+    Ok(Json(crate::intake::resume(
+        s,
+        &id,
+        &p.actor,
+        body["acknowledge_unknown"] == true,
+    )?))
+}
+
 fn link_body(s: &AppState, b: &Value) -> ApiResult<Value> {
     let v = allowed(b, &["label", "from", "to", "relation", "notes"])?;
     for key in ["from", "to"] {
