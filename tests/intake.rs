@@ -119,6 +119,59 @@ fn user<'a>(s: &'a Value, text: &str) -> &'a Value {
 }
 
 #[tokio::test]
+async fn remote_queue_survives_delayed_receipts_and_ack_without_false_completion() {
+    for mode in ["remote-queued", "remote-ack-only"] {
+        let (dir, _state, app, token, sid) = setup(mode).await;
+        send(&app, &token, &sid, "approval").await;
+        let pending = wait(&app, &token, &sid, |s| {
+            s["permissions"].as_array().is_some_and(|p| !p.is_empty())
+        })
+        .await;
+        send(&app, &token, &sid, "unincorporated").await;
+        wait(&app, &token, &sid, |_| {
+            journal(&dir).iter().any(|e| e["kind"] == "queued-chain")
+        })
+        .await;
+        // Let the complete delayed receipt sequence reach the durable ledger.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let during = api(
+            &app,
+            &token,
+            "GET",
+            &format!("/sessions/{sid}"),
+            Value::Null,
+        )
+        .await
+        .1;
+        assert_eq!(
+            user(&during, "unincorporated")["delivery"],
+            "remoteQueued",
+            "{mode}: {during}"
+        );
+        let permission = pending["permissions"][0]["id"].as_str().unwrap();
+        assert_eq!(
+            api(
+                &app,
+                &token,
+                "POST",
+                &format!("/sessions/{sid}/permissions/{permission}"),
+                json!({"option_id":"once"})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let finished = wait(&app, &token, &sid, |s| s["status"] == "needs_review").await;
+        assert_eq!(user(&finished, "unincorporated")["delivery"], "unknown");
+        let logs = journal(&dir);
+        assert_eq!(logs.iter().filter(|e| e["kind"] == "prompt").count(), 1);
+        assert_eq!(logs.iter().filter(|e| e["kind"] == "steer").count(), 1);
+        assert_eq!(logs.iter().filter(|e| e["kind"] == "effect").count(), 1);
+        assert_eq!(logs.iter().filter(|e| e["kind"] == "cancel").count(), 0);
+    }
+}
+
+#[tokio::test]
 async fn repeated_updates_share_one_turn_effect_and_keep_approval_live() {
     let (dir, _state, app, t, sid) = setup("native").await;
     send(&app, &t, &sid, "approval").await;

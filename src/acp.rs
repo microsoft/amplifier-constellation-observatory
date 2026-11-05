@@ -299,6 +299,24 @@ impl Client {
             {
                 let (_, input, _) = pending.take().unwrap();
                 if let Some(ctx) = interaction {
+                    // Some peers report provider queue state only in the
+                    // steering acknowledgment, before streaming any receipt.
+                    let acknowledgment = &v["result"]["_meta"]["steering"];
+                    if v["result"]["outcome"] == "injected"
+                        && let Some(root) = ctx.input_id
+                        && acknowledgment["inputId"]
+                            .as_str()
+                            .is_none_or(|id| id == input)
+                    {
+                        crate::intake::receipt(
+                            ctx.state,
+                            ctx.room,
+                            root,
+                            &json!({
+                                "inputId":input,"state":acknowledgment["state"]
+                            }),
+                        )?;
+                    }
                     let status = match v["result"]["outcome"].as_str() {
                         Some("injected") => "received_remote",
                         Some("promptRequired") => {

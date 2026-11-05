@@ -463,6 +463,11 @@ pub fn receipt(state: &AppState, room: &str, root: &str, r: &Value) -> ApiResult
                 m["delivery"].as_str(),
                 Some("incorporated" | "notAccepted" | "unknown")
             );
+            // A provider queue is stronger evidence than a delayed transport
+            // receipt. Only incorporation or a terminal outcome resolves it.
+            if m["delivery"] == "remoteQueued" && matches!(status, "received" | "submitted") {
+                return;
+            }
             if !terminal || matches!(status, "unknown" | "incorporated" | "notAccepted") {
                 m["delivery"] = json!(if status == "received" {
                     "received_remote"

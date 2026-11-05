@@ -79,6 +79,17 @@ while True:
             send(id=rid, result={"outcome": "failed"})
         elif mode == "malformed":
             send(id=rid, result={"outcome": "invented"})
+        elif mode in ("remote-queued", "remote-ack-only"):
+            def receipt(state):
+                send(method="session/update", params={"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ""}, "_meta": {"io.github.bkrabach.agent-runtime": {"inputReceipt": {"inputId": meta["inputId"], "state": state}}}}})
+            if mode == "remote-queued":
+                receipt("remoteQueued")
+                receipt("received")
+                receipt("submitted")
+            send(id=rid, result={"outcome": "injected", "_meta": {"steering": {"inputId": meta["inputId"], "state": "remoteQueued"}}})
+            receipt("received")
+            receipt("submitted")
+            record("queued-chain")
         else:
             updates.append(text)
             # Incorporation can precede the request acknowledgment.
