@@ -845,7 +845,7 @@ async fn run_input(
             )
             .await?;
         live.used_at = crate::state::now_ms();
-        let reply = reply_text(&updates, &sid);
+        let reply = reply_text(&updates, &sid)?;
         Ok::<_, anyhow::Error>(
             json!({"session_id":sid,"resumed":resumed,"resumable":live.init["agentCapabilities"]["loadSession"]==true || live.init["agentCapabilities"]["sessionCapabilities"]["resume"].is_object(),"reply":reply,"media":reply_media(&updates,&sid),"stop_reason":result["stopReason"],"capabilities":live.init["agentCapabilities"],"updates":updates}),
         )
@@ -930,30 +930,18 @@ fn progress(state: &AppState, room: &str, update: &Value) -> Result<()> {
         .or_insert_with(|| json!({"text":"","tools":[],"plan":[],"revision":0}));
     match update["sessionUpdate"].as_str() {
         Some("agent_message_chunk") => {
-            if let Some(m) = media_block(&update["content"]) {
-                if !p["media"].is_array() {
-                    p["media"] = json!([]);
-                }
-                let a = p["media"].as_array_mut().unwrap();
-                ensure!(a.len() < 8, "Too many generated files");
-                a.push(m);
-            }
-            if let Some(text) = update["content"]["text"].as_str() {
-                let mut current = p["text"].as_str().unwrap_or("").to_owned();
-                if p["after_tool"] == true && !current.is_empty() && !current.ends_with("\n\n") {
-                    current.push_str("\n\n");
-                }
-                ensure!(
-                    current.len() + text.len() <= 2 * 1024 * 1024,
-                    "Response too large"
-                );
-                current.push_str(text);
-                p["text"] = json!(current);
-                p["after_tool"] = json!(false);
-            }
+            let mut answer: crate::answer::Answer =
+                serde_json::from_value(p["answer"].clone()).unwrap_or_default();
+            answer.observe(update)?;
+            p["text"] = answer.text().into();
+            p["answer"] = serde_json::to_value(answer)?;
+            p["after_tool"] = false.into();
         }
         Some("tool_call" | "tool_call_update") => {
-            p["after_tool"] = json!(true);
+            let mut answer: crate::answer::Answer =
+                serde_json::from_value(p["answer"].clone()).unwrap_or_default();
+            answer.observe(update)?;
+            p["answer"] = serde_json::to_value(answer)?;
             if let Some(id) = update["toolCallId"].as_str().filter(|id| id.len() <= 1024) {
                 let tools = p["tools"].as_array_mut().unwrap();
                 let index = tools.iter().position(|t| t["id"] == id);
@@ -982,28 +970,12 @@ fn progress(state: &AppState, room: &str, update: &Value) -> Result<()> {
     Ok(())
 }
 
-fn reply_text(updates: &[Value], sid: &str) -> String {
-    let mut text = String::new();
-    let mut after_tool = false;
+fn reply_text(updates: &[Value], sid: &str) -> Result<String> {
+    let mut answer = crate::answer::Answer::default();
     for update in updates.iter().filter(|u| u["sessionId"] == sid) {
-        match update["update"]["sessionUpdate"].as_str() {
-            Some("agent_message_chunk") => {
-                if let Some(chunk) = update["update"]["content"]["text"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                {
-                    if after_tool && !text.is_empty() && !text.ends_with("\n\n") {
-                        text.push_str("\n\n");
-                    }
-                    after_tool = false;
-                    text.push_str(chunk);
-                }
-            }
-            Some("tool_call" | "tool_call_update") => after_tool = true,
-            _ => {}
-        }
+        answer.observe(&update["update"])?;
     }
-    text
+    Ok(answer.text().to_owned())
 }
 
 fn media_block(block: &Value) -> Option<Value> {
@@ -1062,7 +1034,7 @@ mod tests {
             json!({"sessionId":"other","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"foreign"}}}),
         ];
         assert_eq!(
-            reply_text(&updates, "one"),
+            reply_text(&updates, "one").unwrap(),
             "Checking.\n\n| Source | Result |\n|---|---|"
         );
     }
