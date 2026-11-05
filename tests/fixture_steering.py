@@ -44,7 +44,7 @@ while True:
         result = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}
         if mode != "generic":
             result["_meta"] = {"steering": {"supported": True, "version": 1, "idleBehavior": ["promptRequired"]}}
-        if mode == "recover":
+        if mode in ("recover", "bad-recovery"):
             result["_meta"]["steering"].update(receiptsMethod="_session/input_receipts", acknowledgeMethod="_session/acknowledge_inputs")
         send(id=rid, result=result)
     elif method in ("session/new", "session/load"):
@@ -70,7 +70,7 @@ while True:
         assert meta["idleBehavior"] == "promptRequired"
         text = r["params"]["prompt"][0]["text"]
         record("steer", text=text, input=meta["inputId"])
-        if mode in ("drop", "recover"):
+        if mode in ("drop", "recover", "bad-recovery"):
             os._exit(0)
         if mode == "idle" or active is None:
             if active: finish()
@@ -92,7 +92,7 @@ while True:
             assert r["params"]["inputIds"] == ids
             assert r["params"]["disposition"] == "proceed_without_replay"
             record("acknowledge", ids=ids)
-        send(id=rid,result={"inputReceipts":[{"inputId":i,"state":"incorporated","recorded":False} for i in ids]})
+        send(id=rid,result={"inputReceipts":[{"inputId":i,"state":"incorporated","recorded":False,"reconciled":method=="_session/acknowledge_inputs" and mode!="bad-recovery"} for i in ids]})
     elif method == "session/cancel":
         record("cancel")
         permission = False

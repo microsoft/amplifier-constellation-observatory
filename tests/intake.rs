@@ -575,3 +575,34 @@ async fn revoked_or_expired_queued_authority_does_not_start_work() {
         assert!(!done.to_string().contains("browser_hash"));
     }
 }
+
+#[tokio::test]
+async fn unconfirmed_remote_recovery_keeps_unknown_and_does_not_start_queue() {
+    let (dir, _state, app, token, sid) = setup("bad-recovery").await;
+    send(&app, &token, &sid, "root").await;
+    send(&app, &token, &sid, "uncertain").await;
+    wait(&app, &token, &sid, |s| s["status"] == "needs_review").await;
+    send(&app, &token, &sid, "next").await;
+    assert_eq!(
+        api(
+            &app,
+            &token,
+            "POST",
+            &format!("/sessions/{sid}/inputs/resume"),
+            json!({"acknowledge_unknown":true})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let held = wait(&app, &token, &sid, |s| s["status"] == "needs_review").await;
+    assert_ne!(user(&held, "uncertain")["acknowledged"], true);
+    assert_eq!(user(&held, "next")["delivery"], "received");
+    assert_eq!(
+        journal(&dir)
+            .iter()
+            .filter(|e| e["kind"] == "prompt")
+            .count(),
+        1
+    );
+}

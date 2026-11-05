@@ -153,8 +153,8 @@ recovery does not renew authority. Endpoint revision changes also block queued
 work. Ordinary follow-up messages never cancel the current prompt or its pending
 approval; explicit Stop cancels the active turn and pending local inputs.
 
-All controls are API-accessible. The browser stores unconfirmed sends with their
-original request ID in session storage, preserves the composer draft across
+All controls are API-accessible. The browser saves unconfirmed sends with their original request ID in the
+programmable view field `draft.pending_send` (and a session-storage fallback), preserves the composer draft across
 polling/refresh, and offers exact-message retry after a lost HTTP response.
 Receipt labels and recovery controls render from the saved session record.
 

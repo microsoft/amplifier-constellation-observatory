@@ -754,6 +754,15 @@ fn view_commands_are_revisioned_and_acknowledgments_do_not_flood_activity() {
             .unwrap();
     assert_eq!(count, 0);
     assert!(views::commands(&s,id,&json!({"expected_revision":2,"commands":[{"op":"set","field":"draft","value":{"password":"secret"}}]})).is_err());
+    let pending = json!({"request_id":uuid::Uuid::new_v4(),"session":uuid::Uuid::new_v4(),"endpoint":uuid::Uuid::new_v4(),"text":"Exact message retry"});
+    let set = |value: Value| json!({"expected_revision":2,"commands":[{"op":"set","field":"draft","value":{"pending_send":value}}]});
+    let mut extra = pending.clone();
+    extra["credential"] = json!("must not be accepted");
+    assert!(views::commands(&s, id, &set(extra)).is_err());
+    assert_eq!(
+        views::commands(&s, id, &set(pending.clone())).unwrap()["draft"]["pending_send"],
+        pending
+    );
 }
 #[test]
 fn selected_agent_and_conversation_cannot_disagree() {

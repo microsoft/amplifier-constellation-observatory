@@ -753,10 +753,11 @@ async fn run_input(
                             None,
                         )
                         .await?;
-                    let ids: Vec<_> = remote["inputReceipts"]
+                    let remote_receipts = remote["inputReceipts"]
                         .as_array()
-                        .into_iter()
-                        .flatten()
+                        .context("Invalid input receipts response")?;
+                    let ids: Vec<_> = remote_receipts
+                        .iter()
                         .filter_map(|r| {
                             let id = r["inputId"].as_str()?;
                             let local = record["messages"]
@@ -770,7 +771,16 @@ async fn run_input(
                         })
                         .collect();
                     if !ids.is_empty() {
-                        live.client.request("_session/acknowledge_inputs",json!({"sessionId":sid,"inputIds":ids,"disposition":"proceed_without_replay"}),&mut vec![],None).await?;
+                        let acknowledged=live.client.request("_session/acknowledge_inputs",json!({"sessionId":sid,"inputIds":ids,"disposition":"proceed_without_replay"}),&mut vec![],None).await?;
+                        let receipts = acknowledged["inputReceipts"]
+                            .as_array()
+                            .context("Invalid acknowledgment response")?;
+                        ensure!(
+                            ids.iter().all(|id| receipts
+                                .iter()
+                                .any(|r| r["inputId"] == *id && r["reconciled"] == true)),
+                            "Input recovery was not confirmed"
+                        );
                     }
                 }
                 crate::intake::mutate(state, context, |s| {

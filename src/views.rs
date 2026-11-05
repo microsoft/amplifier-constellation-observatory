@@ -97,6 +97,18 @@ fn valid(key: &str, v: &Value) -> bool {
                     "args" | "configuration" | "prompt" | "host_config" | "operation_body" => {
                         text(v, 32000)
                     }
+                    "pending_send" => {
+                        v.is_null()
+                            || v.as_object().is_some_and(|o| {
+                                o.len() == 4
+                                    && text(&v["text"], 100000)
+                                    && ["request_id", "session", "endpoint"].iter().all(|k| {
+                                        v[*k]
+                                            .as_str()
+                                            .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
+                                    })
+                            })
+                    }
                     "advanced" => v.is_boolean(),
                     "port" => v.as_u64().is_some_and(|n| n <= 65535),
                     _ => false,
