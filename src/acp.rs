@@ -302,11 +302,17 @@ impl Client {
                     // Some peers report provider queue state only in the
                     // steering acknowledgment, before streaming any receipt.
                     let acknowledgment = &v["result"]["_meta"]["steering"];
-                    if v["result"]["outcome"] == "injected"
+                    let invalid = v.get("error").is_some()
+                        || acknowledgment
+                            .get("inputId")
+                            .is_some_and(|id| id.as_str() != Some(input.as_str()));
+                    let outcome = if invalid {
+                        None
+                    } else {
+                        v["result"]["outcome"].as_str()
+                    };
+                    if outcome == Some("injected")
                         && let Some(root) = ctx.input_id
-                        && acknowledgment["inputId"]
-                            .as_str()
-                            .is_none_or(|id| id == input)
                     {
                         crate::intake::receipt(
                             ctx.state,
@@ -317,7 +323,7 @@ impl Client {
                             }),
                         )?;
                     }
-                    let status = match v["result"]["outcome"].as_str() {
+                    let status = match outcome {
                         Some("injected") => "received_remote",
                         Some("promptRequired") => {
                             steering_open = false;

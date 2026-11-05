@@ -79,6 +79,14 @@ while True:
             send(id=rid, result={"outcome": "failed"})
         elif mode == "malformed":
             send(id=rid, result={"outcome": "invented"})
+        elif mode in ("wrong-ack-id", "wrong-ack-id-type", "error-ack"):
+            result = {"outcome": "injected", "_meta": {"steering": {"inputId": meta["inputId"]}}}
+            if mode.startswith("wrong-ack-id"):
+                result["_meta"]["steering"]["inputId"] = "different-input" if mode == "wrong-ack-id" else 42
+                send(id=rid, result=result)
+            else:
+                send(id=rid, result=result, error={"code": -32000, "message": "Conflicting acknowledgment"})
+            record("invalid-ack")
         elif mode in ("remote-queued", "remote-ack-only"):
             def receipt(state):
                 send(method="session/update", params={"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ""}, "_meta": {"io.github.bkrabach.agent-runtime": {"inputReceipt": {"inputId": meta["inputId"], "state": state}}}}})
