@@ -10,6 +10,14 @@ Work cards summarize acceptance criteria, delivered versions and named reviewers
 
 When an installation advertises them, Memory shows its attributed knowledge and conflicts, and Background work shows saved progress, bounded turns and reports awaiting review. Configuration can open the agent's own model/capabilities editor. The fleet discovers these optional interfaces without assuming that an ACP agent shares its implementation. Memory access, work observation and work execution have separate grants.
 
+Talk stays available while an agent is working. Add a correction or more context
+without stopping its current work. Capable agents receive ordered steering;
+ordinary ACP agents receive the saved messages in order after the current turn.
+Delivery labels distinguish a saved message from one included in model context.
+If delivery is uncertain, inspect the work and explicitly continue without
+resending it. Stop remains a separate action. See the [conversation contract](docs/contracts.md#conversations)
+and [0.7 release notes](docs/releases/0.7.0.md).
+
 ## Install on Linux
 
 ```sh

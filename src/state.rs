@@ -30,6 +30,9 @@ pub struct AppState {
     pub progress: Mutex<HashMap<String, Value>>,
     pub cancellations: Mutex<HashMap<String, (String, tokio::sync::watch::Sender<bool>)>>,
     pub active_sessions: Mutex<HashSet<String>>,
+    /// Serializes durable Talk intake, receipts and finalization; never held across await.
+    pub talk_gate: Mutex<()>,
+    pub talk_inputs: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     pub provision_gate: Mutex<()>,
     pub acp_clients: Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::acp::LiveSession>>>>,
 }
@@ -44,11 +47,40 @@ impl AppState {
 CREATE TABLE IF NOT EXISTS records(kind TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(kind,id));
 CREATE TABLE IF NOT EXISTS tokens(hash TEXT PRIMARY KEY,id TEXT NOT NULL,scopes TEXT NOT NULL,expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS browser_sessions(hash TEXT PRIMARY KEY,owner TEXT NOT NULL,csrf TEXT NOT NULL,expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS input_authority(session_id TEXT NOT NULL,input_id TEXT NOT NULL,actor TEXT NOT NULL,browser_hash TEXT,PRIMARY KEY(session_id,input_id));
 CREATE TABLE IF NOT EXISTS login_attempts(key TEXT PRIMARY KEY,failures INTEGER NOT NULL,locked_until INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS views(id TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,kind TEXT NOT NULL,resource_id TEXT,data TEXT NOT NULL);")?;
         db.execute("UPDATE records SET value=json_set(value,'$.status','interrupted','$.note','The service restarted. Inspect the remote result before retrying.') WHERE kind='jobs' AND json_extract(value,'$.status') IN ('queued','running')", [])?;
         db.execute("UPDATE records SET value=json_set(value,'$.status','interrupted','$.error','The service restarted during this turn; inspect the agent before retrying.') WHERE kind='sessions' AND json_extract(value,'$.status')='running'", [])?;
+        // A service restart cannot establish whether a submitted input reached the engine.
+        let interrupted: Vec<(String, String)> = {
+            let mut q = db.prepare("SELECT id,value FROM records WHERE kind='sessions'")?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (id, raw) in interrupted {
+            let mut record: Value = serde_json::from_str(&raw)?;
+            let mut changed = false;
+            if let Some(messages) = record["messages"].as_array_mut() {
+                for m in messages {
+                    if matches!(
+                        m["delivery"].as_str(),
+                        Some("submitted" | "received_remote" | "remoteQueued")
+                    ) {
+                        m["delivery"] = json!("unknown");
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                record["status"] = json!("interrupted");
+                db.execute(
+                    "UPDATE records SET value=?1 WHERE kind='sessions' AND id=?2",
+                    params![record.to_string(), id],
+                )?;
+            }
+        }
         let path = home.join("secrets/control-token");
         let token = if path.exists() {
             std::fs::read_to_string(&path)?.trim().to_owned()
@@ -77,6 +109,8 @@ CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGE
             progress: Mutex::new(HashMap::new()),
             cancellations: Mutex::new(HashMap::new()),
             active_sessions: Mutex::new(HashSet::new()),
+            talk_gate: Mutex::new(()),
+            talk_inputs: Mutex::new(HashMap::new()),
             provision_gate: Mutex::new(()),
             acp_clients: Mutex::new(HashMap::new()),
         }))

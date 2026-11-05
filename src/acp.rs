@@ -61,6 +61,8 @@ struct Client {
     next: u64,
     auth_methods: Value,
     auth_attempted: bool,
+    read_buffer: Vec<u8>,
+    steering: Value,
     #[cfg(unix)]
     pid: i32,
 }
@@ -138,6 +140,8 @@ impl Client {
             next: 0,
             auth_methods: json!([]),
             auth_attempted: false,
+            read_buffer: Vec::new(),
+            steering: Value::Null,
             #[cfg(unix)]
             pid,
         })
@@ -148,7 +152,6 @@ impl Client {
         Ok(())
     }
     async fn read(&mut self) -> Result<Value> {
-        let mut data = Vec::new();
         loop {
             let b = self.output.fill_buf().await?;
             ensure!(!b.is_empty(), "ACP endpoint disconnected");
@@ -157,14 +160,17 @@ impl Client {
                 .position(|x| *x == b'\n')
                 .map(|n| n + 1)
                 .unwrap_or(b.len());
-            ensure!(data.len() + n <= 24 * 1024 * 1024, "ACP message too large");
-            data.extend_from_slice(&b[..n]);
+            ensure!(
+                self.read_buffer.len() + n <= 24 * 1024 * 1024,
+                "ACP message too large"
+            );
+            self.read_buffer.extend_from_slice(&b[..n]);
             self.output.consume(n);
-            if data.last() == Some(&b'\n') {
+            if self.read_buffer.last() == Some(&b'\n') {
                 break;
             }
         }
-        let v: Value = serde_json::from_slice(&data)?;
+        let v: Value = serde_json::from_slice(&std::mem::take(&mut self.read_buffer))?;
         ensure!(v["jsonrpc"] == "2.0", "Invalid ACP frame");
         Ok(v)
     }
@@ -204,12 +210,76 @@ impl Client {
         });
         let mut update_bytes = 0usize;
         let mut forms = crate::elicitation::Callbacks::default();
+        let mut permissions = tokio::task::JoinSet::new();
         let mut known_tools = std::collections::HashSet::new();
+        let signal = interaction
+            .filter(|ctx| ctx.input_id.is_some())
+            .map(|ctx| crate::intake::signal(ctx.state, ctx.room));
+        let can_steer = method == "session/prompt"
+            && self.steering["supported"] == true
+            && self.steering["idleBehavior"]
+                .as_array()
+                .is_some_and(|xs| xs.iter().any(|v| v == "promptRequired"));
+        let mut steering_open = can_steer;
+        let mut pending: Option<(u64, String, tokio::time::Instant)> = None;
+        let mut terminal: Option<Value> = None;
         loop {
+            if pending.is_none()
+                && let Some(v) = terminal.take()
+            {
+                if let Some(error) = v.get("error") {
+                    if error["code"] == -32002
+                        && matches!(method, "session/close" | "session/delete")
+                    {
+                        return Ok(json!({}));
+                    }
+                    if error["code"] == -32010 {
+                        if let Some(ctx) = interaction
+                            && let Some(input) = ctx.input_id
+                        {
+                            crate::intake::mark(ctx.state, ctx.room, input, "notAccepted")?;
+                        }
+                        anyhow::bail!("Input recovery required");
+                    }
+                    return Err(crate::acp_auth::rejected(error, method));
+                }
+                return Ok(v["result"].clone());
+            }
+            if steering_open
+                && pending.is_none()
+                && terminal.is_none()
+                && let Some(ctx) = interaction
+                && let Some(root) = ctx.input_id
+                && let Some(input) = crate::intake::claim_update(ctx.state, ctx.room, root)?
+            {
+                let input_id = input["request_id"]
+                    .as_str()
+                    .context("Missing input identity")?
+                    .to_owned();
+                self.next += 1;
+                let request_id = self.next;
+                pending = Some((
+                    request_id,
+                    input_id.clone(),
+                    tokio::time::Instant::now() + Duration::from_secs(30),
+                ));
+                self.send(json!({"jsonrpc":"2.0","id":request_id,"method":"_session/steering","params":{"sessionId":ctx.sid,"prompt":[{"type":"text","text":input["text"],"_meta":{"io.github.bkrabach.agent-observatory":{"inputId":input_id,"author":input["actor"],"sequence":input["sequence"]}}}],"_meta":{"steering":{"inputId":input_id,"idleBehavior":"promptRequired"}}}})).await?;
+            }
             let v = tokio::select! {
+                ready=permissions.join_next(), if !permissions.is_empty()=>{
+                    let (callback,result)=ready.context("Missing permission result")??;
+                    self.send(json!({"jsonrpc":"2.0","id":callback,"result":result})).await?;
+                    continue;
+                }
                 ready=forms.completed(), if !forms.is_empty()=>{
                     let (callback, result)=ready?;
                     self.send(json!({"jsonrpc":"2.0","id":callback,"result":result})).await?;
+                    continue;
+                }
+                _=input_signal(&signal), if method=="session/prompt" && steering_open=>{continue;}
+                _=steering_deadline(pending.as_ref().map(|p|p.2)), if pending.is_some()=>{
+                    if let Some((_,input,_))=pending.take() && let Some(ctx)=interaction {crate::intake::mark(ctx.state,ctx.room,&input,"unknown")?;}
+                    steering_open=false;
                     continue;
                 }
                 value=self.read()=>value?,
@@ -222,16 +292,72 @@ impl Client {
                     anyhow::bail!("Turn timed out");
                 }
             };
-            if v.get("method").is_none() && v["id"] == id {
-                if let Some(error) = v.get("error") {
-                    if error["code"] == -32002
-                        && matches!(method, "session/close" | "session/delete")
+            if v.get("method").is_none()
+                && pending
+                    .as_ref()
+                    .is_some_and(|(request, _, _)| v["id"] == *request)
+            {
+                let (_, input, _) = pending.take().unwrap();
+                if let Some(ctx) = interaction {
+                    // Some peers report provider queue state only in the
+                    // steering acknowledgment, before streaming any receipt.
+                    let acknowledgment = &v["result"]["_meta"]["steering"];
+                    let invalid = v.get("error").is_some()
+                        || acknowledgment
+                            .get("inputId")
+                            .is_some_and(|id| id.as_str() != Some(input.as_str()));
+                    let outcome = if invalid {
+                        None
+                    } else {
+                        v["result"]["outcome"].as_str()
+                    };
+                    if outcome == Some("injected")
+                        && let Some(root) = ctx.input_id
                     {
-                        return Ok(json!({}));
+                        crate::intake::receipt(
+                            ctx.state,
+                            ctx.room,
+                            root,
+                            &json!({
+                                "inputId":input,"state":acknowledgment["state"]
+                            }),
+                        )?;
                     }
-                    return Err(crate::acp_auth::rejected(error, method));
+                    let status = match outcome {
+                        Some("injected") => "received_remote",
+                        Some("promptRequired") => {
+                            steering_open = false;
+                            "promptRequired"
+                        }
+                        _ => {
+                            steering_open = false;
+                            "unknown"
+                        }
+                    };
+                    crate::intake::mutate(ctx.state, ctx.room, |s| {
+                        if let Some(m) = s["messages"].as_array_mut().and_then(|ms| {
+                            ms.iter_mut()
+                                .find(|m| m["request_id"] == input && m["role"] == "user")
+                        }) && (m["delivery"] == "submitted" || status == "unknown")
+                        {
+                            m["delivery"] = json!(status);
+                        }
+                    })?;
                 }
-                return Ok(v["result"].clone());
+                continue;
+            }
+            if v.get("method").is_none() && v["id"] == id {
+                if let Some(ctx) = interaction
+                    && let Some(root) = ctx.input_id
+                    && let Some(receipts) =
+                        v["result"]["_meta"][crate::intake::META]["inputReceipts"].as_array()
+                {
+                    for receipt in receipts {
+                        crate::intake::receipt(ctx.state, ctx.room, root, receipt)?;
+                    }
+                }
+                terminal = Some(v);
+                continue;
             }
             if v.get("id").is_some() && v.get("method").is_some() {
                 if v["method"] == "elicitation/create" {
@@ -270,9 +396,7 @@ impl Client {
                         Err(_) => self.send(json!({"jsonrpc":"2.0","id":v["id"],"error":{"code":-32602,"message":"Unsupported or incorrectly scoped interaction"}})).await?,
                     }
                 } else if v["method"] == "session/request_permission" {
-                    let result = if let Some(ctx) =
-                        interaction.filter(|c| v["params"]["sessionId"] == c.sid)
-                    {
+                    if let Some(ctx) = interaction.filter(|c| v["params"]["sessionId"] == c.sid) {
                         match ctx.state.permissions.request(
                             ctx.room,
                             ctx.actor,
@@ -289,26 +413,14 @@ impl Client {
                                     Some(ctx.room),
                                     json!({"actor":ctx.actor,"request_id":request.id}),
                                 );
-                                let outcome = tokio::select! {
-                                    value=request.wait()=>Some(value),
-                                    _=cancel_signal(&mut cancellation)=>None,
-                                    _=self.child.wait()=>anyhow::bail!("Agent disconnected while awaiting a decision"),
-                                };
-                                if let Some(outcome) = outcome {
-                                    outcome
-                                } else {
-                                    self.send(json!({"jsonrpc":"2.0","id":v["id"],"result":crate::permissions::cancelled()})).await?;
-                                    self.cancel(id, ctx.sid).await;
-                                    anyhow::bail!("Turn cancelled");
-                                }
+                                let callback=v["id"].clone();
+                                permissions.spawn(async move {(callback,request.wait().await)});
                             }
-                            Err(_) => crate::permissions::cancelled(),
+                            Err(_) => self.send(json!({"jsonrpc":"2.0","id":v["id"],"result":crate::permissions::cancelled()})).await?,
                         }
                     } else {
-                        crate::permissions::cancelled()
-                    };
-                    self.send(json!({"jsonrpc":"2.0","id":v["id"],"result":result}))
-                        .await?;
+                        self.send(json!({"jsonrpc":"2.0","id":v["id"],"result":crate::permissions::cancelled()})).await?;
+                    }
                 } else {
                     self.send(json!({"jsonrpc":"2.0","id":v["id"],"error":{"code":-32601,"message":"This observatory client does not offer that capability"}})).await?;
                 }
@@ -324,6 +436,14 @@ impl Client {
                     "Too many ACP updates"
                 );
                 if let Some(ctx) = interaction.filter(|c| v["params"]["sessionId"] == c.sid) {
+                    if let Some(root) = ctx.input_id {
+                        crate::intake::receipt(
+                            ctx.state,
+                            ctx.room,
+                            root,
+                            &v["params"]["update"]["_meta"][crate::intake::META]["inputReceipt"],
+                        )?;
+                    }
                     if let Some(tool) = v["params"]["update"]["toolCallId"].as_str()
                         && v["params"]["update"]["sessionUpdate"] == "tool_call"
                     {
@@ -392,6 +512,7 @@ impl Client {
         let init=self.request("initialize",json!({"protocolVersion":1,"clientInfo":{"name":"agent-observatory","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":if ctx.is_some(){json!({"elicitation":{"form":{},"url":{}}})}else{json!({})}}),&mut vec![], ctx).await?;
         ensure!(init["protocolVersion"] == 1, "Unsupported ACP version");
         self.auth_methods = init["authMethods"].clone();
+        self.steering = init["_meta"]["steering"].clone();
         let mut init = init;
         init["_meta"]["io.github.bkrabach.agent-observatory"]["authentication"] =
             crate::acp_auth::authentication(&init);
@@ -515,9 +636,44 @@ pub async fn prompt(
     text: &str,
     actor: &str,
 ) -> ApiResult<Value> {
+    prompt_input(state, context, config, prior, text, actor, None).await
+}
+pub async fn prompt_input(
+    state: &AppState,
+    context: &str,
+    config: &Value,
+    prior: Option<&str>,
+    text: &str,
+    actor: &str,
+    input_id: Option<&str>,
+) -> ApiResult<Value> {
+    run_input(state, context, config, prior, Some(text), actor, input_id).await
+}
+pub async fn recover_inputs(
+    state: &AppState,
+    context: &str,
+    config: &Value,
+    prior: Option<&str>,
+    actor: &str,
+) -> ApiResult<Value> {
+    run_input(state, context, config, prior, None, actor, None).await
+}
+async fn run_input(
+    state: &AppState,
+    context: &str,
+    config: &Value,
+    prior: Option<&str>,
+    text: Option<&str>,
+    actor: &str,
+    input_id: Option<&str>,
+) -> ApiResult<Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
     let work = async {
         let cached = state.acp_clients.lock().unwrap().get(context).cloned();
+        ensure!(
+            text.is_some() || prior.is_some() || cached.is_some(),
+            "No saved session to recover"
+        );
         let mut resumed = false;
         let live = if let Some(cached) = cached {
             cached
@@ -535,6 +691,7 @@ pub async fn prompt(
                 actor,
                 sid: prior.unwrap_or(""),
                 deadline,
+                input_id: None,
             };
             let init = tokio::select! {
                 _=cancel_signal(&mut setup_cancel)=>anyhow::bail!("Turn cancelled"),
@@ -599,12 +756,83 @@ pub async fn prompt(
         };
         let mut live = live.lock().await;
         let sid = live.sid.clone();
+        if input_id.is_some() || text.is_none() {
+            // Save the binding before any prompt bytes are sent, including failure paths.
+            crate::intake::mutate(state, context, |s| {
+                s["acp_session_id"] = json!(sid);
+                s["steering"] = json!(live.init["_meta"]["steering"]["supported"] == true);
+            })?;
+            if state.read("sessions", context)?["recovery_requested"] == true {
+                let record = state.read("sessions", context)?;
+                if live.init["_meta"]["steering"]["receiptsMethod"] == "_session/input_receipts"
+                    && live.init["_meta"]["steering"]["acknowledgeMethod"]
+                        == "_session/acknowledge_inputs"
+                {
+                    let remote = live
+                        .client
+                        .request(
+                            "_session/input_receipts",
+                            json!({"sessionId":sid}),
+                            &mut vec![],
+                            None,
+                        )
+                        .await?;
+                    let remote_receipts = remote["inputReceipts"]
+                        .as_array()
+                        .context("Invalid input receipts response")?;
+                    let ids: Vec<_> = remote_receipts
+                        .iter()
+                        .filter_map(|r| {
+                            let id = r["inputId"].as_str()?;
+                            let local = record["messages"]
+                                .as_array()?
+                                .iter()
+                                .find(|m| m["request_id"] == id && m["role"] == "user")?;
+                            (local["delivery"] == "unknown"
+                                || r["state"] == "unknown"
+                                || (r["state"] == "incorporated" && r["recorded"] == false))
+                                .then_some(id)
+                        })
+                        .collect();
+                    if !ids.is_empty() {
+                        let acknowledged=live.client.request("_session/acknowledge_inputs",json!({"sessionId":sid,"inputIds":ids,"disposition":"proceed_without_replay"}),&mut vec![],None).await?;
+                        let receipts = acknowledged["inputReceipts"]
+                            .as_array()
+                            .context("Invalid acknowledgment response")?;
+                        ensure!(
+                            ids.iter().all(|id| receipts
+                                .iter()
+                                .any(|r| r["inputId"] == *id && r["reconciled"] == true)),
+                            "Input recovery was not confirmed"
+                        );
+                    }
+                }
+                crate::intake::mutate(state, context, |s| {
+                    for m in s["messages"].as_array_mut().unwrap() {
+                        if m["delivery"] == "unknown" {
+                            m["acknowledged"] = json!(true);
+                        }
+                    }
+                    s["recovery_requested"] = json!(false);
+                })?;
+            }
+        }
+        if text.is_none() {
+            return Ok(json!({"session_id":sid,"recovered":true}));
+        }
+        if let Some(input_id) = input_id {
+            if !crate::intake::authorized(state, context, input_id) {
+                crate::intake::mark(state, context, input_id, "notAccepted")?;
+                anyhow::bail!("Input authorization changed");
+            }
+            crate::intake::mark(state, context, input_id, "submitted")?;
+        }
         let mut updates = vec![];
         let result = live
             .client
             .request(
                 "session/prompt",
-                json!({"sessionId":sid,"prompt":[{"type":"text","text":text}]}),
+                json!({"sessionId":sid,"prompt":[{"type":"text","text":text.unwrap()}]}),
                 &mut updates,
                 Some(&Interaction {
                     state,
@@ -612,6 +840,7 @@ pub async fn prompt(
                     actor,
                     sid: &sid,
                     deadline,
+                    input_id,
                 }),
             )
             .await?;
@@ -631,6 +860,12 @@ pub async fn prompt(
                 "This endpoint cannot restore a disconnected session. Its transcript is saved; start a new conversation.",
             ))
         }
+        Ok(Err(e)) if e.to_string() == "Input authorization changed" => Err(ApiError::bad(
+            "This message's sign-in or access expired before it could be sent. Sign in and send a new message.",
+        )),
+        Ok(Err(e)) if e.to_string() == "Input recovery required" => Err(ApiError::bad(
+            "The agent needs review of earlier input delivery before continuing. Inspect its session and effects before authorizing recovery.",
+        )),
         Ok(Err(e)) if e.to_string() == "Turn timed out" => Err(ApiError::bad(
             "The ACP turn timed out; inspect the agent before retrying work",
         )),
@@ -645,6 +880,21 @@ pub async fn prompt(
         state.acp_clients.lock().unwrap().remove(context);
     }
     result
+}
+
+async fn input_signal(signal: &Option<std::sync::Arc<tokio::sync::Notify>>) {
+    if let Some(signal) = signal {
+        signal.notified().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+async fn steering_deadline(deadline: Option<tokio::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 async fn cancel_signal(receiver: &mut Option<tokio::sync::watch::Receiver<bool>>) {
@@ -663,6 +913,7 @@ struct Interaction<'a> {
     actor: &'a str,
     sid: &'a str,
     deadline: tokio::time::Instant,
+    input_id: Option<&'a str>,
 }
 async fn turn_deadline(ctx: Option<&Interaction<'_>>) {
     if let Some(ctx) = ctx {

@@ -7,6 +7,12 @@ use serde_json::json;
 
 #[derive(Debug)]
 pub struct ApiError(pub StatusCode, pub String);
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+impl std::error::Error for ApiError {}
 impl ApiError {
     pub fn bad(message: impl Into<String>) -> Self {
         Self(StatusCode::BAD_REQUEST, message.into())
