@@ -282,6 +282,56 @@ async fn mismatched_or_error_ack_remains_unknown_without_losing_approval_or_repl
         assert_eq!(logs.iter().filter(|e| e["kind"] == "cancel").count(), 0);
     }
 }
+
+#[tokio::test]
+async fn invalid_rpc_envelope_times_out_as_unknown_without_replaying_or_dropping_approval() {
+    let (dir, _state, app, token, sid) = setup("conflicting-envelope").await;
+    send(&app, &token, &sid, "approval").await;
+    let before = wait(&app, &token, &sid, |s| {
+        s["permissions"].as_array().is_some_and(|p| !p.is_empty())
+    })
+    .await;
+    let permission = before["permissions"][0]["id"].as_str().unwrap();
+    send(&app, &token, &sid, "uncertain update").await;
+    wait(&app, &token, &sid, |_| {
+        journal(&dir).iter().any(|e| e["kind"] == "invalid-ack")
+    })
+    .await;
+    // The official SDK discards a response containing both result and error.
+    // It is not an acknowledgment. Our existing 30-second acknowledgment
+    // deadline must retain uncertainty without cancelling the active prompt.
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    let during = api(
+        &app,
+        &token,
+        "GET",
+        &format!("/sessions/{sid}"),
+        Value::Null,
+    )
+    .await
+    .1;
+    assert_eq!(user(&during, "uncertain update")["delivery"], "unknown");
+    assert_eq!(during["permissions"][0]["id"], permission);
+    assert_eq!(
+        api(
+            &app,
+            &token,
+            "POST",
+            &format!("/sessions/{sid}/permissions/{permission}"),
+            json!({"option_id":"once"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let done = wait(&app, &token, &sid, |s| s["status"] == "needs_review").await;
+    assert_eq!(user(&done, "uncertain update")["delivery"], "unknown");
+    let logs = journal(&dir);
+    assert_eq!(logs.iter().filter(|e| e["kind"] == "prompt").count(), 1);
+    assert_eq!(logs.iter().filter(|e| e["kind"] == "steer").count(), 1);
+    assert_eq!(logs.iter().filter(|e| e["kind"] == "effect").count(), 1);
+    assert_eq!(logs.iter().filter(|e| e["kind"] == "cancel").count(), 0);
+}
 #[tokio::test]
 async fn generic_acp_queues_without_cancelling_or_overlapping_prompts() {
     let (dir, _state, app, t, sid) = setup("generic").await;

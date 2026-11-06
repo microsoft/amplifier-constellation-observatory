@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "agent-observatory"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "amplifier-acp-connection",
  "anyhow",
@@ -85,6 +85,7 @@ dependencies = [
 [[package]]
 name = "amplifier-acp-connection"
 version = "0.1.0"
+source = "git+https://github.com/microsoft/amplifier-constellation?rev=e0d6a03fd342b295d349b633d400376efbbe2c40#e0d6a03fd342b295d349b633d400376efbbe2c40"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
