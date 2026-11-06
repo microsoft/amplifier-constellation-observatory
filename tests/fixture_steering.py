@@ -10,6 +10,7 @@ session = "saved-fixture"
 active = None
 updates = []
 permission = False
+pending = b""
 
 
 def record(kind, **data):
@@ -33,11 +34,19 @@ def finish():
 while True:
     if active and not permission and time.monotonic() >= active["due"]:
         finish()
-    if not select.select([sys.stdin], [], [], 0.02)[0]:
-        continue
-    line = sys.stdin.readline()
-    if not line:
-        break
+    # select() cannot see lines already buffered by TextIOWrapper. The SDK may
+    # legitimately flush several requests together; consume every complete
+    # frame before waiting for more bytes.
+    if b"\n" not in pending:
+        if not select.select([sys.stdin], [], [], 0.02)[0]:
+            continue
+        chunk = os.read(sys.stdin.fileno(), 65536)
+        if not chunk:
+            break
+        pending += chunk
+        if b"\n" not in pending:
+            continue
+    line, pending = pending.split(b"\n", 1)
     r = json.loads(line)
     method, rid = r.get("method"), r.get("id")
     if method == "initialize":
@@ -79,13 +88,15 @@ while True:
             send(id=rid, result={"outcome": "failed"})
         elif mode == "malformed":
             send(id=rid, result={"outcome": "invented"})
-        elif mode in ("wrong-ack-id", "wrong-ack-id-type", "error-ack"):
+        elif mode in ("wrong-ack-id", "wrong-ack-id-type", "error-ack", "conflicting-envelope"):
             result = {"outcome": "injected", "_meta": {"steering": {"inputId": meta["inputId"]}}}
             if mode.startswith("wrong-ack-id"):
                 result["_meta"]["steering"]["inputId"] = "different-input" if mode == "wrong-ack-id" else 42
                 send(id=rid, result=result)
-            else:
+            elif mode == "conflicting-envelope":
                 send(id=rid, result=result, error={"code": -32000, "message": "Conflicting acknowledgment"})
+            else:
+                send(id=rid, error={"code": -32000, "message": "Rejected acknowledgment"})
             record("invalid-ack")
         elif mode in ("remote-queued", "remote-ack-only"):
             def receipt(state):
