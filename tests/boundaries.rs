@@ -1229,7 +1229,7 @@ for line in sys.stdin:
  if m=='initialize': result={'protocolVersion':1,'agentCapabilities':{'sessionCapabilities':{} if os.environ.get('DISABLED') else {'list':{},'delete':{},'resume':{},'close':{}}}}
  elif m=='session/list': result={'sessions':[{'sessionId':'saved','title':'Saved work','cwd':p['cwd']},{'sessionId':'private-other','title':'Different folder','cwd':'/different'}],'nextCursor':'page-two' if 'cursor' not in p else None}
  elif m in ('session/close','session/delete'):
-  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32002}}),flush=True);continue
+  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32002,'message':'Session is unavailable'}}),flush=True);continue
  elif m=='session/new':result={'sessionId':'saved'}
  elif m=='session/resume':result={}
  elif m=='session/prompt':result={'stopReason':'end_turn'}

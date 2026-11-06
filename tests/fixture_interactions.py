@@ -7,7 +7,7 @@ for line in sys.stdin:
   assert p['clientCapabilities']['elicitation']=={'form':{},'url':{}}
   result={'protocolVersion':1,'authMethods':[{'id':'browser','name':'Browser login'}]}
  elif m=='session/new' and not authed:
-  send({'id':r['id'],'error':{'code':-32000}});continue
+  send({'id':r['id'],'error':{'code':-32000,'message':'Authentication required'}});continue
  elif m=='authenticate':
   assert p['methodId']=='browser'
   send({'id':'url','method':'elicitation/create','params':{'requestId':r['id'],'mode':'url','url':'https://example.test/authorize','elicitationId':'external','message':'Authorize this fixture'}})

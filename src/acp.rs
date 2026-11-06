@@ -6,10 +6,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout, Command},
-};
+use tokio::process::{Child, Command};
 
 pub fn validate(v: &Value) -> ApiResult<()> {
     if v["transport"].as_str().unwrap_or("stdio") != "stdio" {
@@ -56,12 +53,9 @@ pub fn validate(v: &Value) -> ApiResult<()> {
 }
 struct Client {
     child: Child,
-    input: ChildStdin,
-    output: BufReader<ChildStdout>,
-    next: u64,
+    connection: amplifier_acp_connection::Connection,
     auth_methods: Value,
     auth_attempted: bool,
-    read_buffer: Vec<u8>,
     steering: Value,
     #[cfg(unix)]
     pid: i32,
@@ -134,47 +128,33 @@ impl Client {
         #[cfg(unix)]
         let pid = child.id().context("ACP process exited")? as i32;
         Ok(Self {
-            input: child.stdin.take().context("Missing ACP input")?,
-            output: BufReader::new(child.stdout.take().context("Missing ACP output")?),
+            connection: amplifier_acp_connection::Connection::client(
+                child.stdout.take().context("Missing ACP output")?,
+                child.stdin.take().context("Missing ACP input")?,
+                24 * 1024 * 1024,
+            )
+            .await?,
             child,
-            next: 0,
             auth_methods: json!([]),
             auth_attempted: false,
-            read_buffer: Vec::new(),
             steering: Value::Null,
             #[cfg(unix)]
             pid,
         })
     }
     async fn send(&mut self, v: Value) -> Result<()> {
-        self.input.write_all(format!("{v}\n").as_bytes()).await?;
-        self.input.flush().await?;
-        Ok(())
+        self.connection.sender.send(v)
     }
     async fn read(&mut self) -> Result<Value> {
-        loop {
-            let b = self.output.fill_buf().await?;
-            ensure!(!b.is_empty(), "ACP endpoint disconnected");
-            let n = b
-                .iter()
-                .position(|x| *x == b'\n')
-                .map(|n| n + 1)
-                .unwrap_or(b.len());
-            ensure!(
-                self.read_buffer.len() + n <= 24 * 1024 * 1024,
-                "ACP message too large"
-            );
-            self.read_buffer.extend_from_slice(&b[..n]);
-            self.output.consume(n);
-            if self.read_buffer.last() == Some(&b'\n') {
-                break;
-            }
-        }
-        let v: Value = serde_json::from_slice(&std::mem::take(&mut self.read_buffer))?;
-        ensure!(v["jsonrpc"] == "2.0", "Invalid ACP frame");
-        Ok(v)
+        self.connection
+            .recv()
+            .await?
+            .context("ACP endpoint disconnected")
     }
-    async fn cancel(&mut self, id: u64, sid: &str) {
+    fn send_request(&self, method: &str, params: Value) -> Result<Value> {
+        self.connection.sender.request(method, params)
+    }
+    async fn cancel(&mut self, id: Value, sid: &str) {
         let _ = self
             .send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}))
             .await;
@@ -196,10 +176,7 @@ impl Client {
         updates: &mut Vec<Value>,
         interaction: Option<&Interaction<'_>>,
     ) -> Result<Value> {
-        self.next += 1;
-        let id = self.next;
-        self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-            .await?;
+        let id = self.send_request(method, params)?;
         let mut cancellation = interaction.and_then(|ctx| {
             ctx.state
                 .cancellations
@@ -221,7 +198,7 @@ impl Client {
                 .as_array()
                 .is_some_and(|xs| xs.iter().any(|v| v == "promptRequired"));
         let mut steering_open = can_steer;
-        let mut pending: Option<(u64, String, tokio::time::Instant)> = None;
+        let mut pending: Option<(Value, String, tokio::time::Instant)> = None;
         let mut terminal: Option<Value> = None;
         loop {
             if pending.is_none()
@@ -256,14 +233,12 @@ impl Client {
                     .as_str()
                     .context("Missing input identity")?
                     .to_owned();
-                self.next += 1;
-                let request_id = self.next;
+                let request_id = self.send_request("_session/steering",json!({"sessionId":ctx.sid,"prompt":[{"type":"text","text":input["text"],"_meta":{"io.github.bkrabach.agent-observatory":{"inputId":input_id,"author":input["actor"],"sequence":input["sequence"]}}}],"_meta":{"steering":{"inputId":input_id,"idleBehavior":"promptRequired"}}}))?;
                 pending = Some((
                     request_id,
                     input_id.clone(),
                     tokio::time::Instant::now() + Duration::from_secs(30),
                 ));
-                self.send(json!({"jsonrpc":"2.0","id":request_id,"method":"_session/steering","params":{"sessionId":ctx.sid,"prompt":[{"type":"text","text":input["text"],"_meta":{"io.github.bkrabach.agent-observatory":{"inputId":input_id,"author":input["actor"],"sequence":input["sequence"]}}}],"_meta":{"steering":{"inputId":input_id,"idleBehavior":"promptRequired"}}}})).await?;
             }
             let v = tokio::select! {
                 ready=permissions.join_next(), if !permissions.is_empty()=>{
