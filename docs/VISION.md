@@ -1,51 +1,33 @@
-# Observatory vision
+# See and manage your agent fleet
 
-People should be able to understand and operate several independent agents
-without becoming an expert in every installation. Observatory brings their
-exposed information and controls together so an operator can find the right
-individual, see what needs attention, inspect work, and take an appropriate
-next action.
+Observatory helps people understand a group of independent agents: who is
+available, where they are connected, what they are doing and what needs attention.
+It brings exposed controls and evidence into one place so people can make a useful
+next decision without learning every installation.
 
-Its value is convenient oversight with dependable boundaries. An agent can live
-on another machine, use a different engine, or expose only ordinary Agent Client
-Protocol (ACP). Richer management capabilities should improve the experience
-when available without making Observatory a prerequisite for the agent's life.
+An operator might notice a stalled responsibility, inspect the agent's own record,
+contact that individual or use an authorized control, then see what actually
+changed. Unavailable, idle and uncertain are different situations; the view should
+make that difference understandable rather than bury it in events.
 
-## Help people make consequential decisions
+## An optional view across independent agents
 
-The operator should be able to distinguish an unavailable endpoint from an idle
-agent, accepted work from verified results, and a saved request from an uncertain
-delivery. The next useful step should be understandable without reading a stream
-of raw events. Details and source evidence should remain accessible when they
-matter to a decision.
+Observatory owns its registry, connection settings and observations. Each agent
+keeps its identity, work and installation. An ordinary ACP connection is useful
+on its own; optional management interfaces add configuration and deeper inspection.
+Talking to an agent and administering its machine are different activities.
 
-Observatory should support both direct interaction and management of independent
-installations. Those are different responsibilities: talking to an agent does not
-mean administering its host. A coherent experience can present both while keeping
-their meaning clear.
+This lets people build focused operator experiences or automation on the same
+interfaces. Today's control panel is one way to inspect those capabilities, not
+the final product design. Agents remain useful without Observatory.
 
-## Compose through owned interfaces
+## What makes it worthwhile
 
-Observatory is a client of agent and installation interfaces. The services being
-observed remain responsible for their identity, configuration, credentials,
-work and effects under the [family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md).
-Its own registry, connection settings and observations support that composition;
-they do not replace those services' authoritative records.
+- Find the right individual and the issue needing judgment quickly.
+- Keep evidence and appropriate controls together without claiming more authority.
+- Show the result of an action, including uncertainty, with less investigation
+  and recovery effort.
 
-This creates room for different forms of oversight: a focused operator workspace,
-a broader experience, or automation using the same exposed operations. The
-current browser control panel is development and administration access, not a
-commitment to the final product design.
-
-## Judge the whole outcome
-
-Success means that people can discover a problem, understand the evidence,
-choose an action within their authority, and see its actual outcome with less
-coordination effort. Count setup, investigation, correction and recovery effort
-as well as the visible interaction. A connected endpoint or successful probe
-alone does not establish that result.
-
-The [public boundaries](contracts.md) own Observatory's concrete interfaces.
-The [family contract map](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md)
-locates shared promises. Use current behavior and meaningful checks to choose the
-next improvement; the vision does not maintain a feature or gap inventory.
+The [local agreement](contracts.md) defines Observatory's contribution; the
+[API](api.md) defines its operations. Shared composition, interaction and lifecycle
+promises stay in the [Constellation agreements](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md).

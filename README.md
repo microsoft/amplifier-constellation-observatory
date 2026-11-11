@@ -8,7 +8,7 @@ interact and operate across different machines and implementations.
 
 Start with the [vision](docs/VISION.md) for intended value and the
 [public boundaries](docs/contracts.md) for Observatory's interface commitments.
-The [Constellation family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md)
+The [Constellation family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md)
 owns shared composition and state ownership; the
 [working guide](https://github.com/microsoft/amplifier-constellation/blob/main/docs/working-together.md)
 applies Converge to contributions. Existing browser screens are reference
@@ -37,7 +37,7 @@ Built-in management mappings support Agent Instance, ACP Slack Adapter, and Pers
 
 **Machines** holds separately authorized local/SSH installation recipes. A recipe names an installer version, argument array, and allowed installation roots. A plan has a digest and host revision; stale plans fail. Install jobs retain their exit result and private output. A successful installer exit is not proof that the new agent is ready: connect and inspect its reported endpoint next. Recipes may install any implementation; they do not need to install Agent Instance.
 
-For optional update controls, see [installation updates](docs/contracts.md#installation-updates).
+For optional update controls, see [installation updates](docs/api.md#installation-updates).
 
 ## Programmatic use
 
@@ -49,7 +49,7 @@ agent-observatory --home /path/to/observatory api POST endpoints --body-file end
 
 The browser, CLI and other agents use the same `/api/v1` operations. Every visible screen, selected endpoint, conversation, filter, modal, ordinary form draft, focus, and scroll position has a revisioned view representation. Secret values are submitted through a separate write-only API. Embedding the Observatory itself requires explicit HTTPS `embed_origins` in its installation config. Embedded agent dashboards retain their own authentication and embedding policy.
 
-See [contracts](docs/contracts.md) for requests, scopes, examples, and compatibility limits.
+See the [API reference](docs/api.md) for requests, scopes, examples and compatibility limits.
 
 ## Checks
 
