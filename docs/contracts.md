@@ -1,5 +1,19 @@
 # Public boundaries
 
+For clients composing Observatory's endpoint registry, agent interaction,
+management mappings, host recipes and observations. These local interfaces own
+Observatory's request shapes and behavior; the
+[family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md)
+owns shared responsibilities and information ownership.
+
+Use the [interaction](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/experience.v1-candidate.md),
+[input continuity](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/input-continuity.v1-candidate.md)
+and [SDK](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/protocol-sdk.v1-candidate.md)
+agreements for the common promise; the local sections below define how this
+component fulfills it. Concrete view fields describe the current reference
+client and do not prescribe future product layouts. See the [vision](VISION.md)
+for the intended value and [validation](validation.md) for relevant checks.
+
 All routes below are relative to `/api/v1`. Browser sessions use machine authentication, secure cookies, and same-origin CSRF protection. API credentials are bearer tokens with explicit scopes; `admin` includes all scopes. TLS validation remains enabled for remote providers, with an optional locally supplied CA file. Redirects are not followed with remote credentials.
 
 | Scope | Operations |
@@ -67,6 +81,12 @@ For `generic-json`, `management.operations` contains `{id,method,path,access}`. 
 
 ### Optional memory, continued work and engine settings
 
+The reference client summarizes acceptance criteria, delivered versions and named
+reviewers from the agent's optional work contract. **Inspect work and review**
+opens the exact responsibility in that agent's own dashboard. The embedding
+command and selected work are programmatic view state; authentication and
+approval remain with that agent.
+
 Agent Instance's additional operations are offered only when its current descriptor advertises their exact path and method. A legacy descriptor without an operation list does not imply support. Calls recheck the pinned remote identity and advertised operation before using the configured credential. The Observatory never substitutes a private file or database read.
 
 Mappings include `memory`, `remember`, `memory-item`, `memory-command`, `scheduler`, `configure-scheduler`, `work-item`, `work-command`, `work-execution`, `execute-work`, `native-config`, `native-schema`, `validate-native-config`, and `apply-native-config`. Operations for a particular memory/work record take `{resource_id:<UUID>,payload?:<remote request>}`; other operations accept the remote request directly. The UUID is substituted into a fixed provider path and cannot select an arbitrary URL.
@@ -92,7 +112,7 @@ Send this to `POST endpoints/{id}/operations/execute-work`. `work` and `manage` 
 
 The Memory tab shows attributed alternatives, audience, source counts and source details. The Background work tab shows real run states, cumulative turns/tool calls, budgets and reports awaiting review. Both tabs require advertised operations. Their edit buttons open the independent agent's own UI; model/native capability settings use that same embedded service UI. The parent sends only the published `agent-instance.ui/1` navigation command to the exact configured origin. The child must separately allow that origin and authenticate the browser. A visible retry button accommodates delayed sign-in. This sends no model prompt and grants no domain authority.
 
-These new views are programmable: use `tab: "memory"` or `"background"`; `draft.memory_details` and `draft.run_report` select source/report disclosures. Use `tab: "embedded"` and `draft.embedded_route: "memory"`, `"work"`, or `"configuration"` to display the corresponding independent screen. All domain changes remain available through the operation mappings above, without driving browser pixels.
+These reference-client views are programmable: use `tab: "memory"` or `"background"`; `draft.memory_details` and `draft.run_report` select source/report disclosures. Use `tab: "embedded"` and `draft.embedded_route: "memory"`, `"work"`, or `"configuration"` to display the corresponding independent screen. All domain changes remain available through the operation mappings above, without driving browser pixels.
 
 `GET credentials` returns names only. `POST credentials {name,value}` writes a private credential. Environment secret references name those files. The host control credential cannot be referenced by an attached endpoint.
 
@@ -272,3 +292,7 @@ are treated as already closed/removed. No unsupported methods are sent.
 Views expose `agent_history_open`, `agent_history_cursor`,
 `agent_history_delete`, and non-secret `elicitation_drafts`. Agents can drive
 these controls through the same revisioned view API as other screens.
+
+## Installation updates
+
+For installations advertising `constellation.installation-updates/1`, the agent’s **Updates** tab exposes checks and installation requests. Preferences open the installation’s own programmable dashboard; its independent helper performs upgrades and recovery. Other ACP agents remain usable without this capability.
