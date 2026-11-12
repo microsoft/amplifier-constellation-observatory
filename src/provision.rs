@@ -530,7 +530,12 @@ time.sleep(60 if sys.argv[2]=='timeout' else 0.1)
                 drop(input);
             }
             let output = process.wait_with_output().unwrap();
-            assert!([Some(124), Some(125)].contains(&output.status.code()));
+            assert!(
+                [Some(124), Some(125)].contains(&output.status.code()),
+                "Remote fixture exited {:?}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
             std::thread::sleep(Duration::from_millis(800));
             assert!(
                 !marker.exists(),

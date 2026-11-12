@@ -221,7 +221,7 @@ fn generate_tls(home: &Path) -> Result<(PathBuf, PathBuf, Option<PathBuf>)> {
         "127.0.0.1".to_owned(),
         "::1".to_owned(),
     ];
-    if let Ok(addresses) = get_if_addrs::get_if_addrs() {
+    if let Ok(addresses) = if_addrs::get_if_addrs() {
         for a in addresses {
             let ip = a.ip().to_string();
             if !names.contains(&ip) {
