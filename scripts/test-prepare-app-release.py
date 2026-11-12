@@ -32,7 +32,7 @@ class ReleaseSet(unittest.TestCase):
             (instance/name).write_bytes(b'inert instance, never executed')
             (instance/'consumer-bundle.json').write_text(json.dumps({'schema':1,'kind':'instance-consumer-bundle','target':target,'version':'fixture','source':'0'*40,'binary':name,'native_runtime':{'version':'fixture'},'files':{name:release.digest(instance/name)}}))
             release.packaging.package(binary,target,'0.11.1',source,instance,machine_helpers=helper,helpers_sha256=pin)
-        (source/'constellation-machine-helper-0.2.0-linux-x86_64.zip').write_bytes(b'new rebuilt helper must not publish')
+        (source/'constellation-machine-helper-0.2.1-linux-x86_64.zip').write_bytes(b'new rebuilt helper must not publish')
         return source,helper,pin
     def test_exact_38_assets_retain_pinned_helpers_and_exclude_rebuilds(self):
         with tempfile.TemporaryDirectory() as d:

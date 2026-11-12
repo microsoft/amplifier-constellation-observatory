@@ -25,7 +25,7 @@ def module(name, filename):
 packaging = module('observatory_packaging', 'package-observatory.py')
 helpers = module('published_helpers', 'fetch-machine-helper-bundle.py')
 helper_stage = module('helper_verifier', 'stage-machine-helpers.py')
-HELPER_NAME = 'constellation-machine-helpers-0.2.0.zip'
+HELPER_NAME = 'constellation-machine-helpers-0.2.1.zip'
 
 
 def digest(path):
