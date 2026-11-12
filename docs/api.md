@@ -165,7 +165,7 @@ The Memory tab shows attributed alternatives, audience, source counts and source
 
 These reference-client views are programmable: use `tab: "memory"` or `"background"`; `draft.memory_details` and `draft.run_report` select source/report disclosures. Use `tab: "embedded"` and `draft.embedded_route: "memory"`, `"work"`, or `"configuration"` to display the corresponding independent screen. All domain changes remain available through the operation mappings above, without driving browser pixels.
 
-`GET credentials` returns names only. `POST credentials {name,value}` writes a private credential. Environment secret references name those files. The host control credential cannot be referenced by an attached endpoint.
+`GET credentials` returns names only. `POST credentials {name,value}` writes a private credential. Add `create_only:true` to refuse an existing name atomically; the new-agent connection form uses this mode so it cannot replace another installation’s grant. Environment secret references name those files. The host control credential cannot be referenced by an attached endpoint.
 
 ## Conversations
 
