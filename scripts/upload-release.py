@@ -20,7 +20,7 @@ def stage(tag, directory, run=subprocess.run):
         gh("create", tag, "--verify-tag", "--draft", "--title",
            f"Agent Observatory {tag}", "--notes",
            "Independent fleet surface with optional negotiated management. "
-           "Standalone Linux executables and Windows, macOS and Linux computer helpers. "
+           "Native Windows, macOS and Linux applications and computer helpers. Preview packages are unsigned; see exact platform qualification. "
            "See docs/releases in the source for behavior and platform limitations.")
         release = {"isDraft": True, "assets": []}
     else:

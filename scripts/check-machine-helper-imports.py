@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject an x64 Windows helper that needs separate Visual C++ runtime DLLs."""
+"""Check an x64 or ARM64 Windows executable that needs separate Visual C++ runtime DLLs."""
 import argparse
 import hashlib
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 import struct
 
 
-def inspect(data):
+def inspect(data, platform="windows-x86_64"):
     """Read ordinary and delay-load import tables without executing the PE file."""
     def unpack(fmt, offset):
         if offset < 0 or offset + struct.calcsize(fmt) > len(data):
@@ -22,8 +22,9 @@ def inspect(data):
     machine, count = unpack("<HH", pe + 4)
     optional_size = unpack("<H", pe + 20)[0]
     optional = pe + 24
-    if machine != 0x8664 or unpack("<H", optional)[0] != 0x20B:
-        raise ValueError("Expected the x86_64 PE32+ helper")
+    expected={"windows-x86_64":0x8664,"windows-aarch64":0xAA64}.get(platform)
+    if expected is None or machine != expected or unpack("<H", optional)[0] != 0x20B:
+        raise ValueError("Expected the selected native PE32+ architecture")
     if not 0 < count <= 96 or optional_size < 112:
         raise ValueError("Invalid PE header sizes")
     image_base = unpack("<Q", optional + 24)[0]
@@ -85,18 +86,19 @@ def inspect(data):
     ordinary = imports(1, 20)
     delayed = imports(13, 32, delayed=True)
     external = sorted({name for name in ordinary + delayed
-                       if name.lower().startswith(("vcruntime", "msvcp"))})
+                       if name.lower().startswith(("vcruntime", "msvcp", "concrt", "vcomp"))})
     return {"binary_sha256": hashlib.sha256(data).hexdigest(),
-            "architecture": "x86_64", "imports": ordinary, "delay_imports": delayed,
+            "architecture": platform.removeprefix("windows-"), "imports": ordinary, "delay_imports": delayed,
             "external_vc_runtime": external, "standalone_vc_runtime": not external}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--platform", choices=["windows-x86_64","windows-aarch64"], default="windows-x86_64")
     args = parser.parse_args()
     try:
-        result = inspect(args.binary.read_bytes())
+        result = inspect(args.binary.read_bytes(), args.platform)
     except (ValueError, UnicodeError, OSError) as error:
         print(json.dumps({"error": str(error)}))
         return 1

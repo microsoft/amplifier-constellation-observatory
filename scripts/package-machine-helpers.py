@@ -3,8 +3,8 @@
 import argparse, hashlib, json, zipfile
 from pathlib import Path
 
-PLATFORMS={'windows-x86_64':('Windows','Intel / AMD'),'macos-aarch64':('Mac','Apple silicon'),'macos-x86_64':('Mac','Intel'),'linux-aarch64':('Linux','ARM64'),'linux-x86_64':('Linux','Intel / AMD')}
-def package(directory,version='0.1.0'):
+PLATFORMS={'windows-x86_64':('Windows','Intel / AMD'),'windows-aarch64':('Windows','ARM64'),'macos-aarch64':('Mac','Apple silicon'),'macos-x86_64':('Mac','Intel'),'linux-aarch64':('Linux','ARM64'),'linux-x86_64':('Linux','Intel / AMD')}
+def package(directory,version='0.2.0'):
     artifacts=[]
     for platform,(label,architecture) in PLATFORMS.items():
         filename=f'constellation-machine-helper-{version}-{platform}.zip';path=directory/filename
@@ -21,4 +21,4 @@ def package(directory,version='0.1.0'):
         for a in artifacts:z.writestr(zipfile.ZipInfo(a['filename']),(directory/a['filename']).read_bytes())
     digest=hashlib.sha256(output.read_bytes()).hexdigest();(directory/(output.name+'.sha256')).write_text(digest+'  '+output.name+'\n');return output
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--directory',type=Path,required=True);p.add_argument('--version',default='0.1.0');a=p.parse_args();print(package(a.directory,a.version))
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--directory',type=Path,required=True);p.add_argument('--version',default='0.2.0');a=p.parse_args();print(package(a.directory,a.version))

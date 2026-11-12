@@ -3,7 +3,7 @@
 import argparse, hashlib, json, os, plistlib, stat, zipfile
 from pathlib import Path
 
-PLATFORMS={'windows-x86_64','macos-aarch64','macos-x86_64','linux-aarch64','linux-x86_64'}
+PLATFORMS={'windows-aarch64','windows-x86_64','macos-aarch64','macos-x86_64','linux-aarch64','linux-x86_64'}
 def package(binary,platform,version,output):
     if platform not in PLATFORMS:raise ValueError('Unsupported platform')
     if not binary.is_file() or binary.is_symlink():raise ValueError('Supply the compiled ordinary executable')

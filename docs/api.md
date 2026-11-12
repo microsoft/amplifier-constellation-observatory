@@ -3,10 +3,28 @@
 Exact routes, scopes, data and callback behavior for the current service.
 The [local agreement](contracts.md) explains the promises these interfaces serve.
 
-All routes below are relative to `/api/v1`. Browser sessions use machine authentication, secure cookies, and same-origin CSRF protection. API credentials are bearer tokens with explicit scopes; `admin` includes all scopes. TLS validation remains enabled for remote providers, with an optional locally supplied CA file. Redirects are not followed with remote credentials.
+All routes below are relative to `/api/v1`. Browser sessions use the installation's configured authentication and same-origin CSRF protection. HTTPS sessions use Secure cookies. Explicit desktop-local mode uses a local password and a loopback-only HTTP listener, with a non-Secure cookie restricted to that local origin. Existing Linux PAM/HTTPS installations retain their configuration. API credentials are bearer tokens with explicit scopes; `admin` includes all scopes. TLS validation remains enabled for remote providers, with an optional locally supplied CA file. Redirects are not followed with remote credentials.
 
 The browser opens the systems map at `/`. Detailed administration screens remain
 at `/advanced`; both use this API and the same authentication.
+
+### Native local launch
+
+Opening the native application without a subcommand creates or opens its own
+installation. First setup requires a short-lived capability delivered in the
+local browser URL fragment; the fragment is removed from browser history and is
+not sent as an HTTP query. Setup publishes a new private directory atomically and
+refuses an existing destination. The setup password is stored only as an Argon2id
+hash. Sign-in startup is an optional per-user OS task; failure to register it is
+reported without discarding the installation.
+
+Local HTTP is explicit in config (`auth_mode: local-password`,
+`web_transport: local-http`) and accepts only loopback binding, a matching local
+origin and same-origin browser requests. It cannot be used for remote pairing or
+embedding. The local CLI proves the installation identity before transmitting
+its management credential, using a nonce-bound HMAC response and the same TCP
+connection for the subsequent request. HTTPS installations retain normal TLS
+validation. This local proof does not authorize remote clients.
 
 | Scope | Operations |
 | --- | --- |

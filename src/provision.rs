@@ -11,6 +11,46 @@ use tokio::{
     process::Command,
 };
 
+// Existing SSH recipes execute on POSIX hosts. Interpret their paths in that
+// host namespace even when Observatory itself runs on Windows.
+fn posix_folder(value: &str) -> Option<Vec<&str>> {
+    if !value.starts_with('/') || value.starts_with("//") || value.contains('\0') {
+        return None;
+    }
+    let parts: Vec<_> = value
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    if parts.is_empty() || parts.contains(&"..") {
+        None
+    } else {
+        Some(parts)
+    }
+}
+fn valid_root(value: &str, remote: bool) -> bool {
+    if remote {
+        posix_folder(value).is_some()
+    } else {
+        let path = Path::new(value);
+        path.is_absolute()
+            && path.parent().is_some()
+            && !path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+    }
+}
+fn within_root(value: &str, root: &str, remote: bool) -> bool {
+    if remote {
+        match (posix_folder(value), posix_folder(root)) {
+            (Some(path), Some(root)) => path.len() > root.len() && path.starts_with(&root),
+            _ => false,
+        }
+    } else {
+        let path = Path::new(value);
+        valid_root(value, false) && path.starts_with(root) && path != Path::new(root)
+    }
+}
+
 pub fn validate_host(host: &Value) -> ApiResult<()> {
     if host["label"]
         .as_str()
@@ -39,7 +79,7 @@ pub fn validate_host(host: &Value) -> ApiResult<()> {
         .ok_or_else(|| ApiError::bad("Choose allowed installation folders"))?;
     if roots.iter().any(|x| {
         x.as_str()
-            .is_none_or(|s| !Path::new(s).is_absolute() || s == "/" || s.contains(".."))
+            .is_none_or(|s| !valid_root(s, transport == "ssh"))
     }) {
         return Err(ApiError::bad("Use specific absolute installation roots"));
     }
@@ -86,14 +126,11 @@ pub fn plan(state: &AppState, body: &Value) -> ApiResult<Value> {
         return Err(ApiError::bad("Give the new installation a short name"));
     }
     let folder = body["home"].as_str().unwrap_or("");
-    let path = Path::new(folder);
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        || !host["install_roots"].as_array().unwrap().iter().any(|r| {
-            path.starts_with(r.as_str().unwrap()) && path != Path::new(r.as_str().unwrap())
-        })
+    if !host["install_roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| within_root(folder, r.as_str().unwrap(), host["transport"] == "ssh"))
     {
         return Err(ApiError::bad(
             "Choose a new folder inside this host's allowed installation roots",
@@ -232,6 +269,12 @@ async fn execute_inner(state: &AppState, id: &str, plan: &Value) -> ApiResult<i3
         .map_err(|_| ApiError::bad("Could not start the host installer"))?;
     #[cfg(unix)]
     let pid = child.id().unwrap_or(0) as i32;
+    #[cfg(windows)]
+    let process_job = crate::process_tree::ProcessJob::attach(&child).map_err(|_| {
+        ApiError::bad(
+            "Could not establish installer process cleanup; inspect the host before retrying",
+        )
+    })?;
     // Keep the remote control stream open for the whole operation. EOF means the
     // initiating process/SSH channel disappeared and the remote group must stop.
     let mut remote_control = None;
@@ -287,6 +330,8 @@ async fn execute_inner(state: &AppState, id: &str, plan: &Value) -> ApiResult<i3
             libc::kill(-pid, libc::SIGKILL);
         }
     }
+    #[cfg(windows)]
+    drop(process_job);
     let out = tokio::time::timeout(Duration::from_secs(3), &mut output).await;
     let err = tokio::time::timeout(Duration::from_secs(3), &mut errors).await;
     let streams_complete = out.is_ok() && err.is_ok();
@@ -357,7 +402,100 @@ pub fn start(state: Arc<AppState>, body: &Value, actor: &str) -> ApiResult<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Write;
+    #[test]
+    fn remote_roots_use_posix_paths_independently_of_observatory_os() {
+        assert!(valid_root("/srv/agents", true));
+        assert!(within_root("/srv/agents/one", "/srv/agents", true));
+        for folder in [
+            "/",
+            "/srv/agents",
+            "/srv/agents-other/one",
+            "/srv/agents/../elsewhere",
+            "C:\\agents\\one",
+            "relative",
+        ] {
+            assert!(!within_root(folder, "/srv/agents", true), "{folder}");
+        }
+        assert!(!valid_root("/", true));
+        assert!(!valid_root("/srv/../etc", true));
+        let temp = tempfile::tempdir().unwrap();
+        assert!(valid_root(temp.path().to_str().unwrap(), false));
+        assert!(within_root(
+            temp.path().join("agent").to_str().unwrap(),
+            temp.path().to_str().unwrap(),
+            false
+        ));
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn local_installer_completion_and_timeout_stop_windows_descendants() {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{
+                OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
+                WaitForSingleObject,
+            },
+        };
+        for timeout in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let c:config::Config=serde_json::from_value(json!({"id":uuid::Uuid::new_v4(),"owner":"fixture","bind":"127.0.0.1","port":0,"public_url":"","pam_service":"unused","tls_cert":"","tls_key":"","tls_ca":null})).unwrap();
+            c.save(home.path()).unwrap();
+            let state = AppState::open(home.path().into()).unwrap();
+            let host = state
+                .save("hosts", json!({"id":uuid::Uuid::new_v4()}), Some(0))
+                .unwrap();
+            let id = uuid::Uuid::new_v4().to_string();
+            state
+                .save("jobs", json!({"id":id,"status":"queued"}), Some(0))
+                .unwrap();
+            let pids = home.path().join("installer-pids.json");
+            let script = r#"
+import json, os, subprocess, sys, time
+child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])
+with open(sys.argv[1],'w') as out: json.dump([os.getpid(),child.pid],out)
+print('fixture started',flush=True)
+time.sleep(60 if sys.argv[2]=='timeout' else 0.1)
+"#;
+            let plan = json!({"host_id":host["id"],"host_revision":host["revision"],"transport":"local","argv":["python","-c",script,pids,if timeout {"timeout"} else {"finish"}],"timeout_seconds":0});
+            let result = execute_inner(&state, &id, &plan).await;
+            let ids: Value = serde_json::from_slice(&std::fs::read(pids).unwrap()).unwrap();
+            let mut alive = vec![];
+            for pid in ids.as_array().unwrap() {
+                let pid = pid.as_u64().unwrap() as u32;
+                // SAFETY: only fixture-owned PIDs; close each acquired handle.
+                unsafe {
+                    let process = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid);
+                    if !process.is_null() {
+                        if WaitForSingleObject(process, 3000) != WAIT_OBJECT_0 {
+                            alive.push(pid);
+                            TerminateProcess(process, 1);
+                            WaitForSingleObject(process, 3000);
+                        }
+                        CloseHandle(process);
+                    } else {
+                        assert_eq!(
+                            std::io::Error::last_os_error().raw_os_error(),
+                            Some(87),
+                            "Cannot inspect fixture process"
+                        );
+                    }
+                }
+            }
+            assert!(
+                alive.is_empty(),
+                "Installer descendants survived: {alive:?}"
+            );
+            assert_eq!(result.is_err(), timeout);
+            assert!(
+                std::fs::read_to_string(state.home.join("jobs").join(format!("{id}.stdout")))
+                    .unwrap()
+                    .contains("fixture started")
+            );
+        }
+    }
+    #[cfg(unix)]
     #[test]
     fn remote_timeout_and_connection_loss_stop_descendants() {
         for disconnect in [false, true] {
@@ -392,7 +530,12 @@ mod tests {
                 drop(input);
             }
             let output = process.wait_with_output().unwrap();
-            assert!([Some(124), Some(125)].contains(&output.status.code()));
+            assert!(
+                [Some(124), Some(125)].contains(&output.status.code()),
+                "Remote fixture exited {:?}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
             std::thread::sleep(Duration::from_millis(800));
             assert!(
                 !marker.exists(),

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Your Observatory</title><link rel="stylesheet" href="/desktop/setup.css"><script src="/desktop/setup.js" defer></script></head>
+<body><main>
+<img class="computer" src="/desktop/frame.webp" alt="" width="180" height="140">
+<h1>Start your constellation.</h1>
+<p class="intro">Your agents, computers and connected places—together in Observatory.</p>
+<form id="setup">
+<label for="name">Your name</label><input id="name" name="name" autocomplete="username" maxlength="99" required>
+<label for="password">Choose an Observatory password</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" aria-describedby="password-help" required>
+<p id="password-help" class="help">Use at least 12 characters. This password is just for your Observatory.</p>
+<label class="check"><input id="startup" type="checkbox" checked>Open Observatory when I sign in</label>
+<button id="create" type="submit">Open my constellation</button>
+</form>
+<p id="message" role="status" aria-live="polite"></p>
+<button id="check" type="button" class="secondary" hidden>Check setup</button>
+<p class="footer">Everything here starts on this computer. Add agents and connections when you’re ready.</p>
+</main></body></html>

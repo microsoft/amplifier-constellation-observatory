@@ -49,7 +49,7 @@ class PackagingTests(unittest.TestCase):
         (self.home / "state.sqlite3").write_bytes(b"opaque retained agent/inventory fixture")
         self.protected = snapshot(self.home)
 
-    def inputs(self, folder, marker=b"first", version="0.1.0"):
+    def inputs(self, folder, marker=b"first", version="0.2.0"):
         folder.mkdir()
         for platform in packaging.PLATFORMS:
             name = f"constellation-machine-helper-{version}-{platform}.zip"
@@ -83,13 +83,24 @@ class PackagingTests(unittest.TestCase):
         for name, content in self.protected.items():
             self.assertEqual((self.home / name).read_bytes(), content)
 
-    def test_package_binds_all_five_platform_provenance_and_checksums(self):
+    def test_legacy_five_platform_bundle_remains_stageable(self):
+        bundle=self.bundle()
+        def remove_arm(manifest,members):
+            row=next(a for a in manifest['artifacts'] if a['platform']=='windows-aarch64')
+            manifest['artifacts'].remove(row); members.pop(row['filename'])
+        legacy=self.rewritten(bundle,remove_arm)
+        result=self.stage(legacy)
+        self.assertEqual(len(result['platforms']),5)
+        self.assertNotIn('windows-aarch64',result['platforms'])
+        self.assert_protected()
+
+    def test_package_binds_all_six_platform_provenance_and_checksums(self):
         bundle = self.bundle()
         with zipfile.ZipFile(bundle) as archive:
             manifest = json.loads(archive.read("manifest.json"))
             self.assertEqual(manifest["schema"], 1)
             self.assertEqual({a["platform"] for a in manifest["artifacts"]}, set(packaging.PLATFORMS))
-            self.assertEqual(len(archive.namelist()), 6)
+            self.assertEqual(len(archive.namelist()), 7)
             for artifact in manifest["artifacts"]:
                 self.assertEqual(artifact["sha256"], digest(archive.read(artifact["filename"])))
         self.assertEqual(bundle.with_suffix(".zip.sha256").read_text().split(), [digest(bundle.read_bytes()), bundle.name])

@@ -18,13 +18,41 @@ their agents and the places those agents connect to. **Advanced controls** at
 The sections below explain the installation and its controls. Discover the actual
 endpoint's capabilities before relying on optional management behavior.
 
-Observatory currently runs on Linux. Its computer helper targets Windows, macOS
-and Linux, so those computers can pair with an Observatory over a reachable LAN
-or private network. Pairing reports computer availability; it does not install
-agents or authorize remote commands. Personal/team membership and cross-platform
-Observatory hosting remain product directions.
+Observatory and its computer helper target Windows 11 (Intel/AMD and ARM), macOS
+(Intel and Apple silicon), and Linux (x64 and ARM64). Windows packages include the C runtime; Mac packages
+use system libraries. Linux packages use the supported distribution libraries,
+including PAM for existing machine-account installations. WSL, Rust, Python and
+Node are not needed to open Observatory. The shared
+[single-computer setup promise](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/installations.md#native-single-computer-setup)
+also applies to the components people connect to it.
 
-## Install on Linux
+## Open on your computer
+
+Download the Observatory package for your operating system and processor from
+[Releases](https://github.com/microsoft/amplifier-constellation-observatory/releases).
+Extract it, then open **Agent Observatory** on Mac or **agent-observatory.exe** on
+Windows. On Linux, open the extracted `agent-observatory` executable. The app opens
+your browser and asks for a name and password for this local installation. You
+can choose to start it when you sign in. Reopening the app returns to the same
+installation; it does not create a second one.
+
+This first setup listens only on your computer. It needs no certificate, remote
+account or GPU. Other devices cannot reach this local listener. Remote computer
+pairing needs a separately configured, reachable HTTPS address; the app does not
+silently expose a local installation to the network. Personal/team membership is
+still a separate product direction.
+
+Windows and Mac packages are unsigned previews until release signing and Mac
+notarization are established. Native CI checks extracted-package setup, login,
+restart and state preservation on both architectures. This does not replace
+consumer installation qualification or remove operating-system launch warnings.
+Do not disable system protections to run a package.
+
+Running a local model or Minecraft server has its own hardware and platform
+requirements. Opening Observatory does not install those services or change an
+existing agent's engine, model, credentials or work.
+
+## Advanced Linux installation
 
 ```sh
 git clone https://github.com/microsoft/amplifier-constellation-observatory.git
@@ -32,7 +60,7 @@ cd amplifier-constellation-observatory
 ./install.sh --home "$HOME/.local/share/agent-observatory/default"
 ```
 
-The installer builds a pinned checkout, creates one private installation, installs a user service, and prints its address. Rust, a C toolchain, libclang, and PAM development headers are required for building; on Ubuntu the script can install missing system packages. Existing installations are never overwritten by this command.
+This developer/administrator installer builds a pinned checkout, creates one private installation, installs a user service, and prints its address. Rust, a C toolchain, libclang, and PAM development headers are required for this source build; on Ubuntu the script can install missing system packages. They are not prerequisites for the native packages above. Existing installations are never overwritten by this command.
 
 Sign in using the configured machine account. A generated local certificate must be trusted by your browser; alternatively, put the HTTPS listener behind your existing trusted Tailscale HTTPS endpoint and use its DNS name. The server binds to all interfaces by default; choose `--bind 127.0.0.1` for a host-only listener. The generated port is stable after installation.
 
@@ -40,7 +68,7 @@ To offer computer-helper downloads, the Observatory installation owner stages
 the published bundle after verifying its release digest:
 
 ```sh
-python3 scripts/stage-machine-helpers.py --home OBS_HOME --bundle constellation-machine-helpers-0.1.0.zip --sha256 VERIFIED_RELEASE_DIGEST
+python3 scripts/stage-machine-helpers.py --home OBS_HOME --bundle constellation-machine-helpers-0.2.0.zip --sha256 VERIFIED_RELEASE_DIGEST
 ```
 
 This verifies the bundle and platform archives, retains the previous staged

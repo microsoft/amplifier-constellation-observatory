@@ -37,6 +37,15 @@ def pe(ordinary="KERNEL32.dll", delayed=None):
 
 
 class ImportTests(unittest.TestCase):
+    def test_native_arm_is_verified_only_with_matching_platform(self):
+        data=pe();struct.pack_into("<H",data,0x84,0xAA64)
+        result=guard.inspect(data,"windows-aarch64")
+        self.assertEqual(result['architecture'],'aarch64')
+        self.assertTrue(result['standalone_vc_runtime'])
+        with self.assertRaises(ValueError):guard.inspect(pe(),'windows-aarch64')
+        dynamic=pe("VCRUNTIME140.dll");struct.pack_into("<H",dynamic,0x84,0xAA64)
+        self.assertFalse(guard.inspect(dynamic,'windows-aarch64')['standalone_vc_runtime'])
+
     def test_dynamic_vcruntime_import_is_rejected(self):
         result = guard.inspect(pe("VCRUNTIME140.dll"))
         self.assertEqual(result["external_vc_runtime"], ["VCRUNTIME140.dll"])

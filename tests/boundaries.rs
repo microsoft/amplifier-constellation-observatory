@@ -11,6 +11,8 @@ use std::{path::PathBuf, sync::Arc};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 fn state() -> (TempDir, Arc<AppState>, String) {
     let dir = TempDir::new().unwrap();
     Config {
@@ -19,6 +21,8 @@ fn state() -> (TempDir, Arc<AppState>, String) {
         bind: "127.0.0.1".into(),
         port: 0,
         public_url: String::new(),
+        auth_mode: Default::default(),
+        web_transport: Default::default(),
         pam_service: "unused".into(),
         tls_cert: PathBuf::new(),
         tls_key: PathBuf::new(),
@@ -75,7 +79,7 @@ for line in sys.stdin:
  else: result={}
  send({'jsonrpc':'2.0','id':i,'result':result})
 "#).unwrap();
-    json!({"command":"python3","args":[path],"cwd":dir.path(),"transport":"stdio"})
+    json!({"command":PYTHON,"args":[path],"cwd":dir.path(),"transport":"stdio"})
 }
 
 #[tokio::test]
@@ -209,7 +213,14 @@ async fn live_progress_permission_decisions_and_cancellation_stay_with_the_reque
     let app = server::router(state.clone());
     let file = dir.path().join("permissions.py");
     std::fs::write(&file, include_str!("fixture_permissions.py")).unwrap();
-    let (_,endpoint)=request(&app,&token,"POST","/api/v1/endpoints",json!({"label":"Independent peer","acp":{"command":"python3","args":[file],"cwd":dir.path()}})).await;
+    let (_, endpoint) = request(
+        &app,
+        &token,
+        "POST",
+        "/api/v1/endpoints",
+        json!({"label":"Independent peer","acp":{"command":PYTHON,"args":[file],"cwd":dir.path()}}),
+    )
+    .await;
     let (_, session) = request(
         &app,
         &token,
@@ -791,7 +802,7 @@ fn selected_agent_and_conversation_cannot_disagree() {
 #[test]
 fn host_plan_is_explicit_bounded_and_revision_pinned() {
     let (d, s, _) = state();
-    let h=s.save("hosts",json!({"id":uuid::Uuid::new_v4(),"label":"Test","transport":"local","install_roots":[d.path()],"recipes":[{"id":"fixture","version":"1.2.3","argv":["python3","-c","print('complete')"]}]}),Some(0)).unwrap();
+    let h=s.save("hosts",json!({"id":uuid::Uuid::new_v4(),"label":"Test","transport":"local","install_roots":[d.path()],"recipes":[{"id":"fixture","version":"1.2.3","argv":[PYTHON,"-c","print('complete')"]}]}),Some(0)).unwrap();
     let b = json!({"host_id":h["id"],"recipe_id":"fixture","name":"an agent","home":d.path().join("new"),"port":0});
     let p = provision::plan(&s, &b).unwrap();
     assert_eq!(p["version"], "1.2.3");
@@ -807,7 +818,7 @@ fn host_plan_is_explicit_bounded_and_revision_pinned() {
 #[tokio::test]
 async fn install_is_idempotent_preserves_logs_and_rejects_stale_plan() {
     let (d, s, _) = state();
-    let h=s.save("hosts",json!({"id":uuid::Uuid::new_v4(),"label":"Test","transport":"local","install_roots":[d.path()],"recipes":[{"id":"fixture","version":"1","argv":["python3","-c","print('fixture installed')"]}]}),Some(0)).unwrap();
+    let h=s.save("hosts",json!({"id":uuid::Uuid::new_v4(),"label":"Test","transport":"local","install_roots":[d.path()],"recipes":[{"id":"fixture","version":"1","argv":[PYTHON,"-c","print('fixture installed')"]}]}),Some(0)).unwrap();
     let mut b = json!({"host_id":h["id"],"recipe_id":"fixture","name":"test","home":d.path().join("new"),"request_id":uuid::Uuid::new_v4()});
     let p = provision::plan(&s, &b).unwrap();
     b["plan_digest"] = p["plan_digest"].clone();
@@ -1127,7 +1138,7 @@ async fn interactive_auth_and_forms_use_the_initiators_connection() {
     let app = server::router(state.clone());
     let fixture = dir.path().join("interactions.py");
     std::fs::write(&fixture, include_str!("fixture_interactions.py")).unwrap();
-    let (_,e)=request(&app,&token,"POST","/api/v1/endpoints",json!({"label":"Question fixture","acp":{"command":"python3","args":[fixture],"cwd":dir.path()}})).await;
+    let (_,e)=request(&app,&token,"POST","/api/v1/endpoints",json!({"label":"Question fixture","acp":{"command":PYTHON,"args":[fixture],"cwd":dir.path()}})).await;
     let (_, s) = request(
         &app,
         &token,
@@ -1236,7 +1247,7 @@ for line in sys.stdin:
  else:raise RuntimeError(m)
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
 "#).unwrap();
-    let mut config = json!({"command":"python3","args":[file],"cwd":dir.path(),"env":{"LOG":log}});
+    let mut config = json!({"command":PYTHON,"args":[file],"cwd":dir.path(),"env":{"LOG":log}});
     let first = acp::catalog(&state, &config, None, None).await.unwrap();
     assert_eq!(first["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(first["nextCursor"], "page-two");

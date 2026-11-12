@@ -58,6 +58,7 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/api/v1/descriptor", get(descriptor))
+        .route("/api/v1/local-proof", get(auth::local_proof))
         .route("/api/v1/status", get(status))
         .route("/api/v1/endpoints", get(endpoints).post(add_endpoint))
         .route(
@@ -206,6 +207,24 @@ async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -
     {
         req.headers_mut().insert(header::HOST, value);
     }
+    if s.config.web_transport == config::WebTransport::LocalHttp {
+        let expected_host = s.config.public_url.strip_prefix("http://").unwrap_or("");
+        let actual_host = req
+            .headers()
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok());
+        let foreign_origin = req
+            .headers()
+            .get(header::ORIGIN)
+            .is_some_and(|h| h.to_str().ok() != Some(s.config.public_url.as_str()));
+        let foreign_site = req
+            .headers()
+            .get("sec-fetch-site")
+            .is_some_and(|h| !matches!(h.to_str().ok(), Some("same-origin" | "none")));
+        if actual_host != Some(expected_host) || foreign_origin || foreign_site {
+            return ApiError::forbidden().into_response();
+        }
+    }
     let mut response = next.run(req).await;
     let h = response.headers_mut();
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -222,7 +241,7 @@ async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -
 async fn descriptor(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "observe", false)?;
     Ok(Json(
-        json!({"id":s.config.id,"name":"Agent Observatory","version":env!("CARGO_PKG_VERSION"),"contract":"agent-observatory/1","boundary":"ACP with optional independent management providers","capabilities":{"endpoints":true,"management_providers":true,"host_installation":true,"machine_pairing":true,"stdio_acp":true,"semantic_views":true,"work_observation":true,"experiment_reports":true,"experiment_transcripts":true},"scopes":["observe","work","work:execute","memory:read","memory","manage","interact","provision","ui","admin"]}),
+        json!({"id":s.config.id,"name":"Agent Observatory","version":env!("CARGO_PKG_VERSION"),"contract":"agent-observatory/1","boundary":"ACP with optional independent management providers","capabilities":{"endpoints":true,"management_providers":true,"host_installation":true,"machine_pairing":s.config.web_transport != config::WebTransport::LocalHttp,"stdio_acp":true,"semantic_views":true,"work_observation":true,"experiment_reports":true,"experiment_transcripts":true},"scopes":["observe","work","work:execute","memory:read","memory","manage","interact","provision","ui","admin"]}),
     ))
 }
 async fn status(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
@@ -477,21 +496,11 @@ async fn credential(
     }
     let path = s.home.join("secrets").join(name);
     if body["create_only"] == true {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
+        config::private_create(&path, value.as_bytes()).map_err(|error| {
+            if error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists) {
                 ApiError(axum::http::StatusCode::CONFLICT, "This credential name is already in use. Choose a new name or use the existing credential without replacing it.".into())
             } else { ApiError::bad("Could not store the new credential") }
         })?;
-        file.write_all(value.as_bytes())?;
-        file.sync_all()?;
     } else {
         config::private_write(&path, value.as_bytes())?;
     }
