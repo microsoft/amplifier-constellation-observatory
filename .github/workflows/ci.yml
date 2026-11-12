@@ -23,7 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check release retries preserve published assets
-        run: python3 scripts/test-upload-release.py
+        run: |
+          python3 scripts/test-upload-release.py
+          python3 scripts/test-machine-helper-packaging.py
       - name: Install prerequisites
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
       - name: Install Rust
@@ -32,6 +34,14 @@ jobs:
       - run: cargo +1.93.0 test --locked
       - run: cargo +1.93.0 clippy --locked --all-targets -- -D warnings
       - run: cargo +1.93.0 build --release --locked
+      - name: Verify actual helper pairing over TLS
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          OBSERVATORY_BINARY: ${{ github.workspace }}/target/release/agent-observatory
+          MACHINE_HELPER_BINARY: ${{ github.workspace }}/machine-helper/target/debug/constellation-machine-helper
+        run: |
+          cargo +1.93.0 build --manifest-path machine-helper/Cargo.toml --locked
+          python3 machine-helper/tests/actual-server.py
       - uses: actions/setup-node@v4
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         with:
@@ -49,6 +59,7 @@ jobs:
           node tests/markdown.mjs
           node tests/world-model.mjs
           node tests/world-browser.mjs
+          node tests/machine-pairing-browser.mjs
       - name: Package standalone executable
         env:
           TARGET: ${{ matrix.target }}
@@ -65,9 +76,59 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  machine-helper:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
+            executable: constellation-machine-helper
+          - runner: ubuntu-24.04-arm
+            platform: linux-aarch64
+            executable: constellation-machine-helper
+          - runner: macos-15
+            platform: macos-aarch64
+            executable: constellation-machine-helper
+          - runner: macos-15-intel
+            platform: macos-x86_64
+            executable: constellation-machine-helper
+          - runner: windows-2025
+            platform: windows-x86_64
+            executable: constellation-machine-helper.exe
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt --component clippy
+      - run: cargo +1.93.0 fmt --manifest-path machine-helper/Cargo.toml --check
+      - run: cargo +1.93.0 test --manifest-path machine-helper/Cargo.toml --locked
+      - name: Prepare disposable Linux user service manager
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Verify current-user startup registration and removal
+        env:
+          CONSTELLATION_STARTUP_SMOKE: '1'
+        run: cargo +1.93.0 test --manifest-path machine-helper/Cargo.toml --locked --test platform_startup -- --ignored --nocapture
+      - run: cargo +1.93.0 clippy --manifest-path machine-helper/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo +1.93.0 build --manifest-path machine-helper/Cargo.toml --release --locked
+      - name: Package the native computer helper
+        run: python3 machine-helper/packaging/package.py --binary "machine-helper/target/release/${{ matrix.executable }}" --platform "${{ matrix.platform }}" --version 0.1.0 --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-helper-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: linux
+    needs: [linux, machine-helper]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -83,4 +144,6 @@ jobs:
           merge-multiple: true
           path: dist
       - name: Create draft release and attach verified builds
-        run: python3 scripts/upload-release.py --tag "$RELEASE_TAG" --directory dist
+        run: |
+          python3 scripts/package-machine-helpers.py --directory dist
+          python3 scripts/upload-release.py --tag "$RELEASE_TAG" --directory dist

@@ -30,9 +30,10 @@ Model execution and services have their own hardware needs; observing and managi
 them should not require an AI workstation.
 
 Adding a machine should feel like installing a familiar app and pairing it once.
-Reuse permitted working access; ask only for what is missing. A proposed host
-helper would reuse existing installation machinery. Routine connection details
-stay out of the way; the intended machine and granted access stay understandable.
+Reuse permitted working access; ask only for what is missing. A local helper
+establishes a revocable connection, while installation remains with supported
+owner tooling. Routine connection details stay out of the way; the intended
+machine and granted access stay understandable.
 
 From there, deploy an agent, connect an existing one, authorize a service, or
 connect it to a conversation. Where domain tooling supports it, create a service
@@ -54,6 +55,6 @@ keep state, authority and lifecycle with their owners. The
 owns agent recognition and product language. The
 [local agreement](contracts.md) defines Observatory's contribution; the
 [API](api.md) and [installation instructions](../README.md#install-on-linux)
-describe implemented support. Platform targets, pairing and team flows here guide
-development; they are not claims that today's reference control panel implements
-them.
+describe implemented support. Platform targets and team flows guide development;
+pairing availability does not imply remote installation, agent discovery or
+support for hosting Observatory on every target computer.

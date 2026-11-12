@@ -20,7 +20,8 @@ def stage(tag, directory, run=subprocess.run):
         gh("create", tag, "--verify-tag", "--draft", "--title",
            f"Agent Observatory {tag}", "--notes",
            "Independent fleet surface with optional negotiated management. "
-           "Standalone Linux x86-64 and ARM64 executables.")
+           "Standalone Linux executables and Windows, macOS and Linux computer helpers. "
+           "See docs/releases in the source for behavior and platform limitations.")
         release = {"isDraft": True, "assets": []}
     else:
         release = json.loads(result.stdout)

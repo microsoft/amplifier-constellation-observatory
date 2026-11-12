@@ -18,10 +18,11 @@ their agents and the places those agents connect to. **Advanced controls** at
 The sections below explain the installation and its controls. Discover the actual
 endpoint's capabilities before relying on optional management behavior.
 
-The product direction targets personal and team use on Windows, macOS and Linux,
-with approachable machine pairing. The implementation described below currently
-uses Linux hosting and explicit local/SSH installation recipes; those future
-flows are not yet installation options.
+Observatory currently runs on Linux. Its computer helper targets Windows, macOS
+and Linux, so those computers can pair with an Observatory over a reachable LAN
+or private network. Pairing reports computer availability; it does not install
+agents or authorize remote commands. Personal/team membership and cross-platform
+Observatory hosting remain product directions.
 
 ## Install on Linux
 
@@ -34,6 +35,17 @@ cd amplifier-constellation-observatory
 The installer builds a pinned checkout, creates one private installation, installs a user service, and prints its address. Rust, a C toolchain, libclang, and PAM development headers are required for building; on Ubuntu the script can install missing system packages. Existing installations are never overwritten by this command.
 
 Sign in using the configured machine account. A generated local certificate must be trusted by your browser; alternatively, put the HTTPS listener behind your existing trusted Tailscale HTTPS endpoint and use its DNS name. The server binds to all interfaces by default; choose `--bind 127.0.0.1` for a host-only listener. The generated port is stable after installation.
+
+To offer computer-helper downloads, the Observatory installation owner stages
+the published bundle after verifying its release digest:
+
+```sh
+python3 scripts/stage-machine-helpers.py --home OBS_HOME --bundle constellation-machine-helpers-0.1.0.zip --sha256 VERIFIED_RELEASE_DIGEST
+```
+
+This verifies the bundle and platform archives, retains the previous staged
+files, and changes no service, agent or pairing. People adding their computers
+download the tailored setup from Observatory; they do not run this owner command.
 
 ## Connect an agent
 
@@ -55,10 +67,34 @@ Credentials belong in private secret references, never command-line arguments.
 
 Built-in management mappings support Agent Instance, ACP Slack Adapter, and Persona Workshop. `generic-json` accepts a bounded list of explicitly configured operation mappings. An ACP-only endpoint remains usable without any management provider. Remote installation IDs are pinned before private reads or management writes. An optional `acp.session_cwd` selects the folder on a remote agent; `acp.cwd` is the local attach process folder.
 
-**Add a computer** saves this host or an existing SSH destination. It does not
-install a pairing helper or test access. **Create an agent** uses one of that
-computer's approved installation recipes; configure recipes and allowed folders
-under Advanced controls. Each plan binds the selected recipe and host revision.
+## Pair a computer
+
+Choose **Add a computer**, download the setup for that computer, and open it there.
+Enter the short code shown in Observatory. The setup identifies this Observatory
+and connects outward over HTTPS; no SSH, central account or inbound firewall rule
+is needed. Both computers still need a working network route to Observatory.
+Only packages available and verified by this Observatory are offered.
+
+The helper keeps its own identity and starts for the signed-in user. A fresh
+heartbeat shows that it is reachable; sleep or a network interruption preserves
+the computer and its existing agents. A lost pairing reply can be reconciled
+without creating another computer. Revoking the pairing stops its access while
+leaving agents, connections and installation records intact.
+
+Helper build support is distinct from consumer installation qualification.
+Windows and macOS packages are not yet signed/notarized; platform launch warnings
+and startup behavior must be verified on the intended OS. Do not disable system
+security to make a package run. The helper shows startup failures rather than
+claiming it will remain available after sign-in.
+The unsigned Mac preview carries public setup inside its app so moving the app
+does not lose the Observatory address. Signed distribution must use a separately
+opened setup file rather than modifying a signed bundle.
+
+Existing local and SSH hosts remain available under advanced setup. Saving those
+inventory entries does not install the helper or test access. **Create an agent**
+uses one of that computer's approved installation recipes; configure recipes and
+allowed folders under Advanced controls. Pairing alone provides no such recipe.
+Each plan binds the selected recipe and host revision.
 Saved job results survive a lost browser response. After an installer finishes,
 complete its own setup and connect its endpoint here. Recipes can install any
 implementation; they do not need to install Agent Instance.
@@ -88,12 +124,15 @@ See the [API reference](docs/api.md) for requests, scopes, examples and compatib
 cargo test --locked
 cargo clippy --all-targets -- -D warnings
 cargo build --locked
+cargo test --manifest-path machine-helper/Cargo.toml --locked
+python3 scripts/test-machine-helper-packaging.py
 npm ci
 npx playwright install chromium
 npm test
 node tests/management-browser.mjs
 node tests/world-model.mjs
 node tests/world-browser.mjs
+node tests/machine-pairing-browser.mjs
 ```
 
 Tests use disposable state, real HTTPS, real browser interactions, and deterministic ACP subprocesses. They do not post into a real collaboration service. Browser artifacts are private and ignored by Git.

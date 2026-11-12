@@ -1,4 +1,5 @@
 /target/
+/machine-helper/target/
 /private/
 /evidence/
 /node_modules/
