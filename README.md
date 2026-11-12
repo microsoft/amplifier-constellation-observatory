@@ -181,6 +181,7 @@ cargo clippy --all-targets -- -D warnings
 cargo build --locked
 cargo test --manifest-path machine-helper/Cargo.toml --locked
 python3 scripts/test-machine-helper-packaging.py
+python3 scripts/test-prepare-app-release.py
 npm ci
 npx playwright install chromium
 npm test

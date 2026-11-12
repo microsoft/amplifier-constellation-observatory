@@ -55,6 +55,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           python scripts/test-upload-release.py
+          python scripts/test-prepare-app-release.py
           python scripts/test-machine-helper-packaging.py
           python scripts/test-machine-helper-imports.py
           python scripts/test-machine-helper-elf.py
@@ -277,8 +278,8 @@ jobs:
         with:
           pattern: release-*
           merge-multiple: true
-          path: dist
+          path: artifacts
       - name: Create draft release and attach verified builds
         run: |
-          python scripts/package-machine-helpers.py --directory dist
+          python scripts/prepare-app-release.py --directory artifacts --output dist --version "${RELEASE_TAG#v}"
           python scripts/upload-release.py --tag "$RELEASE_TAG" --directory dist
