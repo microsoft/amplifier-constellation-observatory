@@ -11,6 +11,11 @@ instance. Follow connections out to services and conversations. An authorized
 Slack workspace, an installed connector and an agent connected to a particular
 channel are different things; the view should make their relationship clear.
 
+Warm robot characters can make agents easy to recognize. Computers group the
+agents running there; connected places show where those same agents participate.
+Keep growing groups readable. Use visual metaphors to explain these relationships,
+with configuration details available when needed.
+
 Select a part for its configuration, observed health and supported actions.
 Distinguish offline, still being set up and ready now without reading logs.
 The first slice is this systems view and setup controls. A work screen, task
@@ -45,6 +50,8 @@ shared ownership and access while preserving records and team resources.
 Observatory remains an optional client of independent installations. The
 [shared agreements](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md)
 keep state, authority and lifecycle with their owners. The
+[shared interaction agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md)
+owns agent recognition and product language. The
 [local agreement](contracts.md) defines Observatory's contribution; the
 [API](api.md) and [installation instructions](../README.md#install-on-linux)
 describe implemented support. Platform targets, pairing and team flows here guide

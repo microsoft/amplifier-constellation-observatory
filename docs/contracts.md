@@ -23,7 +23,12 @@ commitment does not advertise an unimplemented interface.
    Check each attached interface and preserve its own timestamp, checked revision
    and outcome. Distinguish machine containment, selected engine, service
    authorization and active conversation connections. One failing endpoint does
-   not prevent inspecting the rest.
+   not prevent inspecting the rest. Preserve each source's hierarchy: Slack
+   workspaces and channels, Teams teams and channels or chats, Minecraft servers
+   and their supported conversation spaces. A conversation connection shows
+   participation by the existing agent under
+   [composition](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md),
+   without implying an instance or engine has moved or been copied.
 2. **Pin the intended installation.** Verify the remote installation identity
    before private management reads or writes. Observatory credentials and remote
    credentials each constrain access. Read-only observation does not imply
@@ -67,6 +72,10 @@ commitment does not advertise an unimplemented interface.
    members' access revocation. Returning to personal use resolves team ownership
    and credentials while retaining history and accounting for resources that
    cannot transfer.
+9. **Keep growing setups readable.** Group agents by their computer and let people
+   inspect each agent and its connections. Show the full count and identify a
+   filtered or partial view; an agent outside the visible group must not appear
+   absent or disconnected. A visual group size is not a machine capacity limit.
 
 ## Shared promises and exact interfaces
 
@@ -87,7 +96,10 @@ first-time user through pairing, deployment and service connection, then a lost
 connection and recovery. Test personal-to-team and team-to-personal transitions
 with an unshared resource, a departing member and an interrupted administrative
 operation; verify no implicit sharing, lost records or duplicate installation. See
-[validation](validation.md) for executable checks.
+[validation](validation.md) for executable checks. With a dozen or more agents on
+one computer, including a partial or filtered view, locate an agent and trace its
+participation in two conversations without confusing residence, identity or
+connection state.
 
 **Left open:** Systems-map layout, helper packaging and transport, role design,
 sign-in provider, discovery, recovery UX and additional provider mappings.
