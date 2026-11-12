@@ -1,6 +1,6 @@
 //! Optional, observation-only machine pairing. Agent access and execution stay separate.
 use crate::{
-    auth, config,
+    auth,
     error::{ApiError, ApiResult},
     state::{AppState, now_ms},
 };
@@ -36,12 +36,19 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/v1/machine-pairings/{id}", get(read))
         .route("/api/v1/machine-pairings/{id}/cancel", post(cancel))
         .route("/api/v1/machine-pairings/{id}/redeem", post(redeem))
+        .route("/api/v1/machines/{id}/heartbeat", post(heartbeat))
+        .route("/api/v1/machines/{id}/revoke", post(revoke))
         .route(
             "/api/v1/machine-pairings/{id}/setup/{platform}",
             get(download),
         )
+}
+/// Only these existing machine-scoped operations are exposed by the optional network listener.
+pub(crate) fn helper_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/v1/machine-pairings/{id}/redeem", post(redeem))
         .route("/api/v1/machines/{id}/heartbeat", post(heartbeat))
-        .route("/api/v1/machines/{id}/revoke", post(revoke))
+        .route("/api/v1/machines/{id}/revoke", post(revoke_self))
 }
 fn conflict(message: &str) -> ApiError {
     ApiError(StatusCode::CONFLICT, message.into())
@@ -112,11 +119,7 @@ async fn create(
 ) -> ApiResult<Json<Value>> {
     let actor = auth::check(&s, &h, "provision", true)?.actor;
     uuid(&body.request_id)?;
-    if !config::valid_origin(&s.config.public_url) {
-        return Err(conflict(
-            "Set this Observatory's reachable HTTPS address before pairing a computer",
-        ));
-    }
+    crate::machine_network::endpoint(&s).await?;
     let p = {
         let mut db = s.db.lock().unwrap();
         let tx = db.transaction()?;
@@ -443,13 +446,23 @@ async fn revoke(
     h: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    // Admin authorization is separate from a machine's own revocation credential.
     let admin = auth::check(&s, &h, "provision", true).is_ok();
-    let hash = if admin { None } else { Some(bearer(&h)?) };
+    revoke_grant(&s, &h, &id, admin)
+}
+async fn revoke_self(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    revoke_grant(&s, &h, &id, false)
+}
+fn revoke_grant(s: &AppState, h: &HeaderMap, id: &str, admin: bool) -> ApiResult<Json<Value>> {
+    // The helper-only listener never accepts the Observatory's management credential.
+    let hash = if admin { None } else { Some(bearer(h)?) };
     let _inventory = s.inventory_registry_lock.lock().unwrap();
     let db = s.db.lock().unwrap();
     if let Some(hash) = hash {
-        grant(&db, &id, &hash, true)?;
+        grant(&db, id, &hash, true)?;
     }
     let exists: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM machine_grants WHERE host_id=?1)",
@@ -638,13 +651,8 @@ async fn download(
         .into_iter()
         .find(|a| a.platform == platform)
         .ok_or_else(ApiError::missing)?;
-    let ca = s
-        .config
-        .tls_ca
-        .as_ref()
-        .map(std::fs::read_to_string)
-        .transpose()?;
-    let bootstrap = json!({"schema":1,"observatory_url":s.config.public_url,"observatory_id":s.config.id,"observatory_name":format!("{}'s constellation",s.config.owner),"pairing_id":id,"expires_at":p["expires_at"],"ca_pem":ca});
+    let (endpoint, ca) = crate::machine_network::endpoint(&s).await?;
+    let bootstrap = json!({"schema":1,"observatory_url":endpoint,"observatory_id":s.config.id,"observatory_name":format!("{}'s constellation",s.config.owner),"pairing_id":id,"expires_at":p["expires_at"],"ca_pem":ca});
     let file = artifact_path(&s, &a);
     let filename = format!("attachment; filename=\"Constellation-Computer-{platform}.zip\"");
     let data = tokio::task::spawn_blocking(move || {

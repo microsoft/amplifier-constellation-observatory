@@ -20,6 +20,7 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 pub struct AppState {
+    pub machine_network: tokio::sync::Mutex<crate::machine_network::Runtime>,
     pub shutdown: tokio::sync::watch::Sender<bool>,
     pub update_hold: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     pub elicitations: crate::elicitation::Elicitations,
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGE
             None
         };
         Ok(Arc::new(Self {
+            machine_network: tokio::sync::Mutex::new(crate::machine_network::Runtime::default()),
             shutdown: tokio::sync::watch::channel(false).0,
             update_hold: Mutex::new(update_hold),
             permissions: crate::permissions::Permissions::default(),

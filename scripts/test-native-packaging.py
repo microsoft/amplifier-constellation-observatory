@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Package format and native import boundaries; synthetic executable bytes never run."""
-import hashlib, importlib.util, json, plistlib, stat, struct, tarfile, tempfile, unittest, zipfile
+import hashlib, importlib.util, io, json, plistlib, stat, struct, tarfile, tempfile, unittest, zipfile
 from pathlib import Path, PurePosixPath
 
 def module(name, filename):
@@ -53,6 +53,37 @@ class PackagingTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'integrity'):pack.package(binary,target,'0.11.0',root/'out',source)
                 manifest['target']='wrong';(source/'consumer-bundle.json').write_text(json.dumps(manifest))
                 with self.assertRaisesRegex(ValueError,'matching'):pack.package(binary,target,'0.11.0',root/'out',source)
+    def test_native_package_retains_all_verified_helper_downloads_and_rejects_tampering(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); binary=root/'binary';binary.write_bytes(b'inert app fixture')
+            helper_pack=module('helpers','package-machine-helpers.py');folder=root/'helpers';folder.mkdir()
+            for platform in helper_pack.PLATFORMS:
+                name=f'constellation-machine-helper-0.2.0-{platform}.zip'
+                stream=io.BytesIO()
+                with zipfile.ZipFile(stream,'w') as archive:archive.writestr('helper',b'inert helper')
+                data=stream.getvalue();(folder/name).write_bytes(data)
+                (folder/(name+'.json')).write_text(json.dumps({'platform':platform,'version':'0.2.0','sha256':hashlib.sha256(data).hexdigest()}))
+                (folder/(name+'.sha256')).write_text(hashlib.sha256(data).hexdigest()+'  '+name+'\n')
+            bundle=helper_pack.package(folder);expected=hashlib.sha256(bundle.read_bytes()).hexdigest()
+            with zipfile.ZipFile(bundle) as archive: members={name:archive.read(name) for name in archive.namelist()}
+            for target in pack.TARGETS:
+                record=pack.package(binary,target,'0.11.0',root/'out',machine_helpers=bundle,helpers_sha256=expected)
+                self.assertTrue(record['includes_computer_setup'])
+                path=root/'out'/record['filename'];before=path.read_bytes()
+                prefix='Observatory.app/Contents/MacOS/' if 'apple' in target else ''
+                if record['os']=='linux':
+                    with tarfile.open(path) as archive:
+                        saved={name:archive.extractfile('support/machine-helpers/'+name).read() for name in members}
+                        manifest=json.load(archive.extractfile('observatory-package.json'))
+                else:
+                    with zipfile.ZipFile(path) as archive:
+                        saved={name:archive.read(prefix+'support/machine-helpers/'+name) for name in members}
+                        manifest=json.loads(archive.read(prefix+'observatory-package.json'))
+                self.assertEqual(saved,members)
+                self.assertEqual(manifest['helpers_manifest_sha256'],hashlib.sha256(members['manifest.json']).hexdigest())
+                with self.assertRaisesRegex(ValueError,'checksum'):
+                    pack.package(binary,target,'0.11.0',root/'out',machine_helpers=bundle,helpers_sha256='0'*64)
+                self.assertEqual(path.read_bytes(),before)
     def fixture(self,cpu,library):
         name=library.encode()+b'\0';size=(24+len(name)+7)//8*8
         command=struct.pack('<6I',0xc,size,24,0,0,0)+name+bytes(size-24-len(name))

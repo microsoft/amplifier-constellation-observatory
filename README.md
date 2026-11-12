@@ -30,8 +30,9 @@ also applies to the components people connect to it.
 
 Download the Observatory package for your operating system and processor from
 [Releases](https://github.com/microsoft/amplifier-constellation-observatory/releases).
-Choose the **desktop** package to include local agent setup. Keep its support
-folder with the app. Extract it, then open **Observatory** on Mac or **agent-observatory.exe** on
+Choose the **desktop** package to include local agent setup and computer-helper
+downloads for all six supported platform/processor combinations. Keep its support
+folder with the app until setup retains its own copy. Extract it, then open **Observatory** on Mac or **agent-observatory.exe** on
 Windows. On Linux, open the extracted `agent-observatory` executable. The app opens
 your browser and asks for a name and password for this local installation. You
 can choose to start it when you sign in. Reopening the app returns to the same
@@ -39,7 +40,7 @@ installation; it does not create a second one.
 
 To update, open a newer matching download and choose **Update and reopen**.
 Observatory waits for its active conversations and installations to finish,
-then replaces its own application files. Your account, canvas, connections and
+then replaces its own application files and included setup downloads. Your account, canvas, connections and
 independently running agents remain in place. If startup fails, it restores the
 previous application. Reopening after an interruption resumes that same update.
 The optional start-at-sign-in choice is preserved.
@@ -52,10 +53,11 @@ installation does not create a conversation or prompt a model. A smaller server
 package omits local agent setup and can connect existing installations.
 
 This first setup listens only on your computer. It needs no certificate, remote
-account or GPU. Other devices cannot reach this local listener. Remote computer
-pairing needs a separately configured, reachable HTTPS address; the app does not
-silently expose a local installation to the network. Personal/team membership is
-still a separate product direction.
+account or GPU. To pair another computer, **Add a computer → Use this network**
+opens a separate HTTPS listener on the network address you select. Only computer
+helpers use that listener; your browser and management controls stay local.
+Existing HTTPS installations keep their configured address. Personal/team
+membership is still a separate product direction.
 
 Windows and Mac packages are unsigned previews until release signing and Mac
 notarization are established. Native CI checks extracted-package setup, login,
@@ -79,8 +81,9 @@ This developer/administrator installer builds a pinned checkout, creates one pri
 
 Sign in using the configured machine account. A generated local certificate must be trusted by your browser; alternatively, put the HTTPS listener behind your existing trusted Tailscale HTTPS endpoint and use its DNS name. The server binds to all interfaces by default; choose `--bind 127.0.0.1` for a host-only listener. The generated port is stable after installation.
 
-To offer computer-helper downloads, the Observatory installation owner stages
-the published bundle after verifying its release digest:
+Desktop packages already include computer-helper downloads. For a server
+installation without them, its owner can stage the published bundle after
+verifying its release digest:
 
 ```sh
 python3 scripts/stage-machine-helpers.py --home OBS_HOME --bundle constellation-machine-helpers-0.2.0.zip --sha256 VERIFIED_RELEASE_DIGEST
@@ -112,10 +115,16 @@ Built-in management mappings support Agent Instance, ACP Slack Adapter, and Pers
 
 ## Pair a computer
 
-Choose **Add a computer**, download the setup for that computer, and open it there.
+Choose **Add a computer**. For a local Observatory, select a shared LAN or private
+network address and choose **Use this network**. Then download the setup for the
+other computer and open it there.
 Enter the short code shown in Observatory. The setup identifies this Observatory
-and connects outward over HTTPS; no SSH, central account or inbound firewall rule
-is needed. Both computers still need a working network route to Observatory.
+and connects outward over HTTPS; the helper needs no SSH, central account or
+inbound connection. Both computers still need a working route to Observatory,
+and its firewall must allow the selected listener. Pairing does not create that
+route or change firewall rules. Network settings show when the selected address
+is unavailable; the local Observatory remains usable. Turning off this network
+access pauses helper status without revoking saved pairings or stopping agents.
 Only packages available and verified by this Observatory are offered.
 The paired computer does not need Rust, Python or a developer toolchain. Windows
 packages include their C runtime; Linux helper builds do not depend on the

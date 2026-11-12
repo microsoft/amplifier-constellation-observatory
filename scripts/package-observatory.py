@@ -4,6 +4,7 @@ import argparse
 import gzip
 import hashlib
 import io
+import importlib.util
 import json
 from pathlib import Path, PurePosixPath
 import plistlib
@@ -52,7 +53,16 @@ def instance_files(root, target):
     return manifest, entries
 
 
-def package(binary, target, version, output, instance_bundle=None):
+def helper_files(bundle, expected):
+    spec = importlib.util.spec_from_file_location('observatory_helper_stage', Path(__file__).with_name('stage-machine-helpers.py'))
+    stage = importlib.util.module_from_spec(spec); spec.loader.exec_module(stage)
+    manifest, files = stage.verified_files(bundle, expected)
+    if {a['platform'] for a in manifest['artifacts']} != stage.PLATFORMS:
+        raise ValueError('Desktop setup requires the complete six-platform helper bundle')
+    return files
+
+
+def package(binary, target, version, output, instance_bundle=None, machine_helpers=None, helpers_sha256=None):
     if target not in TARGETS or not re.fullmatch(r'\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?', version):
         raise ValueError('Invalid target or release version')
     if not binary.is_file() or binary.is_symlink():
@@ -61,11 +71,14 @@ def package(binary, target, version, output, instance_bundle=None):
     data = binary.read_bytes()
     output.mkdir(parents=True, exist_ok=True)
     instance, bundled = instance_files(instance_bundle, target) if instance_bundle else (None, [])
+    helpers = helper_files(machine_helpers, helpers_sha256) if machine_helpers else {}
     package_manifest = {'schema': 1, 'component': 'agent-observatory', 'version': version,
                         'target': target, 'binary': 'agent-observatory.exe' if system == 'windows' else 'agent-observatory',
                         'binary_sha256': hashlib.sha256(data).hexdigest()}
     if instance:
         package_manifest['instance_manifest_sha256'] = hashlib.sha256((instance_bundle / 'consumer-bundle.json').read_bytes()).hexdigest()
+    if helpers:
+        package_manifest['helpers_manifest_sha256'] = hashlib.sha256(helpers['manifest.json']).hexdigest()
     manifest_bytes = (json.dumps(package_manifest, indent=2, sort_keys=True) + '\n').encode()
     filename = f'agent-observatory-{version}-{target}' + ('-desktop' if instance else '') + ('.tar.gz' if system == 'linux' else '.zip')
     destination = output / filename
@@ -83,6 +96,10 @@ def package(binary, target, version, output, instance_bundle=None):
                     info = tarfile.TarInfo('support/instance/' + name)
                     info.size = len(content); info.mode = mode; info.mtime = 0
                     archive.addfile(info, io.BytesIO(content))
+                for name, content in sorted(helpers.items()):
+                    info = tarfile.TarInfo('support/machine-helpers/' + name)
+                    info.size = len(content); info.mode = 0o644; info.mtime = 0
+                    archive.addfile(info, io.BytesIO(content))
         entry = 'agent-observatory'
     else:
         entry = 'agent-observatory.exe' if system == 'windows' else 'Observatory.app/Contents/MacOS/agent-observatory'
@@ -97,6 +114,9 @@ def package(binary, target, version, output, instance_bundle=None):
             prefix = 'support/instance/' if system == 'windows' else 'Observatory.app/Contents/MacOS/support/instance/'
             for name, content, mode in bundled:
                 put(archive, prefix + name, content, mode)
+            helper_prefix = str(PurePosixPath(entry).parent / 'support/machine-helpers') + '/'
+            for name, content in sorted(helpers.items()):
+                put(archive, helper_prefix + name, content)
             if system == 'macos':
                 put(archive, 'Observatory.app/Contents/Info.plist', plistlib.dumps({
                     'CFBundleName': 'Observatory', 'CFBundleDisplayName': 'Observatory',
@@ -121,6 +141,7 @@ def package(binary, target, version, output, instance_bundle=None):
               'sha256': digest, 'binary_sha256': hashlib.sha256(data).hexdigest(),
               'signed_or_notarized': False, 'requires_developer_toolchain': False}
     record['includes_agent_setup'] = instance is not None
+    record['includes_computer_setup'] = bool(helpers)
     if instance:
         record['instance_version'] = instance['version']
         record['instance_source'] = instance['source']
@@ -135,5 +156,7 @@ if __name__ == '__main__':
     parser.add_argument('--version', required=True)
     parser.add_argument('--output', type=Path, default=Path('dist'))
     parser.add_argument('--instance-bundle', type=Path, help='Verified extracted complete Instance package for this target')
+    parser.add_argument('--machine-helpers', type=Path, help='Complete checksum-verified helper release bundle')
+    parser.add_argument('--helpers-sha256', help='Expected SHA256 of the helper release bundle')
     args = parser.parse_args()
-    print(json.dumps(package(args.binary, args.target, args.version, args.output, args.instance_bundle), indent=2))
+    print(json.dumps(package(args.binary, args.target, args.version, args.output, args.instance_bundle, args.machine_helpers, args.helpers_sha256), indent=2))

@@ -20,8 +20,10 @@ reported without discarding the installation.
 
 Local HTTP is explicit in config (`auth_mode: local-password`,
 `web_transport: local-http`) and accepts only loopback binding, a matching local
-origin and same-origin browser requests. It cannot be used for remote pairing or
-embedding. The local CLI proves the installation identity before transmitting
+origin and same-origin browser requests. This HTTP listener cannot be used for
+remote pairing or embedding. An explicitly enabled, separate helper-only HTTPS
+listener is described under [computer pairing](#computer-pairing-and-presence).
+The local CLI proves the installation identity before transmitting
 its management credential, using a nonce-bound HMAC response and the same TCP
 connection for the subsequent request. HTTPS installations retain normal TLS
 validation. This local proof does not authorize remote clients.
@@ -288,6 +290,33 @@ pairing does not grant an installer or remote shell.
 The descriptor advertises `capabilities.machine_pairing:true` for this schema-1
 interface. Download availability is reported by the pairing endpoints.
 
+Desktop packages retain verified helper archives for Windows, macOS and Linux,
+each on x64 and ARM64. An application update stages and verifies those archives
+with its application inventory; rollback restores the captured prior helper
+tree. Existing manually staged inventories remain valid update baselines.
+Server installations may instead stage the published helper bundle using the
+[owner command](../README.md#advanced-linux-installation).
+
+`GET machine-network` requires `provision` and reports `mode`, `enabled`,
+`available`, `endpoint`, `revision` and local address choices
+`addresses:[{address,label}]`. Local mode also reports the saved `address`,
+`request_id` and any `error`. `POST machine-network` requires `admin` and takes
+`{request_id:<UUID>,expected_revision,enabled,address?:<IP>}`. Enable selects a
+current non-loopback interface address; the service chooses and retains its
+port. An exact request retry returns its saved result; a changed revision is
+`409`. Read status after a lost reply before requesting another change.
+
+In desktop-local mode this opens a separate HTTPS listener exposing only helper
+redemption, heartbeat and self-revocation. It exposes no browser, sign-in,
+administration or installation routes. Its private CA is retained and its public
+certificate accompanies tailored setup downloads. The existing local browser
+listener is unchanged. Disabling access closes this helper listener without
+revoking computer grants. An unavailable address or port is reported without
+preventing local startup. `available` means this listener is ready locally; it
+does not prove another computer's route or firewall access. Existing HTTPS mode
+reports `mode:"configured_https"` and keeps its configured public URL; this
+interface cannot reconfigure it.
+
 `POST machine-pairings {request_id:<UUID>}` creates a ten-minute pairing. An exact
 request retry returns the same record. `GET machine-pairings` lists pairings;
 `GET machine-pairings/{id}` reads one. Pairings and their codes remain private to
@@ -304,7 +333,7 @@ cannot create a grant. Pairing identifiers are independently random UUIDs.
 
 `GET machine-pairings/{id}/setup/{platform}` returns a setup archive from this
 installation's verified helper artifacts. Platform IDs are `windows-x86_64`,
-`macos-aarch64`, `macos-x86_64`, `linux-aarch64` and `linux-x86_64`; unavailable
+`windows-aarch64`, `macos-aarch64`, `macos-x86_64`, `linux-aarch64` and `linux-x86_64`; unavailable
 artifacts are not advertised. The archive's `observatory-pairing.json` contains
 `schema:1`, HTTPS `observatory_url`, `observatory_id`, `observatory_name`,
 `pairing_id`, `expires_at` and optional `ca_pem`. It contains no code or credential.

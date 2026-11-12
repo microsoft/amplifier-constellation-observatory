@@ -92,7 +92,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--metadata', required=True, type=Path)
     args = parser.parse_args()
-    record = json.loads(args.metadata.read_text()); assert record['includes_agent_setup']
+    record = json.loads(args.metadata.read_text()); assert record['includes_agent_setup'] and record['includes_computer_setup']
     archive = args.metadata.parent / record['filename']
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == record['sha256']
     with tempfile.TemporaryDirectory(prefix='Observatory complete café ') as temporary:
@@ -136,6 +136,10 @@ def main():
                 account = request('/desktop/create', {'request_id': str(uuid.uuid4()), 'name': 'Native café 日本',
                     'password': 'Disposable native check ' + uuid.uuid4().hex, 'start_at_signin': False}, True)
                 assert account['authenticated']; csrf = request('/auth/session')['csrf']
+                downloads = request('/api/v1/machine-pairings')['downloads']
+                assert {d['platform'] for d in downloads} == {'windows-x86_64','windows-aarch64','macos-x86_64','macos-aarch64','linux-x86_64','linux-aarch64'}
+                helper_inventory = (home / 'machine-helper-artifacts/manifest.json').read_bytes()
+                assert hashlib.sha256(helper_inventory).hexdigest() == json.loads((home / 'app-install.json').read_text())['helpers_manifest_sha256']
                 hosts = request('/api/v1/hosts')['hosts']; assert len(hosts) == 1 and hosts[0]['native_local']
                 body = {'host_id': hosts[0]['id'], 'recipe_id': 'bundled-instance', 'request_id': str(uuid.uuid4()), 'name': 'Robot café 日本'}
                 plan = request('/api/v1/install/plan', body); agent_home = Path(plan['home'])
@@ -157,7 +161,7 @@ def main():
                 installed = json.loads((agent_home / 'engine/installation.json').read_text())
                 assert installed['sha256'] == manifest['native_runtime']['binary_sha256'] and not installed['credentials_copied']
                 print(json.dumps({'passed': ['native first account', 'this computer appears', 'fixed local agent setup',
-                    'private Python and published Native engine', 'actual current-user service startup',
+                    'private Python and published Native engine', 'all six computer helpers retained without consumer Python', 'actual current-user service startup',
                     'authenticated identity automatically connected', 'same request preserves one agent and original data'],
                     'target': record['target'], 'instance_version': manifest['version'], 'model_calls': 0,
                     'limits': ['CI user account; no external account authorization', 'no clean retail-machine claim']}))

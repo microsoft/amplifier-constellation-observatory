@@ -225,6 +225,7 @@ pub async fn serve_guarded(
     if state.config.web_transport == WebTransport::LocalHttp {
         let listener = TcpListener::bind(("127.0.0.1", state.config.port)).await?;
         record_runtime(&state)?;
+        crate::machine_network::restore(&state).await;
         start_eviction(&state);
         if open_browser {
             open_installed(&url)?;

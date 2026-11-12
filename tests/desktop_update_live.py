@@ -40,7 +40,13 @@ def main():
         (support/instance_name).write_bytes(('inert setup '+support_version).encode())
         manifest={'schema':1,'kind':'instance-consumer-bundle','version':support_version,'target':target,'binary':instance_name,'native_runtime':{},'files':{instance_name:digest(support/instance_name)}}
         (support/'consumer-bundle.json').write_text(json.dumps(manifest,indent=2)+'\n')
-        (directory/'observatory-package.json').write_text(json.dumps({'schema':1,'component':'agent-observatory','target':target,'version':version,'binary':name,'binary_sha256':digest(executable),'instance_manifest_sha256':digest(support/'consumer-bundle.json')}))
+        helpers=directory/'support/machine-helpers';helpers.mkdir()
+        rows=[]
+        for platform in ('windows-x86_64','windows-aarch64','macos-x86_64','macos-aarch64','linux-x86_64','linux-aarch64'):
+            file=helpers/(platform+'.zip');file.write_bytes(('inert helper '+support_version+' '+platform).encode())
+            rows.append({'platform':platform,'filename':file.name,'sha256':digest(file)})
+        (helpers/'manifest.json').write_text(json.dumps({'schema':1,'artifacts':rows}))
+        (directory/'observatory-package.json').write_text(json.dumps({'schema':1,'component':'agent-observatory','target':target,'version':version,'binary':name,'binary_sha256':digest(executable),'instance_manifest_sha256':digest(support/'consumer-bundle.json'),'helpers_manifest_sha256':digest(helpers/'manifest.json')}))
     with tempfile.TemporaryDirectory(prefix='observatory update café ') as folder:
         root=Path(folder);home=root/'same individual';old=root/'old';new=root/'new';old.mkdir();new.mkdir()
         for directory,extra,support_version in [(old,b'','fixture-old'),(new,b'\nobservatory-inert-update-fixture\n','fixture-new')]:
@@ -69,6 +75,11 @@ def main():
             with closing(sqlite3.connect(home/'state.sqlite3')) as db:
                 db.execute('CREATE TABLE fixture_unknown(receipt TEXT)');db.execute('INSERT INTO fixture_unknown VALUES (?)',('unknown world effect: never replay',));db.commit()
             assert (home/'bin'/name).is_file();checks.append('private executable retained with sign-in startup disabled')
+            # Legacy0.11 could have a separately staged, valid helper tree but no
+            # helper field in app-install; the next transaction must capture it.
+            baseline=json.loads((home/'app-install.json').read_text());baseline.pop('helpers_manifest_sha256')
+            (home/'app-install.json').write_text(json.dumps(baseline))
+            (home/'machine-helper-artifacts/owner-note').write_text('retain with prior support')
             candidate,update_url,update_token=launch(new/name)
             assert request(update_url,update_token,'/status')['phase']=='prepared'
             original_update=json.loads((home/'desktop-update.json').read_text())['request_id']
@@ -89,6 +100,10 @@ def main():
                 if state['phase'] in ('applied','rolled_back','deferred'):break
                 time.sleep(.2)
             assert state['phase']=='applied',state
+            assert (home/'machine-helper-artifacts/manifest.json').read_bytes()==(new/'support/machine-helpers/manifest.json').read_bytes()
+            transaction=home/'app-updates'/original_update
+            assert (transaction/'previous-helpers/owner-note').read_text()=='retain with prior support'
+            checks.append('valid legacy helper inventory captured and complete prior tree retained while new helper inventory is installed')
             actual=request(origin,control,'/api/v1/status');assert actual['id']==initial['id'];assert actual['binary_sha256']==digest(new/name);assert actual['pid']!=previous.pid
             assert (home/'support/instance/consumer-bundle.json').read_bytes()==(new/'support/instance/consumer-bundle.json').read_bytes()
             previous.wait(timeout=15);checks.append('new actual process PID and exact binary confirmed at same authenticated installation')
@@ -121,7 +136,8 @@ def main():
             checks.append('actual rejected candidate exits before previous executable restarts; unknown receipt remains unchanged')
             bad_offer.terminate();bad_offer.wait(timeout=15)
             assert (home/'support/instance/consumer-bundle.json').read_bytes()==(new/'support/instance/consumer-bundle.json').read_bytes()
-            checks.append('future setup support and only its owned recipe update together, then rollback together; manifest bytes preserved')
+            assert (home/'machine-helper-artifacts/manifest.json').read_bytes()==(new/'support/machine-helpers/manifest.json').read_bytes()
+            checks.append('Instance recipe and all computer-helper setup files update and roll back together; both inventories preserved')
             shutil.rmtree(old);candidate.terminate();candidate.wait(timeout=15);shutil.rmtree(new)
             assert request(origin,control,'/api/v1/status')['pid']==first_pid;checks.append('installed application remains running after both download folders are removed')
         finally:

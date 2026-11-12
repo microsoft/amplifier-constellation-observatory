@@ -157,6 +157,13 @@ pub fn package(executable: &Path) -> Result<Value> {
         );
         crate::local_install::inventory(&folder)?;
     }
+    if let Some(expected) = manifest["helpers_manifest_sha256"].as_str() {
+        ensure!(
+            crate::helper_support::inventory(&root.join("support/machine-helpers"), true)?.0
+                == expected,
+            "Bundled computer setup inventory changed"
+        );
+    }
     Ok(manifest)
 }
 
@@ -181,6 +188,10 @@ pub fn retain(state: &AppState) -> Result<()> {
     } else {
         None
     }; // Source/dev launches do not supply update packages.
+    let helpers_digest = match manifest.as_ref() {
+        Some(manifest) => crate::helper_support::retain(&state.home, &current, manifest)?,
+        None => crate::helper_support::installed(&state.home)?,
+    };
     let host = state
         .list("hosts")?
         .into_iter()
@@ -198,7 +209,7 @@ pub fn retain(state: &AppState) -> Result<()> {
     };
     save(
         &state.home.join("app-install.json"),
-        &json!({"schema":1,"id":state.config.id,"version":env!("CARGO_PKG_VERSION"),"binary_sha256":sha(&std::fs::read(&current)?),"package":manifest,"instance_manifest_sha256":instance_digest,"host_id":host.as_ref().map(|h|h["id"].clone()),"recipe":recipe}),
+        &json!({"schema":1,"id":state.config.id,"version":env!("CARGO_PKG_VERSION"),"binary_sha256":sha(&std::fs::read(&current)?),"package":manifest,"instance_manifest_sha256":instance_digest,"helpers_manifest_sha256":helpers_digest,"host_id":host.as_ref().map(|h|h["id"].clone()),"recipe":recipe}),
     )
 }
 
@@ -307,6 +318,7 @@ pub fn finish(state: &AppState, body: &Value) -> ApiResult<Value> {
             "The verified application differs from this process",
         ));
     }
+    crate::helper_support::matches(&state.home, selected).map_err(ApiError::from)?;
     state.update_hold.lock().unwrap().take();
     Ok(json!({"ready":true,"id":state.config.id}))
 }
@@ -371,7 +383,7 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
         "The package version differs from this application"
     );
     let c = config::Config::load(home)?;
-    let installed = read(&home.join("app-install.json")).context(
+    let mut installed = read(&home.join("app-install.json")).context(
         "This older installation has no retained update baseline. Its files were preserved.",
     )?;
     ensure!(installed["id"] == c.id, "Installation identity changed");
@@ -394,6 +406,7 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
         );
         return Ok(j);
     }
+    crate::helper_support::capture_baseline(home, &mut installed)?;
     let id = uuid::Uuid::new_v4().to_string();
     let folder = operation(home, &id)?;
     config::private_dir(&folder)?;
@@ -419,7 +432,21 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
         candidate["recipe"]["version"] =
             read(&root.join("consumer-bundle.json"))?["version"].clone();
     }
-    let j = json!({"schema":1,"request_id":id,"installation_id":c.id,"phase":"prepared","previous":installed,"candidate":candidate,"replace_support":replace_support});
+    let replace_helpers = package["helpers_manifest_sha256"].is_string()
+        && package["helpers_manifest_sha256"] != installed["helpers_manifest_sha256"];
+    if replace_helpers {
+        ensure!(
+            serde_json::to_value(crate::helper_support::installed(home)?)?
+                == installed["helpers_manifest_sha256"],
+            "Installed computer setup changed; it was preserved"
+        );
+        let root = executable.parent().unwrap().join("support/machine-helpers");
+        candidate["helpers_manifest_sha256"] = json!(crate::helper_support::copy(
+            &root,
+            &folder.join("candidate-helpers")
+        )?);
+    }
+    let j = json!({"schema":1,"request_id":id,"installation_id":c.id,"phase":"prepared","previous":installed,"candidate":candidate,"replace_support":replace_support,"replace_helpers":replace_helpers});
     write_journal(home, &j)?;
     Ok(j)
 }
@@ -548,6 +575,7 @@ async fn healthy(
             && s["binary_sha256"] == metadata["binary_sha256"]
             && s["pid"] == j["child_pid"]
         {
+            crate::helper_support::matches(home, metadata)?;
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -609,6 +637,16 @@ async fn rollback(home: &Path, j: &mut Value, folder: &Path) -> Result<()> {
         if recipe_matches(home, &j["previous"]).is_err() {
             set_recipe(home, &j["candidate"], &j["previous"])?;
         }
+    }
+    if j["replace_helpers"] == true {
+        crate::helper_support::restore(
+            home,
+            folder,
+            j["previous"]["helpers_manifest_sha256"].as_str(),
+            j["candidate"]["helpers_manifest_sha256"]
+                .as_str()
+                .context("Missing candidate computer setup")?,
+        )?;
     }
     save(&home.join("app-install.json"), &j["previous"])?;
     phase(home, j, "rollback_starting")?;
@@ -740,6 +778,23 @@ pub async fn apply(home: &Path, id: &str) -> Result<()> {
             std::fs::rename(&current, folder.join("previous-instance"))?;
             std::fs::rename(folder.join("candidate-instance"), &current)?;
             set_recipe(home, &j["previous"], &j["candidate"])?;
+        }
+        if j["replace_helpers"] == true {
+            ensure!(
+                crate::helper_support::inventory(&folder.join("candidate-helpers"), true)?.0
+                    == j["candidate"]["helpers_manifest_sha256"],
+                "Staged computer setup changed; installed files were preserved"
+            );
+            let current = home.join("machine-helper-artifacts");
+            ensure!(
+                crate::helper_support::installed(home)?.as_deref()
+                    == j["previous"]["helpers_manifest_sha256"].as_str(),
+                "Installed computer setup changed"
+            );
+            if current.exists() {
+                std::fs::rename(&current, folder.join("previous-helpers"))?;
+            }
+            std::fs::rename(folder.join("candidate-helpers"), current)?;
         }
         copy_binary(
             &candidate_binary(&folder),
