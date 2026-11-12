@@ -65,7 +65,7 @@ def main():
     target=('aarch64' if os.uname().machine in ('aarch64','arm64') else 'x86_64') if os.name!='nt' else ('aarch64' if os.environ.get('PROCESSOR_ARCHITECTURE','').lower()=='arm64' else 'x86_64')
     target+='-pc-windows-msvc' if os.name=='nt' else '-apple-darwin' if os.uname().sysname=='Darwin' else '-unknown-linux-gnu'
     version=subprocess.check_output([str(binary),'--version'],text=True).strip().split()[-1];name=binary.name
-    checks=[];processes=[];offers=[];offer_handles=[];home=None;origin=None;control=None;exit_handle=None;journal_reader=None;update_worker=None
+    checks=[];processes=[];offers=[];offer_handles=[];home=None;origin=None;control=None;exit_handle=None;journal_reader=None;update_worker=None;worker_log=None
     instance_name='agent-instance.exe' if os.name=='nt' else 'agent-instance'
     def package(directory,executable,support_version):
         support=directory/'support/instance';support.mkdir(parents=True)
@@ -190,21 +190,27 @@ def main():
                 held_id=held_journal['request_id'];assert held_id!=original_update
                 # Own the exact worker handle to keep the reader open until OS
                 # process exit. This is the unchanged entrypoint /apply runs.
+                # Process exit, not pipe EOF, is the ownership boundary: a
+                # replacement child may keep inherited pipe handles open.
+                worker_log_path=root/'held-reader-worker.log'
+                worker_log=worker_log_path.open('wb')
                 update_worker=subprocess.Popen([str(home/'app-updates'/held_id/'candidate.exe'),
                     '--home',str(home),'apply-update',held_id],stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8')
+                    stdout=subprocess.DEVNULL,stderr=worker_log)
                 processes.append(update_worker)
                 deadline=time.monotonic()+90
                 while time.monotonic()<deadline:
                     if update_worker.poll() not in (None,0):
-                        out,err=update_worker.communicate(timeout=15)
-                        raise AssertionError(('Native update worker failed while reader remained open',update_worker.returncode,out,err))
+                        update_worker.wait(timeout=15)
+                        raise AssertionError(('Native update worker failed while reader remained open',update_worker.returncode,worker_log_path.read_bytes()[-16384:].decode('utf-8','replace')))
                     state=request(held_url,held_token,'/status')
                     if state['phase'] in ('applied','rolled_back','deferred'):break
                     time.sleep(.2)
                 assert state['phase']=='applied',state
-                out,err=update_worker.communicate(timeout=30)
-                assert update_worker.returncode==0,(out,err)
+                try:update_worker.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError(('Native update worker exit unconfirmed',update_worker.pid,update_worker.poll(),state,worker_log_path.read_bytes()[-16384:].decode('utf-8','replace'))) from None
+                assert update_worker.returncode==0,worker_log_path.read_bytes()[-16384:].decode('utf-8','replace')
                 assert journal_reader.read()==snapshot,'Existing reader lost its original snapshot'
                 current=json.loads((home/'desktop-update.json').read_text(encoding='utf-8'))
                 assert current['phase']=='applied' and current['request_id']==held_id
@@ -259,5 +265,6 @@ def main():
                 try:assert kernel.WaitForSingleObject(exit_handle,15000)==0,'Owned fixture process did not exit'
                 finally:kernel.CloseHandle(exit_handle)
             else:time.sleep(.5)
+            if worker_log is not None:worker_log.close()
     print(json.dumps({'checks':checks,'model_calls':0,'production_operations':0,'binary_sha256':digest(binary),'condition':'real native binaries, same version; distinct ad-hoc signature identifier on macOS or inert trailing bytes elsewhere; inert Instance setup inventory never executed; bad candidate version injected after staging to test actual child rejection and rollback'},indent=2))
 if __name__=='__main__':main()
