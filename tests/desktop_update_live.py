@@ -33,7 +33,7 @@ def main():
     target=('aarch64' if os.uname().machine in ('aarch64','arm64') else 'x86_64') if os.name!='nt' else ('aarch64' if os.environ.get('PROCESSOR_ARCHITECTURE','').lower()=='arm64' else 'x86_64')
     target+='-pc-windows-msvc' if os.name=='nt' else '-apple-darwin' if os.uname().sysname=='Darwin' else '-unknown-linux-gnu'
     version=subprocess.check_output([str(binary),'--version'],text=True).strip().split()[-1];name=binary.name
-    checks=[];processes=[];home=None;origin=None;control=None;exit_handle=None
+    checks=[];processes=[];offers=[];offer_handles=[];home=None;origin=None;control=None;exit_handle=None
     instance_name='agent-instance.exe' if os.name=='nt' else 'agent-instance'
     def package(directory,executable,support_version):
         support=directory/'support/instance';support.mkdir(parents=True)
@@ -48,7 +48,19 @@ def main():
             package(directory,executable,support_version)
         def launch(executable):
             proc=subprocess.Popen([str(executable),'--home',str(home),'--no-browser'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8');processes.append(proc)
-            line=proc.stdout.readline();assert line,(proc.poll(),proc.stderr.read());value=json.loads(line);u=urllib.parse.urlsplit(value['url']);return proc,u.scheme+'://'+u.netloc,u.fragment
+            line=proc.stdout.readline();assert line,(proc.poll(),proc.stderr.read());value=json.loads(line);u=urllib.parse.urlsplit(value['url']);address=u.scheme+'://'+u.netloc
+            if value.get('state')=='update_available':
+                offers.append((address,u.fragment))
+                if os.name=='nt':
+                    import ctypes
+                    api=ctypes.WinDLL('kernel32',use_last_error=True)
+                    api.OpenProcess.restype=ctypes.c_void_p
+                    api.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_bool,ctypes.c_uint32]
+                    api.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_uint32]
+                    api.CloseHandle.argtypes=[ctypes.c_void_p]
+                    handle=api.OpenProcess(0x00100000,False,value['pid']);assert handle,ctypes.get_last_error()
+                    offer_handles.append((api,handle))
+            return proc,address,u.fragment
         try:
             previous,origin,setup_token=launch(old/name)
             request(origin,setup_token,'/desktop/create',{'request_id':str(uuid.uuid4()),'name':'Update fixture','password':'Disposable test password 938!','start_at_signin':False})
@@ -65,6 +77,11 @@ def main():
             assert json.loads((home/'desktop-update.json').read_text())['request_id']==original_update
             assert request(update_url,update_token,'/status')['phase']=='prepared'
             checks.append('reopening the retained application resumes the same pending request without a package or duplicate install')
+            if os.name=='nt':
+                candidate.wait(timeout=15)
+                assert candidate.returncode==0,'Installed launcher must exit before Windows replaces its mapped image'
+                assert request(update_url,update_token,'/status')['phase']=='prepared'
+                checks.append('installed Windows launcher hands update window to verified private copy and exits before replacement')
             request(update_url,update_token,'/apply',{})
             deadline=time.monotonic()+90
             while time.monotonic()<deadline:
@@ -108,6 +125,9 @@ def main():
             shutil.rmtree(old);candidate.terminate();candidate.wait(timeout=15);shutil.rmtree(new)
             assert request(origin,control,'/api/v1/status')['pid']==first_pid;checks.append('installed application remains running after both download folders are removed')
         finally:
+            for address,token in offers:
+                try:request(address,token,'/close',{})
+                except (OSError,ValueError):pass
             if home and origin and control and (home/'desktop-update.json').exists():
                 try:
                     if os.name=='nt':
@@ -127,6 +147,9 @@ def main():
                 if process.poll() is None:process.terminate()
                 try:process.wait(timeout=15)
                 except subprocess.TimeoutExpired:process.kill();process.wait(timeout=15)
+            for api,handle in offer_handles:
+                try:assert api.WaitForSingleObject(handle,15000)==0,'Owned update window did not exit'
+                finally:api.CloseHandle(handle)
             if exit_handle:
                 try:assert kernel.WaitForSingleObject(exit_handle,15000)==0,'Owned fixture process did not exit'
                 finally:kernel.CloseHandle(exit_handle)

@@ -140,6 +140,20 @@ fn rollback_invalidates_delayed_candidate_before_it_can_open_state() {
     );
 }
 #[test]
+fn unreadable_or_corrupt_update_is_preserved_and_never_treated_as_absent() {
+    let (home, _) = setup();
+    let path = home.path().join("desktop-update.json");
+    std::fs::write(&path, b"{unfinished").unwrap();
+    assert!(desktop_update::pending(home.path()));
+    assert!(desktop_update::direct_start_allowed(home.path()).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"{unfinished");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(desktop_update::pending(home.path()));
+    assert!(desktop_update::direct_start_allowed(home.path()).is_err());
+    assert!(path.is_dir());
+}
+#[test]
 fn first_install_keeps_private_executable_without_signin_startup() {
     let (h, s) = setup();
     desktop_update::retain(&s).unwrap();

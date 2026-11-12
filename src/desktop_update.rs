@@ -103,6 +103,16 @@ fn worker_active(home: &Path) -> bool {
 fn journal(home: &Path) -> Result<Value> {
     read(&home.join("desktop-update.json"))
 }
+fn optional_journal(home: &Path) -> Result<Option<Value>> {
+    match std::fs::read(home.join("desktop-update.json")) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes)
+                .context("The saved update record is invalid; it has been preserved")?,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("The saved update record could not be read"),
+    }
+}
 fn write_journal(home: &Path, value: &Value) -> Result<()> {
     save(&home.join("desktop-update.json"), value)
 }
@@ -193,10 +203,14 @@ pub fn retain(state: &AppState) -> Result<()> {
 }
 
 pub fn pending(home: &Path) -> bool {
-    journal(home).is_ok_and(|j| !complete(&j))
+    match optional_journal(home) {
+        Ok(Some(j)) => !complete(&j),
+        Ok(None) => false,
+        Err(_) => true,
+    }
 }
 pub fn direct_start_allowed(home: &Path) -> Result<()> {
-    if let Ok(j) = journal(home) {
+    if let Some(j) = optional_journal(home)? {
         ensure!(
             complete(&j) || matches!(j["phase"].as_str(), Some("prepared" | "deferred")),
             "An application update needs recovery. Open Observatory to continue the same operation."
@@ -366,7 +380,7 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
         installed["binary_sha256"] == sha(&std::fs::read(&old)?),
         "Installed application bytes changed; they were preserved"
     );
-    if let Ok(j) = journal(home)
+    if let Some(j) = optional_journal(home)?
         && !complete(&j)
     {
         ensure!(
@@ -411,6 +425,18 @@ async fn stopped(home: &Path, j: &Value) -> Result<File> {
             status["id"] == j["installation_id"],
             "A different Observatory answered"
         );
+        #[cfg(windows)]
+        let process = {
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::System::Threading::OpenProcess;
+            let pid = u32::try_from(status["pid"].as_u64().context("Missing service process")?)?;
+            let handle = unsafe { OpenProcess(0x00100000, 0, pid) };
+            ensure!(
+                !handle.is_null(),
+                "The confirmed service process could not be observed"
+            );
+            unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) }
+        };
         let _ = desktop::local_api(
             home,
             "POST",
@@ -418,6 +444,17 @@ async fn stopped(home: &Path, j: &Value) -> Result<File> {
             Some(json!({"request_id":j["request_id"],"version":status["version"]})),
         )
         .await;
+        #[cfg(windows)]
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+            ensure!(
+                unsafe { WaitForSingleObject(process.as_raw_handle(), 20000) } == 0,
+                "The confirmed service has not finished exiting; nothing was replaced"
+            );
+            Ok(())
+        })
+        .await??;
     }
     for _ in 0..100 {
         if let Ok(l) = lock(home, "service.lock") {
@@ -741,7 +778,7 @@ struct Offer {
     shutdown: tokio::sync::watch::Sender<bool>,
 }
 pub async fn offer(home: PathBuf, no_browser: bool) -> Result<()> {
-    let j = if let Ok(j) = journal(&home)
+    let j = if let Some(j) = optional_journal(&home)?
         && !complete(&j)
     {
         let digest = desktop::binary_digest()?;
@@ -755,6 +792,40 @@ pub async fn offer(home: PathBuf, no_browser: bool) -> Result<()> {
     } else {
         stage(&home, &std::env::current_exe()?)?
     };
+    #[cfg(windows)]
+    {
+        // Windows cannot replace the mapped executable of this update window.
+        // Reopening the installed app therefore hands the window to an exact
+        // private copy and exits, leaving the fixed installation path replaceable.
+        let current = std::env::current_exe()?.canonicalize()?;
+        let installed = platform::installed_binary(&platform::OBSERVATORY, &home).canonicalize()?;
+        if current == installed {
+            let folder = operation(
+                &home,
+                j["request_id"].as_str().context("Missing update ID")?,
+            )?;
+            let window = folder.join("update-window.exe");
+            let expected = desktop::binary_digest()?;
+            if window.exists() {
+                ordinary(&window)?;
+                ensure!(
+                    sha(&std::fs::read(&window)?) == expected,
+                    "The retained update window changed"
+                );
+            } else {
+                copy_binary(&current, &window)?;
+            }
+            let mut command = Command::new(window);
+            command.arg("--home").arg(&home);
+            if no_browser {
+                command.arg("--no-browser");
+            }
+            command
+                .spawn()
+                .context("Could not reopen the saved update window")?;
+            return Ok(());
+        }
+    }
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
     let token = auth::random_token();
@@ -762,7 +833,7 @@ pub async fn offer(home: PathBuf, no_browser: bool) -> Result<()> {
     if no_browser {
         println!(
             "{}",
-            json!({"state":"update_available","url":url,"version":j["candidate"]["version"]})
+            json!({"state":"update_available","url":url,"version":j["candidate"]["version"],"pid":std::process::id()})
         );
     } else {
         platform::open_browser(&url)?;
