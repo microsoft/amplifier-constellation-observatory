@@ -5,7 +5,7 @@ use crate::{
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 pub fn create(s: &AppState) -> ApiResult<Value> {
-    let v = json!({"id":uuid::Uuid::new_v4().to_string(),"revision":1,"screen":"agents","selected_id":null,"session_id":null,"tab":"overview","filter":"","modal":null,"draft":{},"focus":null,"scroll":null,"controller":"human","rendered_revision":0});
+    let v = json!({"id":uuid::Uuid::new_v4().to_string(),"revision":1,"screen":"agents","selected_id":null,"session_id":null,"tab":"overview","filter":"","modal":null,"draft":{},"focus":null,"scroll":null,"controller":"human","rendered_revision":0,"world":{"camera":{"x":0,"y":0,"scale":1},"positions":{},"machine_id":null,"place_id":null,"room_id":null,"navigation":"world"}});
     s.db.lock().unwrap().execute(
         "INSERT INTO views VALUES(?1,?2)",
         params![v["id"].as_str(), v.to_string()],
@@ -24,10 +24,62 @@ pub fn read(s: &AppState, id: &str) -> ApiResult<Value> {
 fn text(v: &Value, n: usize) -> bool {
     v.as_str().is_some_and(|s| s.len() <= n)
 }
+fn coordinate(v: &Value) -> bool {
+    v.as_f64()
+        .is_some_and(|n| n.is_finite() && n.abs() <= 1_000_000.0)
+}
+fn opaque_key(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 200
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
+}
+fn world_node(s: &str) -> bool {
+    s.split_once(':').is_some_and(|(kind, id)| match kind {
+        "machine" | "agent" => uuid::Uuid::parse_str(id).is_ok(),
+        "place" => opaque_key(id),
+        _ => false,
+    })
+}
+fn world(v: &Value) -> bool {
+    v.as_object().is_some_and(|fields| {
+        fields.iter().all(|(key, value)| match key.as_str() {
+            "camera" => value.as_object().is_some_and(|m| {
+                m.len() == 3
+                    && coordinate(&value["x"])
+                    && coordinate(&value["y"])
+                    && value["scale"]
+                        .as_f64()
+                        .is_some_and(|n| n.is_finite() && (0.2..=2.5).contains(&n))
+            }),
+            "positions" => value.as_object().is_some_and(|nodes| {
+                nodes.len() <= 500
+                    && nodes.iter().all(|(id, point)| {
+                        world_node(id)
+                            && point.as_object().is_some_and(|p| {
+                                p.len() == 2 && coordinate(&point["x"]) && coordinate(&point["y"])
+                            })
+                    })
+            }),
+            "machine_id" => {
+                value.is_null()
+                    || value
+                        .as_str()
+                        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+            }
+            "place_id" | "room_id" => value.is_null() || value.as_str().is_some_and(opaque_key),
+            "navigation" => value
+                .as_str()
+                .is_some_and(|s| ["world", "machine", "agent", "place", "room"].contains(&s)),
+            _ => false,
+        })
+    })
+}
 fn valid(key: &str, v: &Value) -> bool {
     match key {
         "screen" => v.as_str().is_some_and(|s| {
             [
+                "world",
                 "agents",
                 "connections",
                 "hosts",
@@ -38,6 +90,7 @@ fn valid(key: &str, v: &Value) -> bool {
             ]
             .contains(&s)
         }),
+        "world" => world(v),
         "selected_id" | "session_id" | "permission_details" | "experiment_id" => {
             v.is_null() || v.as_str().is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
         }

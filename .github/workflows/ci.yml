@@ -36,7 +36,7 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         with:
           node-version: '22'
-      - name: Check real browser conversation intake
+      - name: Check browser setup and conversation journeys
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
           OBSERVATORY_BINARY: ${{ github.workspace }}/target/release/agent-observatory
@@ -47,6 +47,8 @@ jobs:
           node tests/management-browser.mjs
           node tests/intake-browser.mjs
           node tests/markdown.mjs
+          node tests/world-model.mjs
+          node tests/world-browser.mjs
       - name: Package standalone executable
         env:
           TARGET: ${{ matrix.target }}

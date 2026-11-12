@@ -11,8 +11,9 @@ Start with the [vision](docs/VISION.md) for intended value and the
 The [Constellation family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md)
 owns shared composition and state ownership; the
 [working guide](https://github.com/microsoft/amplifier-constellation/blob/main/docs/working-together.md)
-applies Converge to contributions. Existing browser screens are reference
-administration access; future experiences can use the same service boundaries.
+applies Converge to contributions. The default browser view shows computers,
+their agents and the places those agents connect to. **Advanced controls** at
+`/advanced` retain the detailed administration screens.
 
 The sections below explain the installation and its controls. Discover the actual
 endpoint's capabilities before relying on optional management behavior.
@@ -36,11 +37,31 @@ Sign in using the configured machine account. A generated local certificate must
 
 ## Connect an agent
 
-Use **Connect existing**. Add a name and, if available, its management address and a named credential stored through **Access**. Under ACP options, supply the executable, arguments, and working folder used by any compatible ACP client. A remote agent can supply an explicit SSH or other attach command. Credentials belong in private secret references, never in command-line arguments.
+Open **Add → Connect an existing agent**. Supply its HTTPS management address
+and credential, optionally choose its computer, then check the observed identity.
+An unreachable agent stays saved with an unverified state. Computer placement is
+explicit; a name or address does not establish where an agent runs.
+
+Choose an agent to see its saved connections. Connect and Disconnect use that
+installation's advertised controls; setup choices appear only when it offers
+them. Place groupings describe shared workspaces, servers and their rooms.
+Grouping does not authorize a connection or prove presence, and unavailable
+connection status remains unknown.
+
+For ACP-only and other implementations, use **Advanced controls → Connect
+existing**. Supply the executable, arguments and working folder used by a
+compatible ACP client. A remote agent can use an explicit SSH attach command.
+Credentials belong in private secret references, never command-line arguments.
 
 Built-in management mappings support Agent Instance, ACP Slack Adapter, and Persona Workshop. `generic-json` accepts a bounded list of explicitly configured operation mappings. An ACP-only endpoint remains usable without any management provider. Remote installation IDs are pinned before private reads or management writes. An optional `acp.session_cwd` selects the folder on a remote agent; `acp.cwd` is the local attach process folder.
 
-**Machines** holds separately authorized local/SSH installation recipes. A recipe names an installer version, argument array, and allowed installation roots. A plan has a digest and host revision; stale plans fail. Install jobs retain their exit result and private output. A successful installer exit is not proof that the new agent is ready: connect and inspect its reported endpoint next. Recipes may install any implementation; they do not need to install Agent Instance.
+**Add a computer** saves this host or an existing SSH destination. It does not
+install a pairing helper or test access. **Create an agent** uses one of that
+computer's approved installation recipes; configure recipes and allowed folders
+under Advanced controls. Each plan binds the selected recipe and host revision.
+Saved job results survive a lost browser response. After an installer finishes,
+complete its own setup and connect its endpoint here. Recipes can install any
+implementation; they do not need to install Agent Instance.
 
 For optional update controls, see [installation updates](docs/api.md#installation-updates).
 
@@ -52,7 +73,12 @@ agent-observatory --home /path/to/observatory api GET endpoints
 agent-observatory --home /path/to/observatory api POST endpoints --body-file endpoint.json
 ```
 
-The browser, CLI and other agents use the same `/api/v1` operations. Every visible screen, selected endpoint, conversation, filter, modal, ordinary form draft, focus, and scroll position has a revisioned view representation. Secret values are submitted through a separate write-only API. Embedding the Observatory itself requires explicit HTTPS `embed_origins` in its installation config. Embedded agent dashboards retain their own authentication and embedding policy.
+The browser, CLI and other agents use the same `/api/v1` operations. Screens,
+selection, ordinary form drafts, focus and canvas positions use revisioned view
+state. Moving a canvas item changes its layout, not its installation or
+connections. Secret values use a separate write-only API. Embedding Observatory
+requires explicit HTTPS `embed_origins` in its installation config. Embedded
+agent dashboards retain their own authentication and embedding policy.
 
 See the [API reference](docs/api.md) for requests, scopes, examples and compatibility limits.
 
@@ -66,6 +92,8 @@ npm ci
 npx playwright install chromium
 npm test
 node tests/management-browser.mjs
+node tests/world-model.mjs
+node tests/world-browser.mjs
 ```
 
 Tests use disposable state, real HTTPS, real browser interactions, and deterministic ACP subprocesses. They do not post into a real collaboration service. Browser artifacts are private and ignored by Git.

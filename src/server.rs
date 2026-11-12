@@ -42,6 +42,13 @@ pub fn router(s: Arc<AppState>) -> Router {
             }),
         )
         .route("/", get(index))
+        .route("/advanced", get(advanced))
+        .route("/world.js", get(world_script))
+        .route("/world-model.js", get(world_model))
+        .route("/world.css", get(world_styles))
+        .route("/world-assets/{name}", get(world_asset))
+        .route("/api/v1/places", get(places).post(add_place))
+        .route("/api/v1/places/{id}", put(edit_place).delete(delete_place))
         .route("/app.js", get(script))
         .route("/app.css", get(styles))
         .route("/agents/{id}/context/v1/query", post(crate::context::query))
@@ -104,7 +111,76 @@ pub fn router(s: Arc<AppState>) -> Router {
         .with_state(s)
 }
 async fn index() -> Html<&'static str> {
+    Html(include_str!("../ui/world-index.html"))
+}
+async fn advanced() -> Html<&'static str> {
     Html(include_str!("../ui/index.html"))
+}
+async fn world_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../ui/world.js"),
+    )
+}
+async fn world_model() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../ui/world-model.js"),
+    )
+}
+async fn world_styles() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../ui/world.css"),
+    )
+}
+async fn world_asset(Path(name): Path<String>) -> Response {
+    let (mime, bytes): (&str, &[u8]) = match name.as_str() {
+        "frame.webp" => (
+            "image/webp",
+            include_bytes!("../ui/world-assets/frame.webp"),
+        ),
+        "places.webp" => (
+            "image/webp",
+            include_bytes!("../ui/world-assets/places.webp"),
+        ),
+        "robots.webp" => (
+            "image/webp",
+            include_bytes!("../ui/world-assets/robots.webp"),
+        ),
+        "maker.webp" => (
+            "image/webp",
+            include_bytes!("../ui/world-assets/maker.webp"),
+        ),
+        "coach.webp" => (
+            "image/webp",
+            include_bytes!("../ui/world-assets/coach.webp"),
+        ),
+        "rook.webp" => ("image/webp", include_bytes!("../ui/world-assets/rook.webp")),
+        "club.webp" => ("image/webp", include_bytes!("../ui/world-assets/club.webp")),
+        "voxel.webp" => (
+            "image/webp",
+            include_bytes!("../ui/world-assets/voxel.webp"),
+        ),
+        "slack.svg" => (
+            "image/svg+xml",
+            include_bytes!("../ui/world-assets/slack.svg"),
+        ),
+        "teams.svg" => (
+            "image/svg+xml",
+            include_bytes!("../ui/world-assets/teams.svg"),
+        ),
+        "nunito.woff2" => (
+            "font/woff2",
+            include_bytes!("../ui/world-assets/nunito.woff2"),
+        ),
+        "NUNITO-LICENSE.txt" => (
+            "text/plain",
+            include_bytes!("../ui/world-assets/NUNITO-LICENSE.txt"),
+        ),
+        _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+    ([(header::CONTENT_TYPE, mime)], bytes).into_response()
 }
 async fn script() -> impl IntoResponse {
     (
@@ -179,10 +255,25 @@ fn allowed(body: &Value, fields: &[&str]) -> ApiResult<Value> {
 fn endpoint_body(body: &Value) -> ApiResult<Value> {
     let v = allowed(
         body,
-        &["label", "kind", "acp", "management", "ui_url", "notes"],
+        &[
+            "label",
+            "kind",
+            "acp",
+            "management",
+            "ui_url",
+            "notes",
+            "host_id",
+        ],
     )?;
     provider::validate(&v)?;
     Ok(v)
+}
+fn validate_host_reference(s: &AppState, e: &Value) -> ApiResult<()> {
+    if let Some(id) = e["host_id"].as_str() {
+        s.read("hosts", id)
+            .map_err(|_| ApiError::bad("Choose a saved computer before assigning this agent"))?;
+    }
+    Ok(())
 }
 async fn endpoints(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "observe", false)?;
@@ -221,7 +312,9 @@ async fn add_endpoint(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let p = auth::check(&s, &h, "manage", true)?;
+    let _inventory = s.inventory_registry_lock.lock().unwrap();
     let mut e = endpoint_body(&body)?;
+    validate_host_reference(&s, &e)?;
     e["id"] = json!(uuid::Uuid::new_v4());
     let e = s.save("endpoints", e, Some(0))?;
     s.audit(
@@ -238,8 +331,13 @@ async fn edit_endpoint(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let p = auth::check(&s, &h, "manage", true)?;
-    s.read("endpoints", &id)?;
+    let _inventory = s.inventory_registry_lock.lock().unwrap();
+    let previous = s.read("endpoints", &id)?;
     let mut e = endpoint_body(&body)?;
+    if body.get("host_id").is_none() && previous.get("host_id").is_some() {
+        e["host_id"] = previous["host_id"].clone();
+    }
+    validate_host_reference(&s, &e)?;
     e["id"] = json!(id);
     let e = s.save("endpoints", e, Some(revision(&body)?))?;
     s.audit("endpoint.changed", Some(&id), json!({"actor":p.actor}))?;
@@ -376,7 +474,26 @@ async fn credential(
     {
         return Err(ApiError::bad("Choose a credential name and value"));
     }
-    config::private_write(&s.home.join("secrets").join(name), value.as_bytes())?;
+    let path = s.home.join("secrets").join(name);
+    if body["create_only"] == true {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                ApiError(axum::http::StatusCode::CONFLICT, "This credential name is already in use. Choose a new name or use the existing credential without replacing it.".into())
+            } else { ApiError::bad("Could not store the new credential") }
+        })?;
+        file.write_all(value.as_bytes())?;
+        file.sync_all()?;
+    } else {
+        config::private_write(&path, value.as_bytes())?;
+    }
     s.audit(
         "credential.stored",
         None,
@@ -433,6 +550,13 @@ async fn delete_host(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "provision", true)?;
+    let _inventory = s.inventory_registry_lock.lock().unwrap();
+    if s.list("endpoints")?
+        .iter()
+        .any(|e| e["host_id"].as_str() == Some(&id))
+    {
+        return Err(ApiError(axum::http::StatusCode::CONFLICT,"Reassign this computer's inventory entries before removing it. Agents are not deleted.".into()));
+    }
     s.remove("hosts", &id, revision(&body)?)?;
     Ok(Json(json!({"removed":true})))
 }
@@ -893,4 +1017,55 @@ async fn view_ack(
             .as_u64()
             .ok_or_else(|| ApiError::bad("Revision required"))?,
     )?))
+}
+
+async fn places(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
+    auth::check(&s, &h, "observe", false)?;
+    Ok(Json(json!({"places":s.list("places")?})))
+}
+async fn add_place(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let principal = auth::check(&s, &h, "manage", true)?;
+    let _guard = s.places_registry_lock.lock().unwrap();
+    let mut value = crate::places::body(&s, &body)?;
+    crate::places::validate_bindings(&s, &value, None)?;
+    value["id"] = json!(uuid::Uuid::new_v4());
+    let saved = s.save("places", value, Some(0))?;
+    s.audit(
+        "place.added",
+        saved["id"].as_str(),
+        json!({"actor":principal.actor}),
+    )?;
+    Ok(Json(saved))
+}
+async fn edit_place(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let principal = auth::check(&s, &h, "manage", true)?;
+    let _guard = s.places_registry_lock.lock().unwrap();
+    s.read("places", &id)?;
+    let mut value = crate::places::body(&s, &body)?;
+    crate::places::validate_bindings(&s, &value, Some(&id))?;
+    value["id"] = json!(id);
+    let saved = s.save("places", value, Some(revision(&body)?))?;
+    s.audit("place.changed", Some(&id), json!({"actor":principal.actor}))?;
+    Ok(Json(saved))
+}
+async fn delete_place(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let principal = auth::check(&s, &h, "manage", true)?;
+    let _guard = s.places_registry_lock.lock().unwrap();
+    s.remove("places", &id, revision(&body)?)?;
+    s.audit("place.removed", Some(&id), json!({"actor":principal.actor}))?;
+    Ok(Json(json!({"removed":true,"connections_unchanged":true})))
 }
