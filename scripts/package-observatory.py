@@ -5,7 +5,7 @@ import gzip
 import hashlib
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import plistlib
 import re
 import stat
@@ -93,7 +93,7 @@ def package(binary, target, version, output, instance_bundle=None):
             archive.writestr(info, content)
         with zipfile.ZipFile(destination, 'w') as archive:
             put(archive, entry, data, 0o755)
-            put(archive, str(Path(entry).parent / 'observatory-package.json'), manifest_bytes)
+            put(archive, str(PurePosixPath(entry).parent / 'observatory-package.json'), manifest_bytes)
             prefix = 'support/instance/' if system == 'windows' else 'Observatory.app/Contents/MacOS/support/instance/'
             for name, content, mode in bundled:
                 put(archive, prefix + name, content, mode)

@@ -37,6 +37,13 @@ your browser and asks for a name and password for this local installation. You
 can choose to start it when you sign in. Reopening the app returns to the same
 installation; it does not create a second one.
 
+To update, open a newer matching download and choose **Update and reopen**.
+Observatory waits for its active conversations and installations to finish,
+then replaces its own application files. Your account, canvas, connections and
+independently running agents remain in place. If startup fails, it restores the
+previous application. Reopening after an interruption resumes that same update.
+The optional start-at-sign-in choice is preserved.
+
 Your computer appears on the canvas. Select **Create an agent**, name it, and
 confirm installation. The included Instance package installs its private runtime
 and setup support, starts the agent, and connects its verified identity to

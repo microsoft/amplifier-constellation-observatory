@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Package format and native import boundaries; synthetic executable bytes never run."""
 import hashlib, importlib.util, json, plistlib, stat, struct, tarfile, tempfile, unittest, zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 def module(name, filename):
     spec=importlib.util.spec_from_file_location(name,Path(__file__).with_name(filename));loaded=importlib.util.module_from_spec(spec);spec.loader.exec_module(loaded);return loaded
@@ -22,7 +22,8 @@ class PackagingTests(unittest.TestCase):
                     else:
                         with zipfile.ZipFile(path) as z:
                             self.assertEqual(z.read(row['entry']),binary.read_bytes());self.assertTrue(z.getinfo(row['entry']).external_attr>>16 & stat.S_IXUSR)
-                            manifest=json.loads(z.read(str(Path(row['entry']).parent/'observatory-package.json')))
+                            self.assertTrue(all('\\' not in name for name in z.namelist()))
+                            manifest=json.loads(z.read(str(PurePosixPath(row['entry']).parent/'observatory-package.json')))
                             if row['os']=='macos':
                                 info=plistlib.loads(z.read('Observatory.app/Contents/Info.plist'));self.assertEqual(info['CFBundleExecutable'],'agent-observatory');self.assertEqual(info['CFBundlePackageType'],'APPL')
                     self.assertEqual(manifest['binary_sha256'],row['binary_sha256']);self.assertEqual(manifest['target'],target);self.assertEqual(manifest['version'],row['version']);self.assertNotIn('instance_manifest_sha256',manifest)
