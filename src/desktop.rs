@@ -498,7 +498,10 @@ async fn create_installation(state: Arc<SetupState>, create: Create) -> Response
         auth::initialize_local_password(&staged,&create.password)?;
         c.save(&staged)?;
         // Initialize then close SQLite before moving its private directory (also on Windows).
-        drop(AppState::open(staged.clone())?);
+        let staged_state=AppState::open(staged.clone())?;
+        let bundle=crate::local_install::bundled_path()?;
+        crate::local_install::prepare(&staged_state,&home,bundle.as_deref(),&crate::local_install::default_agent_root()?)?;
+        drop(staged_state);
         ensure!(!home.exists(),"The destination changed during setup; the staged files were preserved.");
         platform::publish_directory_if_absent(&staged,&home)?;
         let service=service_lock(&home)?;

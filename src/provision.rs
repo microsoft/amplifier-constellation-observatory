@@ -125,7 +125,16 @@ pub fn plan(state: &AppState, body: &Value) -> ApiResult<Value> {
     if name.is_empty() || name.len() > 120 || name.contains(['\n', '\r', '\0']) {
         return Err(ApiError::bad("Give the new installation a short name"));
     }
-    let folder = body["home"].as_str().unwrap_or("");
+    let local_folder;
+    let folder = if host["native_local"] == true && recipe["id"] == "bundled-instance" {
+        local_folder =
+            crate::local_install::folder(&host, body).map_err(|e| ApiError::bad(e.to_string()))?;
+        local_folder
+            .to_str()
+            .ok_or_else(|| ApiError::bad("The installation folder is not supported"))?
+    } else {
+        body["home"].as_str().unwrap_or("")
+    };
     if !host["install_roots"]
         .as_array()
         .unwrap()
@@ -206,6 +215,22 @@ pub async fn execute(state: Arc<AppState>, job_id: String, plan: Value) {
             } else {
                 "Installation failed. Inspect the preserved result before retrying."
             });
+            if code == 0 && plan["recipe_id"] == "bundled-instance" {
+                match crate::local_install::attach(&state, &job).await {
+                    Ok(endpoint) => {
+                        job["endpoint_id"] = endpoint["id"].clone();
+                        job["note"] = json!(
+                            "Your agent is installed and connected. Choose its model access and the places it can join."
+                        );
+                    }
+                    Err(error) => {
+                        job["connection_pending"] = json!(true);
+                        job["note"] = json!(format!(
+                            "The agent was installed, but its connection needs attention: {error}. Its installation has been preserved."
+                        ));
+                    }
+                }
+            }
         }
         Err(e) => {
             job["status"] = json!("interrupted");

@@ -382,6 +382,22 @@ changing its body is rejected. `completed` records installer success, not endpoi
 registration or model access. Connect and inspect the resulting installation
 separately.
 
+The complete desktop package registers a server-owned `native_local` host and
+fixed `bundled-instance` recipe during first setup. Its plan uses
+`{host_id, recipe_id, name, request_id}`; the server chooses a new per-user folder
+and an available port. Browser-supplied paths and nonzero ports are refused. The
+same request ID is used for planning and installation. The copied Instance
+package remains installation-owned when the original download is removed.
+
+After successful startup, Observatory verifies the returned Instance identity and
+attaches its existing local management control. A completed job has `endpoint_id`
+when that succeeds; model access is still independent. If verification is
+incomplete, `connection_pending` preserves the installation. An authenticated
+`POST jobs/{id}/connect` with provisioning scope retries only that exact saved
+connection verification and registry save. It never repeats installation, starts
+a model, or changes the agent's credentials. Generic recipes keep their existing
+explicit connection workflow.
+
 ## Views, reports and links
 
 `POST views`, `GET views/{id}`, `POST views/{id}/commands`, `POST views/{id}/ack`.

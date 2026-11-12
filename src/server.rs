@@ -78,6 +78,7 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/install", post(install))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/jobs/{id}", get(job))
+        .route("/api/v1/jobs/{id}/connect", post(connect_installation))
         .route("/api/v1/jobs/{id}/log/{stream}", get(job_log))
         .route("/api/v1/sessions", get(sessions).post(new_session))
         .route("/api/v1/sessions/{id}", get(session))
@@ -554,6 +555,9 @@ async fn edit_host(
         return crate::machines::edit_label(&s, &id, &body).map(Json);
     }
     let mut v = host_body(&body)?;
+    if old["native_local"] == true && v["transport"] == "local" {
+        v["native_local"] = json!(true);
+    }
     v["id"] = json!(id);
     let v = s.save("hosts", v, Some(revision(&body)?))?;
     s.audit("host.changed", Some(&id), json!({"actor":p.actor}))?;
@@ -604,6 +608,34 @@ async fn job(
 ) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "provision", false)?;
     Ok(Json(s.read("jobs", &id)?))
+}
+async fn connect_installation(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let p = auth::check(&s, &h, "provision", true)?;
+    let mut job = s.read("jobs", &id)?;
+    if job["status"] != "completed" || job["exit_code"] != 0 {
+        return Err(ApiError::bad(
+            "Only a completed installation can finish connecting",
+        ));
+    }
+    let endpoint = crate::local_install::attach(&s, &job)
+        .await
+        .map_err(|error| ApiError::bad(error.to_string()))?;
+    job["endpoint_id"] = endpoint["id"].clone();
+    job["connection_pending"] = json!(false);
+    job["note"] = json!(
+        "Your agent is installed and connected. Choose its model access and the places it can join."
+    );
+    let job = s.save("jobs", job, None)?;
+    s.audit(
+        "installation.connection_finished",
+        Some(&id),
+        json!({"actor":p.actor}),
+    )?;
+    Ok(Json(job))
 }
 async fn job_log(
     State(s): State<Arc<AppState>>,

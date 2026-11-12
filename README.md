@@ -30,11 +30,19 @@ also applies to the components people connect to it.
 
 Download the Observatory package for your operating system and processor from
 [Releases](https://github.com/microsoft/amplifier-constellation-observatory/releases).
-Extract it, then open **Agent Observatory** on Mac or **agent-observatory.exe** on
+Choose the **desktop** package to include local agent setup. Keep its support
+folder with the app. Extract it, then open **Observatory** on Mac or **agent-observatory.exe** on
 Windows. On Linux, open the extracted `agent-observatory` executable. The app opens
 your browser and asks for a name and password for this local installation. You
 can choose to start it when you sign in. Reopening the app returns to the same
 installation; it does not create a second one.
+
+Your computer appears on the canvas. Select **Create an agent**, name it, and
+confirm installation. The included Instance package installs its private runtime
+and setup support, starts the agent, and connects its verified identity to
+Observatory. Model account access and service connections are the next steps;
+installation does not create a conversation or prompt a model. A smaller server
+package omits local agent setup and can connect existing installations.
 
 This first setup listens only on your computer. It needs no certificate, remote
 account or GPU. Other devices cannot reach this local listener. Remote computer

@@ -25,6 +25,25 @@ class PackagingTests(unittest.TestCase):
                                 info=plistlib.loads(z.read('Observatory.app/Contents/Info.plist'));self.assertEqual(info['CFBundleExecutable'],'agent-observatory');self.assertEqual(info['CFBundlePackageType'],'APPL')
                     pack.package(binary,target,'0.11.0',root/'dist');self.assertEqual(path.read_bytes(),original)
                     self.assertEqual(json.loads(path.with_name(path.name+'.json').read_text()),row)
+    def test_complete_package_keeps_matching_instance_closure_and_refuses_changed_member(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);binary=root/'observatory';binary.write_bytes(b'inert Observatory fixture')
+            for target in pack.TARGETS:
+                source=root/target;source.mkdir();name='agent-instance.exe' if 'windows' in target else 'agent-instance'
+                (source/name).write_bytes(b'inert Instance fixture');(source/name).chmod(0o755)
+                manifest={'schema':1,'kind':'instance-consumer-bundle','version':'fixture','source':'0'*40,'target':target,'binary':name,'native_runtime':{'version':'fixture'},'files':{name:hashlib.sha256((source/name).read_bytes()).hexdigest()}}
+                (source/'consumer-bundle.json').write_text(json.dumps(manifest))
+                record=pack.package(binary,target,'0.11.0',root/'out',source)
+                self.assertTrue(record['includes_agent_setup']);self.assertIn('-desktop.',record['filename'])
+                prefix='Observatory.app/Contents/MacOS/' if 'apple' in target else ''
+                if record['os']=='linux':
+                    with tarfile.open(root/'out'/record['filename']) as archive:self.assertEqual(archive.extractfile('support/instance/'+name).read(),b'inert Instance fixture')
+                else:
+                    with zipfile.ZipFile(root/'out'/record['filename']) as archive:self.assertEqual(archive.read(prefix+'support/instance/'+name),b'inert Instance fixture')
+                (source/name).write_bytes(b'changed')
+                with self.assertRaisesRegex(ValueError,'integrity'):pack.package(binary,target,'0.11.0',root/'out',source)
+                manifest['target']='wrong';(source/'consumer-bundle.json').write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError,'matching'):pack.package(binary,target,'0.11.0',root/'out',source)
     def fixture(self,cpu,library):
         name=library.encode()+b'\0';size=(24+len(name)+7)//8*8
         command=struct.pack('<6I',0xc,size,24,0,0,0)+name+bytes(size-24-len(name))
