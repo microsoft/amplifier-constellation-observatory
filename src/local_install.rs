@@ -33,7 +33,7 @@ fn ordinary(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn inventory(root: &Path) -> Result<(Value, Vec<(String, PathBuf)>)> {
+pub(crate) fn inventory(root: &Path) -> Result<(Value, Vec<(String, PathBuf)>)> {
     let file = ordinary(root, "consumer-bundle.json")?;
     ensure!(
         file.metadata()?.len() <= 4 * 1024 * 1024,
@@ -95,6 +95,37 @@ fn inventory(root: &Path) -> Result<(Value, Vec<(String, PathBuf)>)> {
     Ok((manifest, paths))
 }
 
+pub(crate) fn copy_bundle(source: &Path, destination: &Path) -> Result<Value> {
+    let (manifest, files) = inventory(source)?;
+    ensure!(
+        !destination.exists(),
+        "An agent package is already installed"
+    );
+    config::private_dir(destination)?;
+    for (name, source) in files {
+        let target = destination.join(name);
+        config::private_dir(target.parent().unwrap())?;
+        std::fs::copy(&source, &target)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let executable = source.metadata()?.permissions().mode() & 0o111 != 0;
+            std::fs::set_permissions(
+                &target,
+                std::fs::Permissions::from_mode(if executable { 0o700 } else { 0o600 }),
+            )?;
+        }
+        #[cfg(windows)]
+        platform::protect_file(&target)?;
+    }
+    config::private_write(
+        &destination.join("consumer-bundle.json"),
+        &std::fs::read(source.join("consumer-bundle.json"))?,
+    )?;
+    inventory(destination)?;
+    Ok(manifest)
+}
+
 /// Called only during explicit new desktop setup. Existing registries are never
 /// rewritten by opening an application or replacing a downloaded executable.
 pub fn prepare(
@@ -107,35 +138,8 @@ pub fn prepare(
     let id = uuid::Uuid::new_v4().to_string();
     let mut recipes = Vec::new();
     if let Some(source) = bundle {
-        let (manifest, files) = inventory(source)?;
         let destination = state.home.join("support/instance");
-        ensure!(
-            !destination.exists(),
-            "An agent package is already installed"
-        );
-        config::private_dir(&destination)?;
-        for (name, source) in files {
-            let target = destination.join(&name);
-            config::private_dir(target.parent().unwrap())?;
-            std::fs::copy(&source, &target)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let executable = source.metadata()?.permissions().mode() & 0o111 != 0;
-                std::fs::set_permissions(
-                    &target,
-                    std::fs::Permissions::from_mode(if executable { 0o700 } else { 0o600 }),
-                )?;
-            }
-            #[cfg(windows)]
-            platform::protect_file(&target)?;
-        }
-        config::private_write(
-            &destination.join("consumer-bundle.json"),
-            &serde_json::to_vec(&manifest)?,
-        )?;
-        // Verify the copied bytes too, before enabling a recipe.
-        inventory(&destination)?;
+        let manifest = copy_bundle(source, &destination)?;
         let binary = final_home
             .join("support/instance")
             .join(manifest["binary"].as_str().unwrap());
@@ -311,6 +315,22 @@ mod tests {
         let c: config::Config = serde_json::from_value(json!({"id":uuid::Uuid::new_v4(),"owner":"fixture","bind":"127.0.0.1","port":0,"public_url":"","pam_service":"unused","tls_cert":"","tls_key":"","tls_ca":null})).unwrap();
         c.save(root).unwrap();
         AppState::open(root.into()).unwrap()
+    }
+    #[test]
+    fn copy_preserves_exact_inventory_bytes_used_by_package_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("download");
+        fixture_bundle(&source);
+        let path = source.join("consumer-bundle.json");
+        let value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let bytes = format!("{}\n", serde_json::to_string_pretty(&value).unwrap()).into_bytes();
+        std::fs::write(&path, &bytes).unwrap();
+        let destination = temp.path().join("retained");
+        copy_bundle(&source, &destination).unwrap();
+        assert_eq!(
+            std::fs::read(destination.join("consumer-bundle.json")).unwrap(),
+            bytes
+        );
     }
     #[test]
     fn changed_package_is_rejected_before_enabling_local_installation() {

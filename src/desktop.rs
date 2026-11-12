@@ -41,6 +41,7 @@ struct SetupState {
     session: SetupSession,
     ready: Mutex<Option<ReadyInstallation>>,
     creation: tokio::sync::Mutex<()>,
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,8 +202,21 @@ fn open_installed(url: &str) -> Result<()> {
 }
 
 pub async fn serve(home: PathBuf, open_browser: bool) -> Result<()> {
+    serve_guarded(home, open_browser, None).await
+}
+pub async fn serve_guarded(
+    home: PathBuf,
+    open_browser: bool,
+    update: Option<(String, String)>,
+) -> Result<()> {
     let _lock = service_lock(&home)?;
+    if let Some((id, nonce)) = update.as_ref() {
+        crate::desktop_update::validate_start(&home, id, nonce)?;
+    } else {
+        crate::desktop_update::direct_start_allowed(&home)?;
+    }
     let state = AppState::open(home.clone())?;
+    let mut shutdown = state.shutdown.subscribe();
     let url = if state.config.public_url.is_empty() {
         format!("https://localhost:{}", state.config.port)
     } else {
@@ -215,7 +229,11 @@ pub async fn serve(home: PathBuf, open_browser: bool) -> Result<()> {
         if open_browser {
             open_installed(&url)?;
         }
-        axum::serve(listener, server::router(state)).await?;
+        axum::serve(listener, server::router(state))
+            .with_graceful_shutdown(async move {
+                let _ = shutdown.changed().await;
+            })
+            .await?;
     } else {
         let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
             &state.config.tls_cert,
@@ -231,18 +249,38 @@ pub async fn serve(home: PathBuf, open_browser: bool) -> Result<()> {
         if open_browser {
             open_installed(&url)?;
         }
+        let handle = axum_server::Handle::new();
+        let signal = handle.clone();
+        tokio::spawn(async move {
+            let _ = shutdown.changed().await;
+            signal.graceful_shutdown(Some(Duration::from_secs(30)));
+        });
         axum_server::from_tcp_rustls(listener, tls)?
+            .handle(handle)
             .serve(server::router(state).into_make_service())
             .await?;
     }
     Ok(())
 }
 
+pub fn binary_digest() -> Result<String> {
+    use sha2::{Digest, Sha256};
+    static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(value) = DIGEST.get() {
+        return Ok(value.clone());
+    }
+    let value = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(std::env::current_exe()?)?)
+    );
+    let _ = DIGEST.set(value.clone());
+    Ok(value)
+}
 fn record_runtime(state: &AppState) -> Result<()> {
     config::private_write(
         &state.home.join("runtime.json"),
         &serde_json::to_vec(
-            &json!({"pid":std::process::id(),"port":state.config.port,"url":state.config.public_url,"version":env!("CARGO_PKG_VERSION")}),
+            &json!({"pid":std::process::id(),"port":state.config.port,"url":state.config.public_url,"version":env!("CARGO_PKG_VERSION"),"binary_sha256":binary_digest()?}),
         )?,
     )
 }
@@ -262,6 +300,16 @@ fn start_eviction(state: &Arc<AppState>) {
 pub async fn launch(home: PathBuf, no_browser: bool) -> Result<()> {
     if home.join("config.json").exists() {
         let c = Config::load(&home)?;
+        if crate::desktop_update::pending(&home) {
+            return crate::desktop_update::offer(home, no_browser).await;
+        }
+        if let Ok(installed) = std::fs::read(home.join("app-install.json")) {
+            let installed: serde_json::Value = serde_json::from_slice(&installed)?;
+            if binary_digest()? != installed["binary_sha256"] {
+                crate::desktop_update::package(&std::env::current_exe()?)?;
+                return crate::desktop_update::offer(home, no_browser).await;
+            }
+        }
         if let Ok(status) = local_api(&home, "GET", "status", None).await {
             ensure!(
                 status["id"] == c.id,
@@ -344,6 +392,7 @@ pub async fn launch(home: PathBuf, no_browser: bool) -> Result<()> {
         session: session.clone(),
         ready: Mutex::new(None),
         creation: tokio::sync::Mutex::new(()),
+        shutdown: tokio::sync::watch::channel(false).0,
     });
     let url = format!("{}/#{}", session.origin, session.token);
     if no_browser {
@@ -354,10 +403,14 @@ pub async fn launch(home: PathBuf, no_browser: bool) -> Result<()> {
     } else {
         platform::open_browser(&url)?;
     }
+    let mut shutdown = state.shutdown.subscribe();
     let result = axum::serve(
         listener,
         Router::new().fallback(any(dispatch)).with_state(state),
     )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown.changed().await;
+    })
     .await;
     // Only our exact local launch capability is removed; no installed state is rolled back.
     if std::fs::read(&session_path)
@@ -501,6 +554,7 @@ async fn create_installation(state: Arc<SetupState>, create: Create) -> Response
         let staged_state=AppState::open(staged.clone())?;
         let bundle=crate::local_install::bundled_path()?;
         crate::local_install::prepare(&staged_state,&home,bundle.as_deref(),&crate::local_install::default_agent_root()?)?;
+        crate::desktop_update::retain(&staged_state)?;
         drop(staged_state);
         ensure!(!home.exists(),"The destination changed during setup; the staged files were preserved.");
         platform::publish_directory_if_absent(&staged,&home)?;
@@ -514,6 +568,8 @@ async fn create_installation(state: Arc<SetupState>, create: Create) -> Response
         Ok(Ok((ready,warning,service)))=>{
             if let Err(error)=record_runtime(&ready) {return (StatusCode::INTERNAL_SERVER_ERROR,axum::Json(json!({"error":error.to_string()}))).into_response()}
             start_eviction(&ready);
+            let mut shutdown=ready.shutdown.subscribe();let setup_shutdown=state.shutdown.clone();
+            tokio::spawn(async move {if shutdown.changed().await.is_ok(){setup_shutdown.send_replace(true);}});
             let response=auth::signed_in(&ready,&ready.config.owner,"local-setup").unwrap_or_else(IntoResponse::into_response);
             *state.ready.lock().unwrap()=Some((id,ready,warning,service));
             response

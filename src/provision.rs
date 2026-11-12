@@ -393,6 +393,9 @@ async fn execute_inner(state: &AppState, id: &str, plan: &Value) -> ApiResult<i3
 }
 pub fn start(state: Arc<AppState>, body: &Value, actor: &str) -> ApiResult<Value> {
     let gate = state.provision_gate.lock().unwrap();
+    if crate::desktop_update::busy(&state) {
+        return Err(ApiError::busy());
+    }
     let request = body["request_id"]
         .as_str()
         .ok_or_else(|| ApiError::bad("Supply a unique request ID"))?;

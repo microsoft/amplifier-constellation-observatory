@@ -5,6 +5,7 @@ pub mod auth;
 pub mod config;
 pub mod context;
 pub mod desktop;
+pub mod desktop_update;
 pub mod elicitation;
 pub mod error;
 pub mod experiments;

@@ -60,6 +60,8 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/descriptor", get(descriptor))
         .route("/api/v1/local-proof", get(auth::local_proof))
         .route("/api/v1/status", get(status))
+        .route("/api/v1/native-update/stop", post(update_stop))
+        .route("/api/v1/native-update/finish", post(update_finish))
         .route("/api/v1/endpoints", get(endpoints).post(add_endpoint))
         .route(
             "/api/v1/endpoints/{id}",
@@ -226,6 +228,12 @@ async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -
             return ApiError::forbidden().into_response();
         }
     }
+    if crate::desktop_update::busy(&s)
+        && req.method() != axum::http::Method::GET
+        && !req.uri().path().starts_with("/api/v1/native-update/")
+    {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":"Observatory is reopening after its local update. Your agents keep running."}))).into_response();
+    }
     let mut response = next.run(req).await;
     let h = response.headers_mut();
     h.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -239,6 +247,22 @@ async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -
     h.insert(header::CONTENT_SECURITY_POLICY,format!("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' data:; connect-src 'self'; frame-src https:; frame-ancestors {ancestors}; base-uri 'self'; form-action 'self'").parse().unwrap());
     response
 }
+async fn update_stop(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::check(&s, &h, "admin", true)?;
+    Ok(Json(crate::desktop_update::stop(&s, &body)?))
+}
+async fn update_finish(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::check(&s, &h, "admin", true)?;
+    Ok(Json(crate::desktop_update::finish(&s, &body)?))
+}
 async fn descriptor(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "observe", false)?;
     Ok(Json(
@@ -248,7 +272,7 @@ async fn descriptor(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<J
 async fn status(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "observe", false)?;
     Ok(Json(
-        json!({"id":s.config.id,"version":env!("CARGO_PKG_VERSION"),"endpoints":s.list("endpoints")?.len(),"hosts":s.list("hosts")?.len(),"jobs":s.list("jobs")?.len(),"active_sessions":s.active_sessions.lock().unwrap().len()}),
+        json!({"id":s.config.id,"version":env!("CARGO_PKG_VERSION"),"endpoints":s.list("endpoints")?.len(),"hosts":s.list("hosts")?.len(),"jobs":s.list("jobs")?.len(),"active_sessions":s.active_sessions.lock().unwrap().len(),"pid":std::process::id(),"binary_sha256":crate::desktop::binary_digest().map_err(ApiError::from)?}),
     ))
 }
 fn revision(body: &Value) -> ApiResult<u64> {
@@ -658,6 +682,11 @@ async fn agent_sessions(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "manage", true)?;
+    let _permit = s
+        .operation_gate
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::busy())?;
     let endpoint = s.read("endpoints", &id)?;
     let action = body["action"].as_str().unwrap_or("list");
     if !["list", "delete"].contains(&action) {
@@ -753,6 +782,9 @@ async fn close_session(
     auth::check(&s, &h, "interact", true)?;
     {
         let _gate = s.talk_gate.lock().unwrap();
+        if crate::desktop_update::busy(&s) {
+            return Err(ApiError::busy());
+        }
         let mut session = s.read("sessions", &id)?;
         let mut active = s.active_sessions.lock().unwrap();
         if !active.insert(id.clone()) {
