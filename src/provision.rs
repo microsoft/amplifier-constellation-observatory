@@ -178,9 +178,13 @@ const REMOTE: &str = r#"import json,os,select,signal,subprocess,sys,time
 r=json.loads(sys.stdin.readline())
 p=subprocess.Popen(r['argv'],cwd=r.get('cwd') or None,stdin=subprocess.DEVNULL,start_new_session=True)
 disconnected=False
+stopped=False
 def stop():
+ global stopped
+ if stopped:return
  try:os.killpg(p.pid,signal.SIGKILL)
  except ProcessLookupError:pass
+ stopped=True
 def interrupted(signum,frame):
  global disconnected
  disconnected=True;stop()
@@ -537,8 +541,23 @@ time.sleep(60 if sys.argv[2]=='timeout' else 0.1)
                 ))
                 .unwrap()
             );
+            // A second signal after the parent is reaped can target a vanished
+            // or reused process group (EPERM on macOS). Only successful cleanup
+            // is memoized; a genuine first-attempt failure must still surface.
+            let remote = format!(
+                r#"import os
+original_killpg=os.killpg
+cleanup_calls=0
+def once(group, sig):
+ global cleanup_calls
+ cleanup_calls+=1
+ if cleanup_calls>1:raise PermissionError('cleanup repeated after settlement')
+ return original_killpg(group,sig)
+os.killpg=once
+{REMOTE}"#
+            );
             let mut process = std::process::Command::new("python3")
-                .args(["-c", REMOTE])
+                .args(["-c", &remote])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
