@@ -70,9 +70,10 @@ async fn run(cli: Cli) -> Result<()> {
     let bootstrap: Bootstrap = serde_json::from_slice(&raw)
         .context("Use the unchanged setup download from Observatory")?;
     bootstrap.validate()?;
-    let home = cli
-        .home
-        .unwrap_or(platform::default_home(&bootstrap.observatory_id)?);
+    let home = match cli.home {
+        Some(home) => home,
+        None => platform::default_home(&bootstrap.observatory_id)?,
+    };
     let store = Store::open(home)?;
     let lock = match store.lock() {
         Ok(lock) => lock,

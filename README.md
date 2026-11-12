@@ -74,6 +74,9 @@ Enter the short code shown in Observatory. The setup identifies this Observatory
 and connects outward over HTTPS; no SSH, central account or inbound firewall rule
 is needed. Both computers still need a working network route to Observatory.
 Only packages available and verified by this Observatory are offered.
+The paired computer does not need Rust, Python or a developer toolchain. Windows
+packages include their C runtime; Linux helper builds do not depend on the
+Observatory server's C library version.
 
 The helper keeps its own identity and starts for the signed-in user. A fresh
 heartbeat shows that it is reachable; sleep or a network interruption preserves

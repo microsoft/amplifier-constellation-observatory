@@ -26,6 +26,8 @@ jobs:
         run: |
           python3 scripts/test-upload-release.py
           python3 scripts/test-machine-helper-packaging.py
+          python3 scripts/test-machine-helper-imports.py
+          python3 scripts/test-machine-helper-elf.py
       - name: Install prerequisites
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
       - name: Install Rust
@@ -84,9 +86,11 @@ jobs:
           - runner: ubuntu-24.04
             platform: linux-x86_64
             executable: constellation-machine-helper
+            build_target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             platform: linux-aarch64
             executable: constellation-machine-helper
+            build_target: aarch64-unknown-linux-musl
           - runner: macos-15
             platform: macos-aarch64
             executable: constellation-machine-helper
@@ -97,12 +101,34 @@ jobs:
             platform: windows-x86_64
             executable: constellation-machine-helper.exe
     runs-on: ${{ matrix.runner }}
+    env:
+      HELPER_RELEASE_BINARY: machine-helper/target/release/${{ matrix.executable }}
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Keep the Windows helper independent of a VC++ runtime install
+        if: runner.os == 'Windows'
+        run: |
+          echo "CARGO_BUILD_TARGET=x86_64-pc-windows-msvc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+          echo "HELPER_RELEASE_BINARY=machine-helper/target/x86_64-pc-windows-msvc/release/${{ matrix.executable }}" >> "$GITHUB_ENV"
       - run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt --component clippy
+      - name: Keep the Linux helper independent of the host C library
+        if: runner.os == 'Linux'
+        env:
+          HELPER_TARGET: ${{ matrix.build_target }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup +1.93.0 target add "$HELPER_TARGET"
+          target_env="${HELPER_TARGET//-/_}"
+          echo "CARGO_BUILD_TARGET=$HELPER_TARGET" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${target_env^^}_LINKER=musl-gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${target_env^^}_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+          echo "CC_${target_env}=musl-gcc" >> "$GITHUB_ENV"
+          echo "HELPER_RELEASE_BINARY=machine-helper/target/$HELPER_TARGET/release/${{ matrix.executable }}" >> "$GITHUB_ENV"
       - run: cargo +1.93.0 fmt --manifest-path machine-helper/Cargo.toml --check
       - run: cargo +1.93.0 test --manifest-path machine-helper/Cargo.toml --locked
       - name: Prepare disposable Linux user service manager
@@ -118,8 +144,14 @@ jobs:
         run: cargo +1.93.0 test --manifest-path machine-helper/Cargo.toml --locked --test platform_startup -- --ignored --nocapture
       - run: cargo +1.93.0 clippy --manifest-path machine-helper/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo +1.93.0 build --manifest-path machine-helper/Cargo.toml --release --locked
+      - name: Verify the actual Windows executable has no external VC++ runtime dependency
+        if: runner.os == 'Windows'
+        run: python3 scripts/check-machine-helper-imports.py --binary "$HELPER_RELEASE_BINARY"
+      - name: Verify the actual Linux executable has no dynamic loader or shared dependencies
+        if: runner.os == 'Linux'
+        run: python3 scripts/check-machine-helper-elf.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}"
       - name: Package the native computer helper
-        run: python3 machine-helper/packaging/package.py --binary "machine-helper/target/release/${{ matrix.executable }}" --platform "${{ matrix.platform }}" --version 0.1.0 --output dist
+        run: python3 machine-helper/packaging/package.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}" --version 0.1.0 --output dist
       - uses: actions/upload-artifact@v4
         with:
           name: release-helper-${{ matrix.platform }}
