@@ -28,12 +28,44 @@ def request(url,token,path,body=None):
     r=urllib.request.Request(url+path,data=json.dumps(body).encode() if body is not None else None,
         headers={'Authorization':'Bearer '+token,**({'Content-Type':'application/json'} if body is not None else {})})
     with urllib.request.urlopen(r,timeout=90) as response: return json.load(response)
+
+class WindowsJournalSnapshot:
+    """An actual read handle granting delete sharing, retained through worker exit."""
+    def __init__(self,path):
+        import ctypes
+        self.ctypes=ctypes;self.api=ctypes.WinDLL('kernel32',use_last_error=True)
+        self.api.CreateFileW.argtypes=[ctypes.c_wchar_p,ctypes.c_uint32,ctypes.c_uint32,ctypes.c_void_p,ctypes.c_uint32,ctypes.c_uint32,ctypes.c_void_p]
+        self.api.CreateFileW.restype=ctypes.c_void_p
+        self.api.SetFilePointerEx.argtypes=[ctypes.c_void_p,ctypes.c_longlong,ctypes.POINTER(ctypes.c_longlong),ctypes.c_uint32]
+        self.api.SetFilePointerEx.restype=ctypes.c_int
+        self.api.GetFileSizeEx.argtypes=[ctypes.c_void_p,ctypes.POINTER(ctypes.c_longlong)]
+        self.api.GetFileSizeEx.restype=ctypes.c_int
+        self.api.ReadFile.argtypes=[ctypes.c_void_p,ctypes.c_void_p,ctypes.c_uint32,ctypes.POINTER(ctypes.c_uint32),ctypes.c_void_p]
+        self.api.ReadFile.restype=ctypes.c_int
+        self.api.CloseHandle.argtypes=[ctypes.c_void_p];self.api.CloseHandle.restype=ctypes.c_int
+        # GENERIC_READ; FILE_SHARE_READ | WRITE | DELETE; OPEN_EXISTING.
+        self.handle=self.api.CreateFileW(str(path),0x80000000,0x1|0x2|0x4,None,3,0x80,None)
+        assert self.handle not in (None,ctypes.c_void_p(-1).value),ctypes.get_last_error()
+    def read(self):
+        c=self.ctypes;size=c.c_longlong();count=c.c_uint32()
+        assert self.api.GetFileSizeEx(self.handle,c.byref(size)),c.get_last_error()
+        assert 0<size.value<=1024*1024,'Unexpected fixture journal size'
+        assert self.api.SetFilePointerEx(self.handle,0,None,0),c.get_last_error()
+        data=c.create_string_buffer(size.value)
+        assert self.api.ReadFile(self.handle,data,size.value,c.byref(count),None),c.get_last_error()
+        assert count.value==size.value
+        return data.raw[:count.value]
+    def close(self):
+        if self.handle is not None:
+            assert self.api.CloseHandle(self.handle),self.ctypes.get_last_error()
+            self.handle=None
+
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',required=True,type=Path);a=p.parse_args();binary=a.binary.resolve()
     target=('aarch64' if os.uname().machine in ('aarch64','arm64') else 'x86_64') if os.name!='nt' else ('aarch64' if os.environ.get('PROCESSOR_ARCHITECTURE','').lower()=='arm64' else 'x86_64')
     target+='-pc-windows-msvc' if os.name=='nt' else '-apple-darwin' if os.uname().sysname=='Darwin' else '-unknown-linux-gnu'
     version=subprocess.check_output([str(binary),'--version'],text=True).strip().split()[-1];name=binary.name
-    checks=[];processes=[];offers=[];offer_handles=[];home=None;origin=None;control=None;exit_handle=None
+    checks=[];processes=[];offers=[];offer_handles=[];home=None;origin=None;control=None;exit_handle=None;journal_reader=None;update_worker=None
     instance_name='agent-instance.exe' if os.name=='nt' else 'agent-instance'
     def package(directory,executable,support_version):
         support=directory/'support/instance';support.mkdir(parents=True)
@@ -71,7 +103,7 @@ def main():
             previous,origin,setup_token=launch(old/name)
             request(origin,setup_token,'/desktop/create',{'request_id':str(uuid.uuid4()),'name':'Update fixture','password':'Disposable test password 938!','start_at_signin':False})
             control=(home/'secrets/control-token').read_text(encoding='utf-8').strip();initial=request(origin,control,'/api/v1/status')
-            saved={name:(home/name).read_bytes() for name in ('config.json','secrets/control-token','app-install.json')}
+            saved={name:(home/name).read_bytes() for name in ('config.json','secrets/control-token','secrets/local-password.json','app-install.json')}
             with closing(sqlite3.connect(home/'state.sqlite3')) as db:
                 db.execute('CREATE TABLE fixture_unknown(receipt TEXT)');db.execute('INSERT INTO fixture_unknown VALUES (?)',('unknown world effect: never replay',));db.commit()
             assert (home/'bin'/name).is_file();checks.append('private executable retained with sign-in startup disabled')
@@ -116,7 +148,7 @@ def main():
             # Replay only the same update receipt: no replacement or process restart.
             first_pid=actual['pid'];request(update_url,update_token,'/apply',{});time.sleep(.3)
             assert request(origin,control,'/api/v1/status')['pid']==first_pid;checks.append('same request retry settles without a second replacement')
-            for n in ('config.json','secrets/control-token'):assert (home/n).read_bytes()==saved[n]
+            for n in ('config.json','secrets/control-token','secrets/local-password.json'):assert (home/n).read_bytes()==saved[n]
             with closing(sqlite3.connect(home/'state.sqlite3')) as db:assert db.execute('SELECT receipt FROM fixture_unknown').fetchall()==[('unknown world effect: never replay',)]
             checks.append('account identity, address, credential and retained unknown receipt preserved')
             # Inject an invalid expected startup version after a second honest package has
@@ -144,9 +176,57 @@ def main():
             assert (home/'support/instance/consumer-bundle.json').read_bytes()==(new/'support/instance/consumer-bundle.json').read_bytes()
             assert (home/'machine-helper-artifacts/manifest.json').read_bytes()==(new/'support/machine-helpers/manifest.json').read_bytes()
             checks.append('Instance recipe and all computer-helper setup files update and roll back together; both inventories preserved')
+            if os.name=='nt':
+                # A separate regression leaves the successful HTTP /apply and
+                # actual rejected-startup rollback above unchanged on Windows.
+                held_package=root/'held reader candidate';held_package.mkdir();held_binary=held_package/name
+                fixture_binary(binary,held_binary,b'\nobservatory-held-reader-fixture\n')
+                package(held_package,held_binary,'fixture-new')
+                held_offer,held_url,held_token=launch(held_binary)
+                assert request(held_url,held_token,'/status')['phase']=='prepared'
+                journal_reader=WindowsJournalSnapshot(home/'desktop-update.json')
+                snapshot=journal_reader.read();held_journal=json.loads(snapshot)
+                assert held_journal['phase']=='prepared'
+                held_id=held_journal['request_id'];assert held_id!=original_update
+                # Own the exact worker handle to keep the reader open until OS
+                # process exit. This is the unchanged entrypoint /apply runs.
+                update_worker=subprocess.Popen([str(home/'app-updates'/held_id/'candidate.exe'),
+                    '--home',str(home),'apply-update',held_id],stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8')
+                processes.append(update_worker)
+                deadline=time.monotonic()+90
+                while time.monotonic()<deadline:
+                    if update_worker.poll() not in (None,0):
+                        out,err=update_worker.communicate(timeout=15)
+                        raise AssertionError(('Native update worker failed while reader remained open',update_worker.returncode,out,err))
+                    state=request(held_url,held_token,'/status')
+                    if state['phase'] in ('applied','rolled_back','deferred'):break
+                    time.sleep(.2)
+                assert state['phase']=='applied',state
+                out,err=update_worker.communicate(timeout=30)
+                assert update_worker.returncode==0,(out,err)
+                assert journal_reader.read()==snapshot,'Existing reader lost its original snapshot'
+                current=json.loads((home/'desktop-update.json').read_text(encoding='utf-8'))
+                assert current['phase']=='applied' and current['request_id']==held_id
+                journal_reader.close();journal_reader=None
+                actual=request(origin,control,'/api/v1/status')
+                assert actual['id']==initial['id'] and actual['binary_sha256']==digest(held_binary)
+                assert actual['pid']!=first_pid;first_pid=actual['pid']
+                for n in ('config.json','secrets/control-token','secrets/local-password.json'):assert (home/n).read_bytes()==saved[n]
+                with closing(sqlite3.connect(home/'state.sqlite3')) as db:assert db.execute('SELECT receipt FROM fixture_unknown').fetchall()==[('unknown world effect: never replay',)]
+                assert (home/'support/instance/consumer-bundle.json').read_bytes()==(new/'support/instance/consumer-bundle.json').read_bytes()
+                assert (home/'machine-helper-artifacts/manifest.json').read_bytes()==(new/'support/machine-helpers/manifest.json').read_bytes()
+                checks.append('held delete-sharing reader retains prepared snapshot through exact worker exit while fresh readers see applied; account, unknown receipt and support preserved')
+                held_offer.terminate();held_offer.wait(timeout=15);shutil.rmtree(held_package)
             shutil.rmtree(old);candidate.terminate();candidate.wait(timeout=15);shutil.rmtree(new)
             assert request(origin,control,'/api/v1/status')['pid']==first_pid;checks.append('installed application remains running after both download folders are removed')
         finally:
+            # Stop this exact targeted worker before any cleanup can change its
+            # journal or release the held reader. Preserve normal HTTP coverage.
+            if update_worker is not None and update_worker.poll() is None:
+                update_worker.terminate()
+                try:update_worker.wait(timeout=15)
+                except subprocess.TimeoutExpired:update_worker.kill();update_worker.wait(timeout=15)
             for address,token in offers:
                 try:request(address,token,'/close',{})
                 except (OSError,ValueError):pass
@@ -169,6 +249,9 @@ def main():
                 if process.poll() is None:process.terminate()
                 try:process.wait(timeout=15)
                 except subprocess.TimeoutExpired:process.kill();process.wait(timeout=15)
+            # Releasing this reader earlier could unblock an interrupted writer.
+            # All tracked workers have exited before their held snapshot closes.
+            if journal_reader is not None:journal_reader.close()
             for api,handle in offer_handles:
                 try:assert api.WaitForSingleObject(handle,15000)==0,'Owned update window did not exit'
                 finally:api.CloseHandle(handle)

@@ -32,7 +32,7 @@ fn read(path: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 fn save(path: &Path, value: &Value) -> Result<()> {
-    config::private_write(path, &serde_json::to_vec(value)?)
+    platform::private_write_data(path, &serde_json::to_vec(value)?)
 }
 fn binary_name() -> &'static str {
     if cfg!(windows) {
