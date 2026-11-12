@@ -108,3 +108,11 @@ test('external links never accept credentials or executable URL schemes',()=>{
   assert.equal(safeUrl('https://service.example/settings'),'https://service.example/settings');
   for(const value of ['javascript:alert(1)','http://service.example','https://user:secret@service.example','not a URL'])assert.equal(safeUrl(value),null);
 });
+
+
+test('paired computers retain their reported platform and independent agent residence',()=>{
+  const host={id:HOST,label:'My computer',transport:'paired',machine:{os:'macos',state:'offline',last_seen_at:123},recipes:[]};
+  const input={hosts:[host],endpoints:[endpoint(A,'Maker',HOST)]},before=structuredClone(input),model=project(input);
+  assert.equal(model.machines[0].platform,'Mac');assert.equal(model.machines[0].host.machine.state,'offline');
+  assert.equal(model.agents[0].machineId,HOST);assert.deepEqual(input,before);
+});

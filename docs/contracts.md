@@ -57,8 +57,9 @@ commitment does not advertise an unimplemented interface.
    from observed state and its freshness; a sleeping or unreachable machine is
    not evidence by itself of a successful stop, uninstall or failed installation.
 7. **Make setup approachable through owned operations.** Target local Windows,
-   macOS and Linux use, plus LAN and private-network access. The proposed local
-   host helper reuses supported installers and lifecycle controls; it is not an
+   macOS and Linux use, plus LAN and private-network access. The local
+   host helper connects the computer without replacing supported installers or
+   lifecycle controls; it is not an
    arbitrary host-command API or a prerequisite for connecting an existing agent.
    Offer domain provisioning only through its owner's usable setup path. Retain
    completed steps and distinguish disconnect, uninstall and data deletion.
@@ -101,7 +102,7 @@ one computer, including a partial or filtered view, locate an agent and trace it
 participation in two conversations without confusing residence, identity or
 connection state.
 
-**Left open:** Systems-map layout, helper packaging and transport, role design,
+**Left open:** Systems-map layout, additional helper operations, role design,
 sign-in provider, discovery, recovery UX and additional provider mappings.
 The first product slice excludes work tracking and an attention inbox; existing
 optional interfaces remain valid without dictating that product scope.

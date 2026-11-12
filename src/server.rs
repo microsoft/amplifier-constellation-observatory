@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 pub fn router(s: Arc<AppState>) -> Router {
     Router::new()
+        .merge(crate::machines::routes())
         .route(
             "/markdown-notices.txt",
             get(|| async {
@@ -221,7 +222,7 @@ async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -
 async fn descriptor(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "observe", false)?;
     Ok(Json(
-        json!({"id":s.config.id,"name":"Agent Observatory","version":env!("CARGO_PKG_VERSION"),"contract":"agent-observatory/1","boundary":"ACP with optional independent management providers","capabilities":{"endpoints":true,"management_providers":true,"host_installation":true,"stdio_acp":true,"semantic_views":true,"work_observation":true,"experiment_reports":true,"experiment_transcripts":true},"scopes":["observe","work","work:execute","memory:read","memory","manage","interact","provision","ui","admin"]}),
+        json!({"id":s.config.id,"name":"Agent Observatory","version":env!("CARGO_PKG_VERSION"),"contract":"agent-observatory/1","boundary":"ACP with optional independent management providers","capabilities":{"endpoints":true,"management_providers":true,"host_installation":true,"machine_pairing":true,"stdio_acp":true,"semantic_views":true,"work_observation":true,"experiment_reports":true,"experiment_transcripts":true},"scopes":["observe","work","work:execute","memory:read","memory","manage","interact","provision","ui","admin"]}),
     ))
 }
 async fn status(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
@@ -503,7 +504,9 @@ async fn credential(
 }
 async fn hosts(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "observe", false)?;
-    Ok(Json(json!({"hosts":s.list("hosts")?})))
+    Ok(Json(
+        json!({"hosts":crate::machines::project_hosts(&s,s.list("hosts")?)?}),
+    ))
 }
 fn host_body(body: &Value) -> ApiResult<Value> {
     let v = allowed(
@@ -536,7 +539,11 @@ async fn edit_host(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let p = auth::check(&s, &h, "provision", true)?;
-    s.read("hosts", &id)?;
+    let _inventory = s.inventory_registry_lock.lock().unwrap();
+    let old = s.read("hosts", &id)?;
+    if old["transport"] == "paired" {
+        return crate::machines::edit_label(&s, &id, &body).map(Json);
+    }
     let mut v = host_body(&body)?;
     v["id"] = json!(id);
     let v = s.save("hosts", v, Some(revision(&body)?))?;
@@ -551,6 +558,7 @@ async fn delete_host(
 ) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "provision", true)?;
     let _inventory = s.inventory_registry_lock.lock().unwrap();
+    crate::machines::check_removable(&s, &id)?;
     if s.list("endpoints")?
         .iter()
         .any(|e| e["host_id"].as_str() == Some(&id))

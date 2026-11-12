@@ -24,7 +24,7 @@ export function project({endpoints=[],hosts=[],places=[],catalogs={}}){
   const agents=endpoints.filter(e=>e.kind==='agent'||!e.kind).map(e=>({id:e.id,name:e.label,machineId:hostIds.has(e.host_id)?e.host_id:UNASSIGNED,portrait:appearance(e),endpoint:e,engine:e.observation?.status?.engine?.name||e.observation?.status?.backend?.kind||null}));
   for(const a of agents){if(!a.engine){const command=a.endpoint.observation?.status?.backend?.command;const binary=typeof command==='string'?command.split('/').pop():null;a.engine=({'agent-runtime':'Constellation Native','amplifier-agent-acp':'Amplifier Agent','claude-agent-acp':'Claude ACP','codex-acp':'Codex ACP','copilot':'GitHub Copilot'})[binary]||(binary?`Configured runtime: ${binary}`:null)}}
   const known=new Set(agents.map(a=>a.id));
-  const machines=hosts.map(h=>({id:h.id,name:h.label,platform:h.transport==='local'?'Observatory computer':'Configured SSH access',host:h}));
+  const machines=hosts.map(h=>({id:h.id,name:h.label,platform:h.transport==='paired'?({windows:'Windows',macos:'Mac',linux:'Linux'}[h.machine?.os]||'Paired computer'):h.transport==='local'?'Observatory computer':'Configured SSH access',host:h}));
   if(agents.some(a=>a.machineId===UNASSIGNED))machines.push({id:UNASSIGNED,name:'Other agents',platform:'Computer not assigned',unassigned:true});
   const result=places.map(p=>({...p,name:p.label,brand:p.service,rooms:p.rooms?.length?p.rooms:[{id:'connections',label:p.kind==='workspace'?'Workspace connections':'Connections'}],bindings:[],configured:true}));
   const assignments=new Map();for(const p of places)for(const b of p.bindings||[])if(known.has(b.endpoint_id))assignments.set(bindingKey(b.endpoint_id,b.connection_id),{placeId:p.id,roomId:b.room_id||null});

@@ -17,7 +17,7 @@ at `/advanced`; both use this API and the same authentication.
 | `memory` | read and write attributed memory through optional providers |
 | `manage` | connect/edit/detach endpoints, edit place groupings, store credentials, invoke configuration and connection commands, work-record writes, submit experiment reports |
 | `interact` | ACP negotiation, sessions, prompts, disconnect |
-| `provision` | authorize/edit hosts, plan/install, job records and output |
+| `provision` | pair/revoke computers, authorize/edit hosts, plan/install, job records and output |
 | `ui` | read and control browser view state |
 | `admin` | create/revoke scoped tokens and all operations |
 
@@ -262,7 +262,99 @@ The host/recipe is a privileged operator configuration. Pin actual executables o
 
 Empty `recipes` and `install_roots` together save inventory only. Saving a host
 does not contact it or install a pairing helper. Installation requires an approved
-recipe and an allowed root; device-code pairing is not implemented.
+recipe and an allowed root. Paired computers use the separate interface below;
+pairing does not grant an installer or remote shell.
+
+### Computer pairing and presence
+
+The descriptor advertises `capabilities.machine_pairing:true` for this schema-1
+interface. Download availability is reported by the pairing endpoints.
+
+`POST machine-pairings {request_id:<UUID>}` creates a ten-minute pairing. An exact
+request retry returns the same record. `GET machine-pairings` lists pairings;
+`GET machine-pairings/{id}` reads one. Pairings and their codes remain private to
+the credential or browser actor that created them. These operations require
+`provision`, as do setup downloads and `POST machine-pairings/{id}/cancel {}`. Browser writes retain
+the normal CSRF protection. Cancellation closes a waiting pairing, never an
+already accepted computer grant.
+
+Create/read responses contain `pairing:{id,code,state,expires_at,host_id}` and
+`downloads:[{platform,label,architecture,url,filename}]`. List returns `pairings`
+and available `downloads`. The code is eight characters, displayed with a
+separator. Five incorrect attempts lock that pairing; expired/cancelled codes
+cannot create a grant. Pairing identifiers are independently random UUIDs.
+
+`GET machine-pairings/{id}/setup/{platform}` returns a setup archive from this
+installation's verified helper artifacts. Platform IDs are `windows-x86_64`,
+`macos-aarch64`, `macos-x86_64`, `linux-aarch64` and `linux-x86_64`; unavailable
+artifacts are not advertised. The archive's `observatory-pairing.json` contains
+`schema:1`, HTTPS `observatory_url`, `observatory_id`, `observatory_name`,
+`pairing_id`, `expires_at` and optional `ca_pem`. It contains no code or credential.
+The helper validates TLS, the pinned Observatory identity and its origin, without
+following redirects. Downloading setup does not establish network reachability.
+Unsigned Mac preview setups also carry this public file inside the app's
+`Contents/Resources` so lookup survives app translocation. This is not a signing
+solution: changing bundle resources after signing invalidates that signature;
+a future signed package needs an appropriate external-configuration flow.
+
+The helper persists a random machine ID, request ID and 256-bit credential before
+calling `POST machine-pairings/{id}/redeem`:
+
+```json
+{
+  "schema": 1,
+  "observatory_id": "UUID",
+  "code": "ABCD-EFGH",
+  "request_id": "persisted UUID",
+  "machine_id": "persisted UUID",
+  "machine_credential": "64 random hexadecimal characters",
+  "name": "My computer",
+  "os": "linux",
+  "arch": "x86_64",
+  "helper_version": "0.1.0"
+}
+```
+
+Redemption uses that pairing ID and code, without an Observatory admin credential.
+The receipt is `{schema:1,pairing_id,observatory_id,host_id,machine_id,
+access:["observe"],heartbeat_seconds:15}`. The server stores a credential hash.
+An exact accepted retry returns the same receipt even after code expiry; changing
+the accepted identity or credential is refused. A revoked or superseded pairing
+cannot be restored by its old accepted request, even if the credential is reused.
+Fresh explicit pairing can reconnect a revoked machine while retaining its host
+identity. It cannot replace an existing active credential.
+
+`POST machines/{host_id}/heartbeat` uses the helper's bearer credential and
+`{schema:1,machine_id,name,os,arch,helper_version}`. Supported OS values are
+`windows|macos|linux`; architectures are `x86_64|aarch64`. The reply contains
+`{schema:1,observatory_id,host_id,state:"connected",access:["observe"],
+heartbeat_seconds:15}`. This credential grants only its own heartbeat and revoke
+operations, not Observatory observation, management or installation APIs.
+
+`POST machines/{host_id}/revoke {}` accepts `provision` or that machine's
+credential and returns `{host_id,state:"disconnected"}`. It preserves saved
+hosts, endpoints and agents. No heartbeat or old claim can restore revoked trust.
+The helper retains its local identity and shows disconnection; it never silently
+pairs again.
+
+`GET hosts` adds `machine:{id,os,arch,helper_version,reported_name,access,state,
+last_seen_at,paired_at,revoked_at}` to paired inventory records. Their transport is
+`paired`, address is null, and installer roots/recipes are empty. `state` is
+`online` for a heartbeat within 45 seconds, `offline` when no fresh heartbeat is
+available, or `disconnected` after revocation. These observations do not change
+host configuration revisions or certify agent state. Display labels remain
+separately editable; transport/recipes cannot convert pairing into a command
+grant. Active paired hosts must be revoked before deletion, and endpoint-reference
+checks still apply.
+
+Errors retain `{error:string}`: `401` invalid credentials, `403` revoked,
+`404` unknown, `409` conflicting claim, `410` expired/cancelled, and `429`
+attempt or capacity limit. A network error preserves the pending request and
+credential; it does not establish whether a claim committed. Reconcile the exact
+request instead of generating a replacement. Helper presence operates without
+agent prompts, session access or an inbound connection to the computer.
+
+### Owner installation recipes
 
 `POST install/plan {host_id,recipe_id,name,home,port}` returns a revisioned plan and `plan_digest`. `POST install` takes the same fields plus that digest and `request_id:<UUID>`. One pending/running installation per host is allowed. `GET jobs`, `GET jobs/{id}`, `GET jobs/{id}/log/{stdout|stderr}` observe it. Logs are bounded to 1 MB each and require provisioning scope. The dispatcher stops the installer process group on timeout or control-connection loss, including descendants. Successful installers must register long-running services separately (for example, with systemd), rather than leave background children. Interrupted installations are never automatically rerun.
 

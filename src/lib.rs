@@ -8,6 +8,7 @@ pub mod elicitation;
 pub mod error;
 pub mod experiments;
 pub mod intake;
+pub mod machines;
 pub mod permissions;
 pub mod places;
 pub mod provider;
