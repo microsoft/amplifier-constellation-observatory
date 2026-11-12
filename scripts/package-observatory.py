@@ -61,6 +61,12 @@ def package(binary, target, version, output, instance_bundle=None):
     data = binary.read_bytes()
     output.mkdir(parents=True, exist_ok=True)
     instance, bundled = instance_files(instance_bundle, target) if instance_bundle else (None, [])
+    package_manifest = {'schema': 1, 'component': 'agent-observatory', 'version': version,
+                        'target': target, 'binary': 'agent-observatory.exe' if system == 'windows' else 'agent-observatory',
+                        'binary_sha256': hashlib.sha256(data).hexdigest()}
+    if instance:
+        package_manifest['instance_manifest_sha256'] = hashlib.sha256((instance_bundle / 'consumer-bundle.json').read_bytes()).hexdigest()
+    manifest_bytes = (json.dumps(package_manifest, indent=2, sort_keys=True) + '\n').encode()
     filename = f'agent-observatory-{version}-{target}' + ('-desktop' if instance else '') + ('.tar.gz' if system == 'linux' else '.zip')
     destination = output / filename
     if system == 'linux':
@@ -70,6 +76,9 @@ def package(binary, target, version, output, instance_bundle=None):
                 info = tarfile.TarInfo('agent-observatory')
                 info.size = len(data); info.mode = 0o755; info.mtime = 0
                 archive.addfile(info, io.BytesIO(data))
+                info = tarfile.TarInfo('observatory-package.json')
+                info.size = len(manifest_bytes); info.mode = 0o644; info.mtime = 0
+                archive.addfile(info, io.BytesIO(manifest_bytes))
                 for name, content, mode in bundled:
                     info = tarfile.TarInfo('support/instance/' + name)
                     info.size = len(content); info.mode = mode; info.mtime = 0
@@ -84,6 +93,7 @@ def package(binary, target, version, output, instance_bundle=None):
             archive.writestr(info, content)
         with zipfile.ZipFile(destination, 'w') as archive:
             put(archive, entry, data, 0o755)
+            put(archive, str(Path(entry).parent / 'observatory-package.json'), manifest_bytes)
             prefix = 'support/instance/' if system == 'windows' else 'Observatory.app/Contents/MacOS/support/instance/'
             for name, content, mode in bundled:
                 put(archive, prefix + name, content, mode)

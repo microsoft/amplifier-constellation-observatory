@@ -17,12 +17,15 @@ class PackagingTests(unittest.TestCase):
                     self.assertEqual(row['binary_sha256'],hashlib.sha256(binary.read_bytes()).hexdigest())
                     if row['os']=='linux':
                         with tarfile.open(path) as z:
-                            self.assertEqual(z.getnames(),['agent-observatory']);self.assertEqual(z.extractfile('agent-observatory').read(),binary.read_bytes());self.assertEqual(z.getmembers()[0].mode,0o755)
+                            self.assertEqual(z.getnames(),['agent-observatory','observatory-package.json']);self.assertEqual(z.extractfile('agent-observatory').read(),binary.read_bytes());self.assertEqual(z.getmembers()[0].mode,0o755)
+                            manifest=json.load(z.extractfile('observatory-package.json'))
                     else:
                         with zipfile.ZipFile(path) as z:
                             self.assertEqual(z.read(row['entry']),binary.read_bytes());self.assertTrue(z.getinfo(row['entry']).external_attr>>16 & stat.S_IXUSR)
+                            manifest=json.loads(z.read(str(Path(row['entry']).parent/'observatory-package.json')))
                             if row['os']=='macos':
                                 info=plistlib.loads(z.read('Observatory.app/Contents/Info.plist'));self.assertEqual(info['CFBundleExecutable'],'agent-observatory');self.assertEqual(info['CFBundlePackageType'],'APPL')
+                    self.assertEqual(manifest['binary_sha256'],row['binary_sha256']);self.assertEqual(manifest['target'],target);self.assertEqual(manifest['version'],row['version']);self.assertNotIn('instance_manifest_sha256',manifest)
                     pack.package(binary,target,'0.11.0',root/'dist');self.assertEqual(path.read_bytes(),original)
                     self.assertEqual(json.loads(path.with_name(path.name+'.json').read_text()),row)
     def test_complete_package_keeps_matching_instance_closure_and_refuses_changed_member(self):
@@ -37,9 +40,14 @@ class PackagingTests(unittest.TestCase):
                 self.assertTrue(record['includes_agent_setup']);self.assertIn('-desktop.',record['filename'])
                 prefix='Observatory.app/Contents/MacOS/' if 'apple' in target else ''
                 if record['os']=='linux':
-                    with tarfile.open(root/'out'/record['filename']) as archive:self.assertEqual(archive.extractfile('support/instance/'+name).read(),b'inert Instance fixture')
+                    with tarfile.open(root/'out'/record['filename']) as archive:
+                        self.assertEqual(archive.extractfile('support/instance/'+name).read(),b'inert Instance fixture')
+                        package_manifest=json.load(archive.extractfile('observatory-package.json'))
                 else:
-                    with zipfile.ZipFile(root/'out'/record['filename']) as archive:self.assertEqual(archive.read(prefix+'support/instance/'+name),b'inert Instance fixture')
+                    with zipfile.ZipFile(root/'out'/record['filename']) as archive:
+                        self.assertEqual(archive.read(prefix+'support/instance/'+name),b'inert Instance fixture')
+                        package_manifest=json.loads(archive.read(prefix+'observatory-package.json'))
+                self.assertEqual(package_manifest['instance_manifest_sha256'],hashlib.sha256((source/'consumer-bundle.json').read_bytes()).hexdigest())
                 (source/name).write_bytes(b'changed')
                 with self.assertRaisesRegex(ValueError,'integrity'):pack.package(binary,target,'0.11.0',root/'out',source)
                 manifest['target']='wrong';(source/'consumer-bundle.json').write_text(json.dumps(manifest))
