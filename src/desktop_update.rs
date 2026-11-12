@@ -229,8 +229,13 @@ fn version_numbers(value: &Value) -> Result<Vec<u64>> {
     Ok(parts)
 }
 pub fn pending_verification(home: &Path) -> bool {
-    journal(home)
-        .is_ok_and(|j| matches!(j["phase"].as_str(), Some("starting" | "rollback_starting")))
+    match optional_journal(home) {
+        Ok(Some(j)) => {
+            !complete(&j) && !matches!(j["phase"].as_str(), Some("prepared" | "deferred"))
+        }
+        Ok(None) => false,
+        Err(_) => true,
+    }
 }
 pub fn busy(state: &AppState) -> bool {
     state.operation_gate.is_closed() || state.update_hold.lock().unwrap().is_some()
@@ -467,6 +472,9 @@ async fn stopped(home: &Path, j: &Value) -> Result<File> {
     )
 }
 pub fn validate_start(home: &Path, id: &str, nonce: &str) -> Result<()> {
+    // Hashing can be slow on a new/large image. Inspect the current launch
+    // intent afterwards, so recovery during that read cannot authorize it.
+    let digest = desktop::binary_digest()?;
     let j = journal(home)?;
     ensure!(
         j["request_id"] == id
@@ -480,8 +488,7 @@ pub fn validate_start(home: &Path, id: &str, nonce: &str) -> Result<()> {
         &j["previous"]
     };
     ensure!(
-        selected["version"] == env!("CARGO_PKG_VERSION")
-            && selected["binary_sha256"] == desktop::binary_digest()?,
+        selected["version"] == env!("CARGO_PKG_VERSION") && selected["binary_sha256"] == digest,
         "Update startup bytes changed"
     );
     Ok(())

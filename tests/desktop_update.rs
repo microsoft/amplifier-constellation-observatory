@@ -154,6 +154,21 @@ fn unreadable_or_corrupt_update_is_preserved_and_never_treated_as_absent() {
     assert!(path.is_dir());
 }
 #[test]
+fn recovery_transition_keeps_new_state_closed_until_verified_terminal() {
+    let (home, state) = setup();
+    for phase in [
+        "switching",
+        "recovering",
+        "rollback_starting",
+        "unknown-phase",
+    ] {
+        journal(home.path(), &state, phase);
+        let reopened = AppState::open(home.path().into()).unwrap();
+        assert!(desktop_update::busy(&reopened), "{phase}");
+        assert!(reopened.operation_gate.clone().try_acquire_owned().is_err());
+    }
+}
+#[test]
 fn first_install_keeps_private_executable_without_signin_startup() {
     let (h, s) = setup();
     desktop_update::retain(&s).unwrap();

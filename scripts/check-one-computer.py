@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import urllib.error
 import uuid
 import zipfile
 
@@ -125,7 +126,13 @@ def main():
                     if setup: headers['Authorization'] = 'Bearer ' + capability
                     if csrf: headers['X-CSRF-Token'] = csrf
                     req = urllib.request.Request(origin + path, headers=headers, data=json.dumps(body).encode() if body is not None else None)
-                    with browser.open(req, timeout=180) as response: return json.load(response)
+                    try:
+                        with browser.open(req, timeout=180) as response: return json.load(response)
+                    except urllib.error.HTTPError as error:
+                        # This isolated fixture has no real account credentials;
+                        # retain bounded API refusal evidence instead of just 409.
+                        detail = error.read(4096).decode('utf-8', errors='replace')
+                        raise AssertionError(f'{path}: HTTP {error.code}: {detail}') from error
                 account = request('/desktop/create', {'request_id': str(uuid.uuid4()), 'name': 'Native café 日本',
                     'password': 'Disposable native check ' + uuid.uuid4().hex, 'start_at_signin': False}, True)
                 assert account['authenticated']; csrf = request('/auth/session')['csrf']
