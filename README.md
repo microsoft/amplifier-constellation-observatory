@@ -86,7 +86,7 @@ installation without them, its owner can stage the published bundle after
 verifying its release digest:
 
 ```sh
-python3 scripts/stage-machine-helpers.py --home OBS_HOME --bundle constellation-machine-helpers-0.2.0.zip --sha256 VERIFIED_RELEASE_DIGEST
+python3 scripts/stage-machine-helpers.py --home OBS_HOME --bundle constellation-machine-helpers-0.2.1.zip --sha256 VERIFIED_RELEASE_DIGEST
 ```
 
 This verifies the bundle and platform archives, retains the previous staged

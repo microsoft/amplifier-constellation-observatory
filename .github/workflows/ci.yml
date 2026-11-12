@@ -138,7 +138,7 @@ jobs:
           python scripts/fetch-instance-bundle.py --target "$TARGET" --output "$RUNNER_TEMP/observatory-instance-bundle"
           version=$("$OBSERVATORY_RELEASE_BINARY" --version | cut -d' ' -f2)
           python scripts/fetch-machine-helper-bundle.py --output "$RUNNER_TEMP/observatory-machine-helpers.zip"
-          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$RUNNER_TEMP/observatory-instance-bundle" --machine-helpers "$RUNNER_TEMP/observatory-machine-helpers.zip" --helpers-sha256 cb15bc36a15ab74b34c04af8647433835bce0dfb4c13e08b46b73e6268dce6dc --output dist
+          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$RUNNER_TEMP/observatory-instance-bundle" --machine-helpers "$RUNNER_TEMP/observatory-machine-helpers.zip" --helpers-sha256 212aa69c7ec3db9a682a5f7457d6fdefac5ba7b636598210d84bae001363fa91 --output dist
       - name: Verify packaged local browser and computer network setup
         if: runner.os == 'Linux' && runner.arch == 'X64'
         env:

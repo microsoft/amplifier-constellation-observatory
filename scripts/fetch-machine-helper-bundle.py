@@ -6,9 +6,9 @@ import importlib.util
 from pathlib import Path
 import urllib.request
 
-URL = 'https://github.com/microsoft/amplifier-constellation-observatory/releases/download/v0.11.0/constellation-machine-helpers-0.2.0.zip'
-SHA256 = 'cb15bc36a15ab74b34c04af8647433835bce0dfb4c13e08b46b73e6268dce6dc'
-SIZE = 15_652_320
+URL = 'https://github.com/microsoft/amplifier-constellation-observatory/releases/download/machine-helper-v0.2.1/constellation-machine-helpers-0.2.1.zip'
+SHA256 = '212aa69c7ec3db9a682a5f7457d6fdefac5ba7b636598210d84bae001363fa91'
+SIZE = 15_659_517
 
 def fetch(output):
     if output.exists():
