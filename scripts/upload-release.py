@@ -17,11 +17,18 @@ def stage(tag, directory, run=subprocess.run):
 
     result = gh("view", tag, "--json", "isDraft,assets", check=False)
     if result.returncode:
-        gh("create", tag, "--verify-tag", "--draft", "--title",
-           f"Agent Observatory {tag}", "--notes",
-           "Independent fleet surface with optional negotiated management. "
-           "Native Windows, macOS and Linux applications and computer helpers. Preview packages are unsigned; see exact platform qualification. "
-           "See docs/releases in the source for behavior and platform limitations.")
+        if tag.startswith("machine-helper-v"):
+            gh("create", tag, "--verify-tag", "--draft", "--latest=false", "--title",
+               f"Constellation Computer {tag.removeprefix('machine-helper-v')}", "--notes",
+               "Six native computer-helper packages and their exact combined setup inventory. "
+               "These helpers pair with an Observatory; this is not an Observatory application release. "
+               "Preview packages are unsigned and unnotarized. Publication follows exact platform and setup qualification.")
+        else:
+            gh("create", tag, "--verify-tag", "--draft", "--title",
+               f"Agent Observatory {tag}", "--notes",
+               "Independent fleet surface with optional negotiated management. "
+               "Native Windows, macOS and Linux applications and computer helpers. Preview packages are unsigned; see exact platform qualification. "
+               "See docs/releases in the source for behavior and platform limitations.")
         release = {"isDraft": True, "assets": []}
     else:
         release = json.loads(result.stdout)
