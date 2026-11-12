@@ -57,14 +57,12 @@ dependencies = [
  "amplifier-acp-connection",
  "amplifier-native-platform",
  "anyhow",
- "argon2",
  "axum",
  "axum-server",
  "base64 0.22.1",
  "clap",
  "flate2",
  "fs2",
- "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -114,10 +112,14 @@ dependencies = [
 [[package]]
 name = "amplifier-native-platform"
 version = "0.1.0"
-source = "git+https://github.com/microsoft/amplifier-constellation?rev=db33700ffefb304fb895d75d1994e5f0489d3212#db33700ffefb304fb895d75d1994e5f0489d3212"
+source = "git+https://github.com/microsoft/amplifier-constellation?rev=24a9b1f3e03e923f096c45a79b9cb1c94f097624#24a9b1f3e03e923f096c45a79b9cb1c94f097624"
 dependencies = [
  "anyhow",
+ "argon2",
+ "hmac",
  "libc",
+ "rand_core 0.6.4",
+ "sha2",
  "url",
  "uuid",
  "windows-sys 0.61.2",

@@ -48,11 +48,7 @@ impl pam_client::ConversationHandler for PasswordConversation {
 
 /// This password belongs only to this installation, not to an OS account.
 pub fn validate_local_password(password: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        password.chars().count() >= 12 && password.len() <= 1024 && !password.contains('\0'),
-        "Choose an Observatory password with at least 12 characters (up to 1024 bytes)"
-    );
-    Ok(())
+    amplifier_native_platform::local_auth::validate_password(password)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,14 +60,8 @@ struct LocalPassword {
 
 /// Create-only: normal startup cannot replace an existing password.
 pub fn initialize_local_password(home: &Path, password: &str) -> anyhow::Result<()> {
-    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
-    validate_local_password(password)?;
+    let hash = amplifier_native_platform::local_auth::hash_password(password)?;
     crate::config::private_dir(&home.join("secrets"))?;
-    let salt = SaltString::generate(&mut rand::rngs::OsRng);
-    let hash = Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map_err(|_| anyhow::anyhow!("Could not protect the Observatory password"))?
-        .to_string();
     crate::config::private_create(
         &home.join("secrets/local-password.json"),
         &serde_json::to_vec(&LocalPassword {
@@ -82,7 +72,6 @@ pub fn initialize_local_password(home: &Path, password: &str) -> anyhow::Result<
 }
 
 fn local_password_matches(home: &Path, password: &str) -> bool {
-    use argon2::{Argon2, Params, PasswordHash, PasswordVerifier};
     let path = home.join("secrets/local-password.json");
     // A corrupt or edited credential never selects a fallback authenticator or
     // supplies unbounded Argon2 work. Schema 1 has one exact hashing profile.
@@ -95,19 +84,8 @@ fn local_password_matches(home: &Path, password: &str) -> bool {
     let Ok(saved) = serde_json::from_slice::<LocalPassword>(&bytes) else {
         return false;
     };
-    let Ok(hash) = PasswordHash::new(&saved.password_hash) else {
-        return false;
-    };
-    let expected = Params::new(19 * 1024, 2, 1, Some(32)).expect("fixed Argon2id profile");
     saved.schema == 1
-        && hash.algorithm.as_str() == "argon2id"
-        && hash.version == Some(19)
-        && Params::try_from(&hash).is_ok_and(|p| p == expected)
-        && hash.salt.is_some_and(|s| s.as_str().len() == 22)
-        && hash.hash.is_some_and(|h| h.len() == 32)
-        && Argon2::default()
-            .verify_password(password.as_bytes(), &hash)
-            .is_ok()
+        && amplifier_native_platform::local_auth::verify_password(&saved.password_hash, password)
 }
 
 #[cfg(target_os = "linux")]
@@ -147,26 +125,12 @@ fn fixed_hex(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn local_proof_mac(config: &Config, nonce: &str, credential: &str) -> hmac::Hmac<Sha256> {
-    use hmac::Mac;
-    let mut mac = hmac::Hmac::<Sha256>::new_from_slice(credential.as_bytes())
-        .expect("HMAC accepts arbitrary key lengths");
-    mac.update(
-        format!(
-            "agent-observatory.local-proof/1\n{}\n{}\n{nonce}",
-            config.id, config.public_url
-        )
-        .as_bytes(),
-    );
-    mac
-}
 /// The native client proves a loopback listener before sending its credential.
 /// This does not authenticate a caller or grant management access.
 pub async fn local_proof(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LocalProofQuery>,
 ) -> ApiResult<Json<Value>> {
-    use hmac::Mac;
     if state.config.web_transport != WebTransport::LocalHttp {
         return Err(ApiError::missing());
     }
@@ -176,18 +140,19 @@ pub async fn local_proof(
         ));
     }
     let credential = std::fs::read_to_string(state.home.join("secrets/control-token"))?;
-    let proof = local_proof_mac(&state.config, &query.nonce, credential.trim())
-        .finalize()
-        .into_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    let proof = amplifier_native_platform::local_auth::listener_proof(
+        "agent-observatory.local-proof/1",
+        &state.config.id,
+        &state.config.public_url,
+        &query.nonce,
+        credential.trim(),
+    )
+    .map_err(|_| ApiError::bad("Local installation proof is unavailable"))?;
     Ok(Json(
         json!({"schema":1,"id":state.config.id,"origin":state.config.public_url,"nonce":query.nonce,"proof":proof}),
     ))
 }
 pub fn verify_local_proof(config: &Config, nonce: &str, credential: &str, value: &Value) -> bool {
-    use hmac::Mac;
     if config.web_transport != WebTransport::LocalHttp
         || !fixed_hex(nonce)
         || value["schema"] != 1
@@ -200,12 +165,15 @@ pub fn verify_local_proof(config: &Config, nonce: &str, credential: &str, value:
     let Some(proof) = value["proof"].as_str().filter(|p| fixed_hex(p)) else {
         return false;
     };
-    let bytes = (0..32)
-        .map(|i| u8::from_str_radix(&proof[2 * i..2 * i + 2], 16).unwrap())
-        .collect::<Vec<_>>();
-    local_proof_mac(config, nonce, credential)
-        .verify_slice(&bytes)
-        .is_ok()
+    amplifier_native_platform::local_auth::verify_listener_proof(
+        "agent-observatory.local-proof/1",
+        &config.id,
+        &config.public_url,
+        nonce,
+        credential,
+        proof,
+    )
+    .is_ok()
 }
 pub fn cookie_name(state: &AppState) -> String {
     format!("obs_{}", state.config.id.replace('-', ""))

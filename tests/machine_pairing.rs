@@ -703,7 +703,11 @@ async fn setup_download_binds_public_observatory_metadata_without_code_or_creden
     archive
         .start_file(
             "Constellation Computer",
-            zip::write::SimpleFileOptions::default().unix_permissions(0o755),
+            // This is a Mac-produced release archive even when the server
+            // preparing its pairing download is running on Windows.
+            zip::write::SimpleFileOptions::default()
+                .system(zip::System::Unix)
+                .unix_permissions(0o755),
         )
         .unwrap();
     archive
@@ -794,7 +798,9 @@ async fn mac_setup_carries_public_bootstrap_inside_app_for_translocation_safe_lo
     archive
         .start_file(
             "Constellation Computer.app/Contents/Info.plist",
-            zip::write::SimpleFileOptions::default().unix_permissions(0o644),
+            zip::write::SimpleFileOptions::default()
+                .system(zip::System::Unix)
+                .unix_permissions(0o644),
         )
         .unwrap();
     archive.write_all(b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>constellation-machine-helper</string></dict></plist>").unwrap();

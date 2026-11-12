@@ -10,16 +10,14 @@ description = "Fleet management and observation across machines; generic ACP wit
 
 [dependencies]
 amplifier-acp-connection = { git = "https://github.com/microsoft/amplifier-constellation", rev = "e0d6a03fd342b295d349b633d400376efbbe2c40" }
-amplifier-native-platform = { git = "https://github.com/microsoft/amplifier-constellation", rev = "db33700ffefb304fb895d75d1994e5f0489d3212" }
+amplifier-native-platform = { git = "https://github.com/microsoft/amplifier-constellation", rev = "24a9b1f3e03e923f096c45a79b9cb1c94f097624", features = ["local-auth"] }
 anyhow = "1"
-argon2 = "0.5.3"
 axum = { version = "0.8.9", features = ["macros"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 fs2 = "0.4"
 if-addrs = "0.15"
-hmac = "0.12"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
