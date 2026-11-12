@@ -2,13 +2,18 @@
 
 <a id="public-boundaries"></a>
 
-For clients, management-provider authors and operators. The promise: Observatory
-combines useful access to independent agents without becoming the owner of their
-state or confusing an observation with a successful action.
+For people managing their systems, clients and management-provider authors.
+The promise: Observatory combines useful access to independent agents without
+becoming the owner of their state or confusing observation with successful action.
 
-**Example:** An operator sees an agent needs attention, opens its responsibility
-record and invokes a supported control. The agent's installation remains the
-authority; the fleet view records what it observed and what the operation returned.
+**Example:** A person pairs another computer, sees the installations it exposes,
+and connects one agent to a service. A later network failure shows which step
+completed and which connection is uncertain. The setup remains available to
+reconcile rather than being repeated from the beginning.
+
+These commitments guide the systems experience in the [vision](VISION.md).
+The [API reference](api.md) defines currently supported operations; a product
+commitment does not advertise an unimplemented interface.
 
 ## Observatory's commitments
 
@@ -16,11 +21,16 @@ authority; the fleet view records what it observed and what the operation return
    management, a dashboard or a combination. Agent and adapter entries remain
    distinct; an inventory relationship neither connects them nor grants access.
    Check each attached interface and preserve its own timestamp, checked revision
-   and outcome. One failing endpoint does not prevent inspecting the rest.
+   and outcome. Distinguish machine containment, selected engine, service
+   authorization and active conversation connections. One failing endpoint does
+   not prevent inspecting the rest.
 2. **Pin the intended installation.** Verify the remote installation identity
    before private management reads or writes. Observatory credentials and remote
    credentials each constrain access. Read-only observation does not imply
-   prompting, private work access, configuration or host provisioning.
+   prompting, private work access, configuration or host provisioning. Machine
+   pairing establishes scoped, revocable trust once per Observatory; ordinary
+   use within that grant does not require repeated pairing. Discovery alone
+   establishes neither trust nor reachability.
 3. **Use explicit management mappings.** A registered provider selects supported
    operations and their required access. Callers cannot choose arbitrary remote
    URLs, and unsupported features do not fall back to private files. Optional work,
@@ -38,7 +48,25 @@ authority; the fleet view records what it observed and what the operation return
    claims are attributed, not independently certified. Published experiment
    transcripts contain delivered material with simulation/operator labels, not
    private drafts or hidden reasoning. View state can select evidence and controls;
-   selecting a view does not perform their actions.
+   selecting a view does not perform their actions. Show desired state separately
+   from observed state and its freshness; a sleeping or unreachable machine is
+   not evidence by itself of a successful stop, uninstall or failed installation.
+7. **Make setup approachable through owned operations.** Target local Windows,
+   macOS and Linux use, plus LAN and private-network access. The proposed local
+   host helper reuses supported installers and lifecycle controls; it is not an
+   arbitrary host-command API or a prerequisite for connecting an existing agent.
+   Offer domain provisioning only through its owner's usable setup path. Retain
+   completed steps and distinguish disconnect, uninstall and data deletion.
+   Transport, discovery, browser trust and helper APIs require implementation
+   qualification; this agreement does not define them.
+8. **Grow membership without silently expanding access.** Personal and team use
+   share the same product. Adding members preserves installations and records;
+   the owner chooses which resources and supported operations become shared.
+   Membership does not copy personal credentials or grant access to every paired
+   machine. Support administrative history, ownership transfer and departing
+   members' access revocation. Returning to personal use resolves team ownership
+   and credentials while retaining history and accounting for resources that
+   cannot transfer.
 
 ## Shared promises and exact interfaces
 
@@ -54,10 +82,17 @@ clients, not a prescribed future screen layout.
 **Check:** Connect an ACP-only agent and a managed installation. Change an endpoint
 revision, fail one probe, revoke a credential and attempt a mismatched identity.
 Exercise an actor-bound approval and an interrupted install. Confirm independent
-observations, explicit unsupported results and no manufactured success. See
+observations, explicit unsupported results and no manufactured success. Walk a
+first-time user through pairing, deployment and service connection, then a lost
+connection and recovery. Test personal-to-team and team-to-personal transitions
+with an unshared resource, a departing member and an interrupted administrative
+operation; verify no implicit sharing, lost records or duplicate installation. See
 [validation](validation.md) for executable checks.
 
-**Left open:** Fleet layout, presentation and additional provider mappings.
+**Left open:** Systems-map layout, helper packaging and transport, role design,
+sign-in provider, discovery, recovery UX and additional provider mappings.
+The first product slice excludes work tracking and an attention inbox; existing
+optional interfaces remain valid without dictating that product scope.
 Observatory is optional; it does not introduce shared identity, provisioning or
 execution requirements for the agents it observes.
 
