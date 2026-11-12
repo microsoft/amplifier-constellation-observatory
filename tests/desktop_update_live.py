@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Actual two-build desktop replacement in a disposable home; no model or agent calls.
 
-The second executable differs only by inert trailing fixture bytes. This checks
+The second executable differs only by fixture bytes (an ad-hoc signature
+identifier on macOS, inert trailing bytes elsewhere). This checks
 process identity/hash, update and preserved state; it is not release lineage proof.
 """
 import argparse, hashlib, json, os, shutil, sqlite3, subprocess, tempfile, time, urllib.request, urllib.parse, uuid
@@ -9,11 +10,19 @@ from pathlib import Path
 from contextlib import closing
 
 def digest(p): return hashlib.sha256(p.read_bytes()).hexdigest()
-def fixture_signature(executable):
-    # Mach-O linkers emit local ad-hoc signatures. Deliberately changing fixture
-    # bytes requires a new local signature; this is not publisher/notarization proof.
-    if os.name!='nt' and os.uname().sysname=='Darwin':
-        subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(executable)],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+def fixture_binary(source, executable, marker):
+    mac = os.name!='nt' and os.uname().sysname=='Darwin'
+    executable.write_bytes(source.read_bytes() + (b'' if mac else marker))
+    executable.chmod(0o700)
+    if mac:
+        # Appending outside Mach-O segments makes codesign reject the file.
+        # A distinct local signature identifier varies the hash without changing
+        # executable behavior. This is not publisher/notarization proof.
+        result=subprocess.run(['/usr/bin/codesign','--force','--sign','-',
+            '--identifier','org.constellation.fixture.'+hashlib.sha256(marker).hexdigest(),str(executable)],
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        assert result.returncode==0,result.stderr
+        subprocess.run(['/usr/bin/codesign','--verify',str(executable)],check=True)
 
 def request(url,token,path,body=None):
     r=urllib.request.Request(url+path,data=json.dumps(body).encode() if body is not None else None,
@@ -35,7 +44,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='observatory update café ') as folder:
         root=Path(folder);home=root/'same individual';old=root/'old';new=root/'new';old.mkdir();new.mkdir()
         for directory,extra,support_version in [(old,b'','fixture-old'),(new,b'\nobservatory-inert-update-fixture\n','fixture-new')]:
-            executable=directory/name;executable.write_bytes(binary.read_bytes()+extra);executable.chmod(0o700);fixture_signature(executable)
+            executable=directory/name;fixture_binary(binary,executable,extra)
             package(directory,executable,support_version)
         def launch(executable):
             proc=subprocess.Popen([str(executable),'--home',str(home),'--no-browser'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8');processes.append(proc)
@@ -76,7 +85,7 @@ def main():
             # staged. The actual candidate process must exit; rollback must retain the
             # previously installed binary and state, rather than claim a free lock is exit.
             bad=root/'failing candidate';bad.mkdir();bad_binary=bad/name
-            bad_binary.write_bytes(binary.read_bytes()+b'\nfixture-startup-rejection\n');bad_binary.chmod(0o700);fixture_signature(bad_binary)
+            fixture_binary(binary,bad_binary,b'\nfixture-startup-rejection\n')
             package(bad,bad_binary,'fixture-bad')
             bad_offer,bad_url,bad_token=launch(bad_binary)
             j=json.loads((home/'desktop-update.json').read_text());j['candidate']['version']='fixture-rejected-startup'
@@ -122,5 +131,5 @@ def main():
                 try:assert kernel.WaitForSingleObject(exit_handle,15000)==0,'Owned fixture process did not exit'
                 finally:kernel.CloseHandle(exit_handle)
             else:time.sleep(.5)
-    print(json.dumps({'checks':checks,'model_calls':0,'production_operations':0,'binary_sha256':digest(binary),'condition':'real native binaries with inert trailing fixture bytes, same version; inert Instance setup inventory never executed; bad candidate version injected after staging to test actual child rejection and rollback'},indent=2))
+    print(json.dumps({'checks':checks,'model_calls':0,'production_operations':0,'binary_sha256':digest(binary),'condition':'real native binaries, same version; distinct ad-hoc signature identifier on macOS or inert trailing bytes elsewhere; inert Instance setup inventory never executed; bad candidate version injected after staging to test actual child rejection and rollback'},indent=2))
 if __name__=='__main__':main()

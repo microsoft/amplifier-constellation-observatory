@@ -75,6 +75,10 @@ async fn challenge(app: &Router, config: &Config, query: &str) -> (StatusCode, V
 async fn local_api_authenticates_actual_installation_before_management_request() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (home, state, app) = installation(listener.local_addr().unwrap().port());
+    // The real launcher records its binary identity before accepting requests.
+    // Match that order: hashing this unoptimized test executable can exceed the
+    // API deadline on a small runner; the deadline is for the running service.
+    desktop::binary_digest().unwrap();
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
