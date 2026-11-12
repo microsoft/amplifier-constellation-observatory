@@ -63,6 +63,9 @@ pub fn submit(
         ));
     }
     let _gate = state.talk_gate.lock().unwrap();
+    if crate::desktop_update::busy(&state) {
+        return Err(ApiError::busy());
+    }
     let mut session = state.read("sessions", room)?;
     if let Some(old) = session["messages"].as_array().and_then(|ms| {
         ms.iter()
@@ -137,6 +140,9 @@ pub fn submit(
 }
 pub fn resume(state: Arc<AppState>, room: &str, actor: &str, ack: bool) -> ApiResult<Value> {
     let _gate = state.talk_gate.lock().unwrap();
+    if crate::desktop_update::busy(&state) {
+        return Err(ApiError::busy());
+    }
     let mut session = state.read("sessions", room)?;
     let e = endpoint(&state, &session)?;
     let mut active = state.active_sessions.lock().unwrap();

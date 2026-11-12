@@ -79,7 +79,10 @@ if __name__=='__main__':
         root=Path(temp);entry=Path(record['entry']);assert not entry.is_absolute() and '..' not in entry.parts
         binary=root/entry;binary.parent.mkdir(parents=True,exist_ok=True)
         if record['os']=='linux':
-            with tarfile.open(archive) as z:binary.write_bytes(z.extractfile(record['entry']).read())
+            with tarfile.open(archive) as z:
+                for member in z.getmembers():
+                    path=Path(member.name);assert member.isfile() and not path.is_absolute() and '..' not in path.parts
+                    target=root/path;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(z.extractfile(member).read());target.chmod(member.mode & 0o777)
         else:
             with zipfile.ZipFile(archive) as z:
                 for item in z.infolist():

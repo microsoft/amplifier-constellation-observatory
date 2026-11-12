@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Package format and native import boundaries; synthetic executable bytes never run."""
 import hashlib, importlib.util, json, plistlib, stat, struct, tarfile, tempfile, unittest, zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 def module(name, filename):
     spec=importlib.util.spec_from_file_location(name,Path(__file__).with_name(filename));loaded=importlib.util.module_from_spec(spec);spec.loader.exec_module(loaded);return loaded
@@ -17,14 +17,42 @@ class PackagingTests(unittest.TestCase):
                     self.assertEqual(row['binary_sha256'],hashlib.sha256(binary.read_bytes()).hexdigest())
                     if row['os']=='linux':
                         with tarfile.open(path) as z:
-                            self.assertEqual(z.getnames(),['agent-observatory']);self.assertEqual(z.extractfile('agent-observatory').read(),binary.read_bytes());self.assertEqual(z.getmembers()[0].mode,0o755)
+                            self.assertEqual(z.getnames(),['agent-observatory','observatory-package.json']);self.assertEqual(z.extractfile('agent-observatory').read(),binary.read_bytes());self.assertEqual(z.getmembers()[0].mode,0o755)
+                            manifest=json.load(z.extractfile('observatory-package.json'))
                     else:
                         with zipfile.ZipFile(path) as z:
                             self.assertEqual(z.read(row['entry']),binary.read_bytes());self.assertTrue(z.getinfo(row['entry']).external_attr>>16 & stat.S_IXUSR)
+                            self.assertTrue(all('\\' not in name for name in z.namelist()))
+                            manifest=json.loads(z.read(str(PurePosixPath(row['entry']).parent/'observatory-package.json')))
                             if row['os']=='macos':
                                 info=plistlib.loads(z.read('Observatory.app/Contents/Info.plist'));self.assertEqual(info['CFBundleExecutable'],'agent-observatory');self.assertEqual(info['CFBundlePackageType'],'APPL')
+                    self.assertEqual(manifest['binary_sha256'],row['binary_sha256']);self.assertEqual(manifest['target'],target);self.assertEqual(manifest['version'],row['version']);self.assertNotIn('instance_manifest_sha256',manifest)
                     pack.package(binary,target,'0.11.0',root/'dist');self.assertEqual(path.read_bytes(),original)
                     self.assertEqual(json.loads(path.with_name(path.name+'.json').read_text()),row)
+    def test_complete_package_keeps_matching_instance_closure_and_refuses_changed_member(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);binary=root/'observatory';binary.write_bytes(b'inert Observatory fixture')
+            for target in pack.TARGETS:
+                source=root/target;source.mkdir();name='agent-instance.exe' if 'windows' in target else 'agent-instance'
+                (source/name).write_bytes(b'inert Instance fixture');(source/name).chmod(0o755)
+                manifest={'schema':1,'kind':'instance-consumer-bundle','version':'fixture','source':'0'*40,'target':target,'binary':name,'native_runtime':{'version':'fixture'},'files':{name:hashlib.sha256((source/name).read_bytes()).hexdigest()}}
+                (source/'consumer-bundle.json').write_text(json.dumps(manifest))
+                record=pack.package(binary,target,'0.11.0',root/'out',source)
+                self.assertTrue(record['includes_agent_setup']);self.assertIn('-desktop.',record['filename'])
+                prefix='Observatory.app/Contents/MacOS/' if 'apple' in target else ''
+                if record['os']=='linux':
+                    with tarfile.open(root/'out'/record['filename']) as archive:
+                        self.assertEqual(archive.extractfile('support/instance/'+name).read(),b'inert Instance fixture')
+                        package_manifest=json.load(archive.extractfile('observatory-package.json'))
+                else:
+                    with zipfile.ZipFile(root/'out'/record['filename']) as archive:
+                        self.assertEqual(archive.read(prefix+'support/instance/'+name),b'inert Instance fixture')
+                        package_manifest=json.loads(archive.read(prefix+'observatory-package.json'))
+                self.assertEqual(package_manifest['instance_manifest_sha256'],hashlib.sha256((source/'consumer-bundle.json').read_bytes()).hexdigest())
+                (source/name).write_bytes(b'changed')
+                with self.assertRaisesRegex(ValueError,'integrity'):pack.package(binary,target,'0.11.0',root/'out',source)
+                manifest['target']='wrong';(source/'consumer-bundle.json').write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError,'matching'):pack.package(binary,target,'0.11.0',root/'out',source)
     def fixture(self,cpu,library):
         name=library.encode()+b'\0';size=(24+len(name)+7)//8*8
         command=struct.pack('<6I',0xc,size,24,0,0,0)+name+bytes(size-24-len(name))

@@ -34,11 +34,11 @@ async fn closing_successful_or_failed_acp_client_stops_spawned_local_descendants
         let output = home.path().join("fixture-pids.json");
         let script = r#"
 import json, os, subprocess, sys
+child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+with open(sys.argv[1],'w') as out: json.dump([os.getpid(),child.pid],out)
 for line in sys.stdin:
     r=json.loads(line)
     if r.get('method') == 'initialize':
-        child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        with open(sys.argv[1],'w') as out: json.dump([os.getpid(),child.pid],out)
         response={'jsonrpc':'2.0','id':r['id']}
         response.update({'error':{'code':-32603,'message':'fixture rejection'}} if sys.argv[2]=='fail' else {'result':{'protocolVersion':1,'agentCapabilities':{}}})
         print(json.dumps(response),flush=True)

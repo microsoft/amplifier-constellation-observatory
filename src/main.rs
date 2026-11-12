@@ -39,6 +39,15 @@ enum Command {
         local_only: bool,
     },
     Serve,
+    #[command(hide = true)]
+    ApplyUpdate {
+        request_id: String,
+    },
+    #[command(hide = true)]
+    ServeUpdate {
+        request_id: String,
+        nonce: String,
+    },
     Status,
     Config,
     Api {
@@ -154,6 +163,12 @@ async fn main() -> Result<()> {
             );
         }
         Command::Serve => desktop::serve(home.clone(), false).await?,
+        Command::ServeUpdate { request_id, nonce } => {
+            desktop::serve_guarded(home.clone(), false, Some((request_id, nonce))).await?
+        }
+        Command::ApplyUpdate { request_id } => {
+            agent_observatory::desktop_update::apply(&home, &request_id).await?
+        }
         Command::Config => println!("{}", serde_json::to_string_pretty(&Config::load(&home)?)?),
         Command::Status => println!(
             "{}",

@@ -59,6 +59,7 @@ jobs:
           python scripts/test-machine-helper-imports.py
           python scripts/test-machine-helper-elf.py
           python scripts/test-native-packaging.py
+          python scripts/test-instance-bundle-download.py
       - name: Install prerequisites
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
@@ -97,6 +98,7 @@ jobs:
           npm ci --ignore-scripts
           npx playwright install --with-deps chromium
           node tests/desktop-browser.mjs
+          node tests/desktop-update-browser.mjs
           node tests/browser.mjs
           node tests/management-browser.mjs
           node tests/intake-browser.mjs
@@ -123,6 +125,29 @@ jobs:
         run: |
           for metadata in dist/agent-observatory-*-"$TARGET".*.json; do
             python scripts/check-native-launch.py --metadata "$metadata"
+          done
+      - name: Verify native application replacement and recovery
+        run: python tests/desktop_update_live.py --binary "$OBSERVATORY_RELEASE_BINARY"
+      - name: Compose the pinned complete desktop package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          python scripts/fetch-instance-bundle.py --target "$TARGET" --output "$RUNNER_TEMP/observatory-instance-bundle"
+          version=$("$OBSERVATORY_RELEASE_BINARY" --version | cut -d' ' -f2)
+          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$RUNNER_TEMP/observatory-instance-bundle" --output dist
+      - name: Prepare disposable Linux user service manager
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Verify complete one-computer installation without developer tools
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          for metadata in dist/agent-observatory-*-"$TARGET"-desktop.*.json; do
+            python scripts/check-one-computer.py --metadata "$metadata"
           done
       - uses: actions/upload-artifact@v4
         with:

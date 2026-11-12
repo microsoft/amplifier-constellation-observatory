@@ -9,7 +9,7 @@ repository = "https://github.com/microsoft/amplifier-constellation-observatory"
 description = "An outbound-only, locally paired computer presence helper for Observatory."
 
 [dependencies]
-amplifier-native-platform = { git = "https://github.com/microsoft/amplifier-constellation", rev = "b65ed668c7df2ac4df3b15198bf8fb4db44abbec" }
+amplifier-native-platform = { git = "https://github.com/microsoft/amplifier-constellation", rev = "774dcedfde21dfec133cd3c497fd6177e9cdfff6" }
 anyhow = "1"
 axum = "0.8.9"
 base64 = "0.22"

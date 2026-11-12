@@ -20,6 +20,8 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 pub struct AppState {
+    pub shutdown: tokio::sync::watch::Sender<bool>,
+    pub update_hold: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     pub elicitations: crate::elicitation::Elicitations,
     pub permissions: crate::permissions::Permissions,
     pub home: PathBuf,
@@ -102,14 +104,22 @@ CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGE
                 now_ms() + 100_i64 * 366 * 86400 * 1000
             ],
         )?;
+        let operation_gate = Arc::new(Semaphore::new(4));
+        let update_hold = if crate::desktop_update::pending_verification(&home) {
+            Some(operation_gate.clone().try_acquire_many_owned(4)?)
+        } else {
+            None
+        };
         Ok(Arc::new(Self {
+            shutdown: tokio::sync::watch::channel(false).0,
+            update_hold: Mutex::new(update_hold),
             permissions: crate::permissions::Permissions::default(),
             elicitations: crate::elicitation::Elicitations::default(),
             home,
             config,
             db: Mutex::new(db),
             login_gate: Arc::new(Semaphore::new(2)),
-            operation_gate: Arc::new(Semaphore::new(4)),
+            operation_gate,
             progress: Mutex::new(HashMap::new()),
             cancellations: Mutex::new(HashMap::new()),
             active_sessions: Mutex::new(HashSet::new()),

@@ -327,3 +327,37 @@ async fn new_connection_credential_does_not_replace_an_existing_grant() {
     assert_eq!(list.1, json!({"names":["existing"]}));
     assert!(!refused.1.to_string().contains("private-value"));
 }
+
+#[tokio::test]
+async fn native_computer_edit_preserves_server_owned_setup_and_client_cannot_forge_it() {
+    let (_dir, state, token) = state();
+    let app = server::router(state.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    let saved = state.save("hosts", json!({"id":id,"label":"This computer","transport":"local","native_local":true,"install_roots":[],"recipes":[]}), Some(0)).unwrap();
+    let (status, changed) = request(&app,&token,"PUT",&format!("/api/v1/hosts/{id}"),json!({"label":"My laptop","transport":"local","install_roots":[],"recipes":[],"expected_revision":saved["revision"]})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(changed["native_local"], true);
+    let (status, _) = request(&app,&token,"POST","/api/v1/hosts",json!({"label":"Forged","transport":"local","native_local":true,"install_roots":[],"recipes":[]})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn finishing_connection_never_executes_incomplete_or_generic_installer() {
+    let (_dir, state, token) = state();
+    let app = server::router(state.clone());
+    for status in ["queued", "running", "interrupted", "failed", "completed"] {
+        let id = uuid::Uuid::new_v4().to_string();
+        state.save("jobs",json!({"id":id,"status":status,"exit_code":if status=="completed"{0}else{1},"plan":{"host_id":"absent","recipe_id":"external"}}),Some(0)).unwrap();
+        let response = request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/v1/jobs/{id}/connect"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(state.list("endpoints").unwrap().is_empty());
+        assert_eq!(state.read("jobs", &id).unwrap()["status"], status);
+    }
+}

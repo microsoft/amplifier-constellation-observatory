@@ -60,6 +60,8 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/descriptor", get(descriptor))
         .route("/api/v1/local-proof", get(auth::local_proof))
         .route("/api/v1/status", get(status))
+        .route("/api/v1/native-update/stop", post(update_stop))
+        .route("/api/v1/native-update/finish", post(update_finish))
         .route("/api/v1/endpoints", get(endpoints).post(add_endpoint))
         .route(
             "/api/v1/endpoints/{id}",
@@ -78,6 +80,7 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/install", post(install))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/jobs/{id}", get(job))
+        .route("/api/v1/jobs/{id}/connect", post(connect_installation))
         .route("/api/v1/jobs/{id}/log/{stream}", get(job_log))
         .route("/api/v1/sessions", get(sessions).post(new_session))
         .route("/api/v1/sessions/{id}", get(session))
@@ -221,9 +224,32 @@ async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -
             .headers()
             .get("sec-fetch-site")
             .is_some_and(|h| !matches!(h.to_str().ok(), Some("same-origin" | "none")));
-        if actual_host != Some(expected_host) || foreign_origin || foreign_site {
+        // The explicit native update offer uses a separate loopback port.
+        // Only navigation to the public entry document may cross that port;
+        // API calls, subresources, foreign origins and cross-site pages stay refused.
+        let local_entry = req.method() == axum::http::Method::GET
+            && req.uri().path() == "/"
+            && req
+                .headers()
+                .get("sec-fetch-site")
+                .is_some_and(|h| h == "same-site")
+            && req
+                .headers()
+                .get("sec-fetch-mode")
+                .is_some_and(|h| h == "navigate")
+            && req
+                .headers()
+                .get("sec-fetch-dest")
+                .is_some_and(|h| h == "document");
+        if actual_host != Some(expected_host) || foreign_origin || (foreign_site && !local_entry) {
             return ApiError::forbidden().into_response();
         }
+    }
+    if crate::desktop_update::busy(&s)
+        && req.method() != axum::http::Method::GET
+        && !req.uri().path().starts_with("/api/v1/native-update/")
+    {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":"Observatory is reopening after its local update. Your agents keep running."}))).into_response();
     }
     let mut response = next.run(req).await;
     let h = response.headers_mut();
@@ -238,6 +264,22 @@ async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -
     h.insert(header::CONTENT_SECURITY_POLICY,format!("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' data:; connect-src 'self'; frame-src https:; frame-ancestors {ancestors}; base-uri 'self'; form-action 'self'").parse().unwrap());
     response
 }
+async fn update_stop(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::check(&s, &h, "admin", true)?;
+    Ok(Json(crate::desktop_update::stop(&s, &body)?))
+}
+async fn update_finish(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::check(&s, &h, "admin", true)?;
+    Ok(Json(crate::desktop_update::finish(&s, &body)?))
+}
 async fn descriptor(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "observe", false)?;
     Ok(Json(
@@ -247,7 +289,7 @@ async fn descriptor(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<J
 async fn status(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "observe", false)?;
     Ok(Json(
-        json!({"id":s.config.id,"version":env!("CARGO_PKG_VERSION"),"endpoints":s.list("endpoints")?.len(),"hosts":s.list("hosts")?.len(),"jobs":s.list("jobs")?.len(),"active_sessions":s.active_sessions.lock().unwrap().len()}),
+        json!({"id":s.config.id,"version":env!("CARGO_PKG_VERSION"),"endpoints":s.list("endpoints")?.len(),"hosts":s.list("hosts")?.len(),"jobs":s.list("jobs")?.len(),"active_sessions":s.active_sessions.lock().unwrap().len(),"pid":std::process::id(),"binary_sha256":crate::desktop::binary_digest().map_err(ApiError::from)?}),
     ))
 }
 fn revision(body: &Value) -> ApiResult<u64> {
@@ -554,6 +596,9 @@ async fn edit_host(
         return crate::machines::edit_label(&s, &id, &body).map(Json);
     }
     let mut v = host_body(&body)?;
+    if old["native_local"] == true && v["transport"] == "local" {
+        v["native_local"] = json!(true);
+    }
     v["id"] = json!(id);
     let v = s.save("hosts", v, Some(revision(&body)?))?;
     s.audit("host.changed", Some(&id), json!({"actor":p.actor}))?;
@@ -605,6 +650,34 @@ async fn job(
     auth::check(&s, &h, "provision", false)?;
     Ok(Json(s.read("jobs", &id)?))
 }
+async fn connect_installation(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let p = auth::check(&s, &h, "provision", true)?;
+    let mut job = s.read("jobs", &id)?;
+    if job["status"] != "completed" || job["exit_code"] != 0 {
+        return Err(ApiError::bad(
+            "Only a completed installation can finish connecting",
+        ));
+    }
+    let endpoint = crate::local_install::attach(&s, &job)
+        .await
+        .map_err(|error| ApiError::bad(error.to_string()))?;
+    job["endpoint_id"] = endpoint["id"].clone();
+    job["connection_pending"] = json!(false);
+    job["note"] = json!(
+        "Your agent is installed and connected. Choose its model access and the places it can join."
+    );
+    let job = s.save("jobs", job, None)?;
+    s.audit(
+        "installation.connection_finished",
+        Some(&id),
+        json!({"actor":p.actor}),
+    )?;
+    Ok(Json(job))
+}
 async fn job_log(
     State(s): State<Arc<AppState>>,
     h: HeaderMap,
@@ -626,6 +699,11 @@ async fn agent_sessions(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "manage", true)?;
+    let _permit = s
+        .operation_gate
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::busy())?;
     let endpoint = s.read("endpoints", &id)?;
     let action = body["action"].as_str().unwrap_or("list");
     if !["list", "delete"].contains(&action) {
@@ -721,6 +799,9 @@ async fn close_session(
     auth::check(&s, &h, "interact", true)?;
     {
         let _gate = s.talk_gate.lock().unwrap();
+        if crate::desktop_update::busy(&s) {
+            return Err(ApiError::busy());
+        }
         let mut session = s.read("sessions", &id)?;
         let mut active = s.active_sessions.lock().unwrap();
         if !active.insert(id.clone()) {

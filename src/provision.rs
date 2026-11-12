@@ -125,7 +125,16 @@ pub fn plan(state: &AppState, body: &Value) -> ApiResult<Value> {
     if name.is_empty() || name.len() > 120 || name.contains(['\n', '\r', '\0']) {
         return Err(ApiError::bad("Give the new installation a short name"));
     }
-    let folder = body["home"].as_str().unwrap_or("");
+    let local_folder;
+    let folder = if host["native_local"] == true && recipe["id"] == "bundled-instance" {
+        local_folder =
+            crate::local_install::folder(&host, body).map_err(|e| ApiError::bad(e.to_string()))?;
+        local_folder
+            .to_str()
+            .ok_or_else(|| ApiError::bad("The installation folder is not supported"))?
+    } else {
+        body["home"].as_str().unwrap_or("")
+    };
     if !host["install_roots"]
         .as_array()
         .unwrap()
@@ -169,9 +178,13 @@ const REMOTE: &str = r#"import json,os,select,signal,subprocess,sys,time
 r=json.loads(sys.stdin.readline())
 p=subprocess.Popen(r['argv'],cwd=r.get('cwd') or None,stdin=subprocess.DEVNULL,start_new_session=True)
 disconnected=False
+stopped=False
 def stop():
+ global stopped
+ if stopped:return
  try:os.killpg(p.pid,signal.SIGKILL)
  except ProcessLookupError:pass
+ stopped=True
 def interrupted(signum,frame):
  global disconnected
  disconnected=True;stop()
@@ -206,6 +219,22 @@ pub async fn execute(state: Arc<AppState>, job_id: String, plan: Value) {
             } else {
                 "Installation failed. Inspect the preserved result before retrying."
             });
+            if code == 0 && plan["recipe_id"] == "bundled-instance" {
+                match crate::local_install::attach(&state, &job).await {
+                    Ok(endpoint) => {
+                        job["endpoint_id"] = endpoint["id"].clone();
+                        job["note"] = json!(
+                            "Your agent is installed and connected. Choose its model access and the places it can join."
+                        );
+                    }
+                    Err(error) => {
+                        job["connection_pending"] = json!(true);
+                        job["note"] = json!(format!(
+                            "The agent was installed, but its connection needs attention: {error}. Its installation has been preserved."
+                        ));
+                    }
+                }
+            }
         }
         Err(e) => {
             job["status"] = json!("interrupted");
@@ -264,17 +293,20 @@ async fn execute_inner(state: &AppState, id: &str, plan: &Value) -> ApiResult<i3
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(not(windows))]
     let mut child = cmd
         .spawn()
         .map_err(|_| ApiError::bad("Could not start the host installer"))?;
     #[cfg(unix)]
     let pid = child.id().unwrap_or(0) as i32;
     #[cfg(windows)]
-    let process_job = crate::process_tree::ProcessJob::attach(&child).map_err(|_| {
-        ApiError::bad(
-            "Could not establish installer process cleanup; inspect the host before retrying",
-        )
-    })?;
+    let (mut child, process_job) = crate::process_tree::ProcessJob::spawn(&mut cmd)
+        .await
+        .map_err(|_| {
+            ApiError::bad(
+                "Could not establish installer process cleanup; inspect the host before retrying",
+            )
+        })?;
     // Keep the remote control stream open for the whole operation. EOF means the
     // initiating process/SSH channel disappeared and the remote group must stop.
     let mut remote_control = None;
@@ -361,6 +393,9 @@ async fn execute_inner(state: &AppState, id: &str, plan: &Value) -> ApiResult<i3
 }
 pub fn start(state: Arc<AppState>, body: &Value, actor: &str) -> ApiResult<Value> {
     let gate = state.provision_gate.lock().unwrap();
+    if crate::desktop_update::busy(&state) {
+        return Err(ApiError::busy());
+    }
     let request = body["request_id"]
         .as_str()
         .ok_or_else(|| ApiError::bad("Supply a unique request ID"))?;
@@ -509,8 +544,23 @@ time.sleep(60 if sys.argv[2]=='timeout' else 0.1)
                 ))
                 .unwrap()
             );
+            // A second signal after the parent is reaped can target a vanished
+            // or reused process group (EPERM on macOS). Only successful cleanup
+            // is memoized; a genuine first-attempt failure must still surface.
+            let remote = format!(
+                r#"import os
+original_killpg=os.killpg
+cleanup_calls=0
+def once(group, sig):
+ global cleanup_calls
+ cleanup_calls+=1
+ if cleanup_calls>1:raise PermissionError('cleanup repeated after settlement')
+ return original_killpg(group,sig)
+os.killpg=once
+{REMOTE}"#
+            );
             let mut process = std::process::Command::new("python3")
-                .args(["-c", REMOTE])
+                .args(["-c", &remote])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
