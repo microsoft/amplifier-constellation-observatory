@@ -47,7 +47,7 @@ try {
   const endpoint=await api('endpoints',{label:'Managed fixture',kind:'agent',ui_url:origin,management:{provider:'agent-instance',access:'manage',base_url:origin,credential_ref:'fixture',ca_file:config.tls_ca,expected_id:'management-fixture'}});
   await api(`endpoints/${endpoint.id}/inspect`,{});
   await context.addCookies([{name:'obs_'+config.id.replaceAll('-',''),value:cookie,url:base,secure:true,httpOnly:true,sameSite:'Strict'}]);
-  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(base);await page.getByRole('button',{name:'Open',exact:true}).click();
+  const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(base+'/advanced');await page.getByRole('button',{name:'Open',exact:true}).click();
   assert.equal(await page.getByRole('button',{name:'Memory',exact:true}).count(),0);assert.equal(await page.getByRole('button',{name:'Background work',exact:true}).count(),0);
   pass('Optional controls stay hidden until this installation advertises them');
   advertised=true;await page.getByRole('button',{name:'Check connection',exact:true}).click();

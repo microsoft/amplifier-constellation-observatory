@@ -36,6 +36,18 @@ pub fn operations(endpoint: &Value) -> Vec<Operation> {
             op("activity", "GET", "activity", "observe"),
             op("sessions", "GET", "sessions", "observe"),
             op("connections", "GET", "connections", "observe"),
+            op(
+                "service-connections",
+                "GET",
+                "service-connections",
+                "observe",
+            ),
+            op(
+                "service-connection-action",
+                "POST",
+                "service-connections",
+                "manage",
+            ),
             op("profile-use", "GET", "profile-use", "observe"),
             op("work", "GET", "work", "work"),
             op("organization", "GET", "organization", "work"),
@@ -128,6 +140,9 @@ pub fn valid_path(path: &str) -> bool {
         })
 }
 pub fn validate(value: &Value) -> ApiResult<()> {
+    if !value["host_id"].is_null() && !value["host_id"].as_str().is_some_and(canonical_uuid) {
+        return Err(ApiError::bad("Choose a saved machine identifier"));
+    }
     let label = value["label"].as_str().unwrap_or("").trim();
     if label.is_empty() || label.len() > 160 {
         return Err(ApiError::bad("Give this connection a name"));
@@ -247,20 +262,66 @@ async fn request(
     if let Some(v) = body {
         req = req.json(v);
     }
-    let mut response=req.send().await.map_err(|_|ApiError(axum::http::StatusCode::BAD_GATEWAY,"The management endpoint could not be reached with its configured trust and credentials".into()))?;
+    let mut response = req.send().await.map_err(|_| {
+        ApiError(
+            axum::http::StatusCode::BAD_GATEWAY,
+            if path == "service-connections" {
+                "The installation did not confirm delivery; inspect its saved request status before submitting another connection action"
+            } else {
+                "The management endpoint could not be reached with its configured trust and credentials"
+            }.into(),
+        )
+    })?;
     let status = response.status();
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| ApiError::bad("Management response interrupted"))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|_| {
+        if path == "service-connections" {
+            unconfirmed_connection_response()
+        } else {
+            ApiError::bad("Management response interrupted")
+        }
+    })? {
         if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
-            return Err(ApiError::bad("Management response too large"));
+            return Err(if path == "service-connections" {
+                unconfirmed_connection_response()
+            } else {
+                ApiError::bad("Management response too large")
+            });
         }
         bytes.extend_from_slice(&chunk);
     }
     if !status.is_success() {
+        if path == "service-connections" {
+            // Keep refusal distinct from an uncertain delivery. Never resend a command
+            // here: the installation owns its durable request and reconciliation.
+            let (code, message) = match status.as_u16() {
+                400 => (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "The installation declined this connection request; refresh its saved connections and check its setup fields and helper status",
+                ),
+                401 | 403 => (
+                    axum::http::StatusCode::FORBIDDEN,
+                    "The installation credential does not allow service connection access",
+                ),
+                404 | 405 => (
+                    axum::http::StatusCode::NOT_IMPLEMENTED,
+                    "This installation does not support the advertised service connection operation",
+                ),
+                409 => (
+                    axum::http::StatusCode::CONFLICT,
+                    "The saved connection, request or pending operation changed; refresh its current status before continuing",
+                ),
+                429 => (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "The installation is busy; inspect the existing request before submitting another",
+                ),
+                _ => (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "The installation could not confirm the connection operation; inspect its saved request status before submitting another",
+                ),
+            };
+            return Err(ApiError(code, message.into()));
+        }
         return Err(ApiError(
             if status.as_u16() == 404 {
                 axum::http::StatusCode::NOT_IMPLEMENTED
@@ -272,8 +333,19 @@ async fn request(
             ),
         ));
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|_| ApiError::bad("Management provider did not return JSON"))
+    serde_json::from_slice(&bytes).map_err(|_| {
+        if path == "service-connections" {
+            unconfirmed_connection_response()
+        } else {
+            ApiError::bad("Management provider did not return JSON")
+        }
+    })
+}
+fn unconfirmed_connection_response() -> ApiError {
+    ApiError(
+        axum::http::StatusCode::BAD_GATEWAY,
+        "The connection response was incomplete; inspect the installation's saved request status before submitting another action".into(),
+    )
 }
 pub fn identity(descriptor: &Value) -> Option<&str> {
     descriptor["instance_id"]
@@ -306,13 +378,21 @@ pub fn available_operations(endpoint: &Value, descriptor: &Value) -> Vec<Operati
     };
     all.into_iter()
         .filter(|op| {
-            ["descriptor", "status"].contains(&op.id.as_str())
-                || advertised.iter().any(|a| {
-                    a["path"] == op.path
-                        && a["methods"]
-                            .as_array()
-                            .is_some_and(|methods| methods.iter().any(|m| m == &op.method))
-                })
+            (!service_operation(&op.id)
+                || descriptor["capabilities"]
+                    .as_array()
+                    .is_some_and(|capabilities| {
+                        capabilities
+                            .iter()
+                            .any(|c| c == "constellation.service-connections/1")
+                    }))
+                && (["descriptor", "status"].contains(&op.id.as_str())
+                    || advertised.iter().any(|a| {
+                        a["path"] == op.path
+                            && a["methods"]
+                                .as_array()
+                                .is_some_and(|methods| methods.iter().any(|m| m == &op.method))
+                    }))
         })
         .collect()
 }
@@ -335,14 +415,98 @@ fn optional_operation(id: &str) -> bool {
         "native-schema",
         "validate-native-config",
         "apply-native-config",
+        "service-connections",
+        "service-connection-action",
     ]
     .contains(&id)
+}
+fn service_operation(id: &str) -> bool {
+    matches!(id, "service-connections" | "service-connection-action")
+}
+fn canonical_uuid(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id)
+}
+fn service_resource(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+}
+/// Only the Instance's saved-connection command shape can cross this boundary.
+/// Template choices, revisions, enrollment and idempotence remain atomic there.
+fn service_command(body: &Value) -> ApiResult<()> {
+    let object = body
+        .as_object()
+        .ok_or_else(|| ApiError::bad("Choose a saved connection action"))?;
+    let add = body["action"] == "add";
+    let fields: &[&str] = if add {
+        &["service_id", "revision", "action", "request_id", "values"]
+    } else {
+        &["connection_id", "revision", "action", "request_id"]
+    };
+    if object.len() != fields.len()
+        || object.keys().any(|key| !fields.contains(&key.as_str()))
+        || !["add", "connect", "disconnect"].contains(&body["action"].as_str().unwrap_or(""))
+        || !body[if add { "service_id" } else { "connection_id" }]
+            .as_str()
+            .is_some_and(service_resource)
+        || !body["request_id"].as_str().is_some_and(canonical_uuid)
+        || !body["revision"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty() && s.len() <= 128)
+    {
+        return Err(ApiError::bad(
+            "Use a saved resource, revision, action and canonical UUID request_id",
+        ));
+    }
+    if add
+        && !body["values"].as_object().is_some_and(|values| {
+            values.len() <= 16
+                && values.iter().all(|(key, value)| {
+                    !key.is_empty()
+                        && key.len() <= 64
+                        && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        && ![
+                            "password",
+                            "token",
+                            "secret",
+                            "authorization",
+                            "__proto__",
+                            "constructor",
+                            "prototype",
+                        ]
+                        .contains(&key.to_ascii_lowercase().as_str())
+                        && (value.is_boolean()
+                            || value.as_i64().is_some()
+                            || value.as_str().is_some_and(|s| s.len() <= 1000))
+                })
+        })
+    {
+        return Err(ApiError::bad(
+            "Use the installation's advertised typed setup fields; credentials stay in its setup",
+        ));
+    }
+    Ok(())
 }
 /// Resource identifiers are data, never an arbitrary provider URL or path.
 pub fn operation_request(
     selected: &Operation,
     body: Option<&Value>,
 ) -> ApiResult<(String, Option<Value>)> {
+    if selected.id == "service-connections" && selected.path == "service-connections" {
+        if body.is_some_and(|value| {
+            !value.is_null() && value.as_object().is_none_or(|o| !o.is_empty())
+        }) {
+            return Err(ApiError::bad(
+                "The saved connection catalog has no request fields",
+            ));
+        }
+        return Ok((selected.path.clone(), None));
+    }
+    if selected.id == "service-connection-action" && selected.path == "service-connections" {
+        service_command(body.ok_or_else(|| ApiError::bad("Choose a saved connection action"))?)?;
+    }
     if !selected.path.contains("{id}") {
         return Ok((selected.path.clone(), body.cloned()));
     }
@@ -382,9 +546,10 @@ pub async fn call(
     {
         return Err(ApiError::bad("This connection has observation access only"));
     }
+    let (path, payload) = operation_request(&selected, body)?;
     if selected.method != "GET" || !["descriptor", "status"].contains(&operation) {
         let expected = endpoint["management"]["expected_id"].as_str();
-        if selected.access != "observe" && expected.is_none() {
+        if (selected.access != "observe" || service_operation(operation)) && expected.is_none() {
             return Err(ApiError::bad(
                 "Inspect and pin this installation identity before accessing its private controls",
             ));
@@ -409,7 +574,6 @@ pub async fn call(
             }
         }
     }
-    let (path, payload) = operation_request(&selected, body)?;
     request(state, endpoint, &selected.method, &path, payload.as_ref()).await
 }
 pub async fn inspect(state: &AppState, endpoint: &Value) -> ApiResult<Value> {

@@ -37,19 +37,22 @@ pub fn validate_host(host: &Value) -> ApiResult<()> {
     let roots = host["install_roots"]
         .as_array()
         .ok_or_else(|| ApiError::bad("Choose allowed installation folders"))?;
-    if roots.is_empty()
-        || roots.iter().any(|x| {
-            x.as_str()
-                .is_none_or(|s| !Path::new(s).is_absolute() || s == "/" || s.contains(".."))
-        })
-    {
+    if roots.iter().any(|x| {
+        x.as_str()
+            .is_none_or(|s| !Path::new(s).is_absolute() || s == "/" || s.contains(".."))
+    }) {
         return Err(ApiError::bad("Use specific absolute installation roots"));
     }
     let recipes = host["recipes"]
         .as_array()
         .ok_or_else(|| ApiError::bad("Configure at least one installer recipe"))?;
-    if recipes.is_empty() || recipes.len() > 30 {
-        return Err(ApiError::bad("Configure 1–30 installer recipes"));
+    if recipes.len() > 30 {
+        return Err(ApiError::bad("Configure at most 30 installer recipes"));
+    }
+    if !recipes.is_empty() && roots.is_empty() {
+        return Err(ApiError::bad(
+            "Choose an installation folder before enabling an installer",
+        ));
     }
     for r in recipes {
         if !config::safe_name(r["id"].as_str().unwrap_or(""))

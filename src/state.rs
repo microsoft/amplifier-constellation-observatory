@@ -34,6 +34,9 @@ pub struct AppState {
     pub talk_gate: Mutex<()>,
     pub talk_inputs: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     pub provision_gate: Mutex<()>,
+    /// Serializes display-place binding validation with registry writes.
+    pub places_registry_lock: Mutex<()>,
+    pub inventory_registry_lock: Mutex<()>,
     pub acp_clients: Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::acp::LiveSession>>>>,
 }
 impl AppState {
@@ -112,6 +115,8 @@ CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGE
             talk_gate: Mutex::new(()),
             talk_inputs: Mutex::new(HashMap::new()),
             provision_gate: Mutex::new(()),
+            places_registry_lock: Mutex::new(()),
+            inventory_registry_lock: Mutex::new(()),
             acp_clients: Mutex::new(HashMap::new()),
         }))
     }

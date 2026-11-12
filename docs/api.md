@@ -5,14 +5,17 @@ The [local agreement](contracts.md) explains the promises these interfaces serve
 
 All routes below are relative to `/api/v1`. Browser sessions use machine authentication, secure cookies, and same-origin CSRF protection. API credentials are bearer tokens with explicit scopes; `admin` includes all scopes. TLS validation remains enabled for remote providers, with an optional locally supplied CA file. Redirects are not followed with remote credentials.
 
+The browser opens the systems map at `/`. Detailed administration screens remain
+at `/advanced`; both use this API and the same authentication.
+
 | Scope | Operations |
 | --- | --- |
-| `observe` | descriptor, status, endpoint/host inventory, inspections, relationships, experiment reports, activity |
+| `observe` | descriptor, status, endpoint/host/place inventory, inspections, relationships, experiment reports, activity |
 | `work` | read responsibility and organization data through optional providers |
 | `work:execute` | explicitly authorize background work and change scheduler settings through optional providers |
 | `memory:read` | read attributed memory through optional providers |
 | `memory` | read and write attributed memory through optional providers |
-| `manage` | connect/edit/detach endpoints, store credentials, invoke configuration and work-record writes, submit experiment reports |
+| `manage` | connect/edit/detach endpoints, edit place groupings, store credentials, invoke configuration and connection commands, work-record writes, submit experiment reports |
 | `interact` | ACP negotiation, sessions, prompts, disconnect |
 | `provision` | authorize/edit hosts, plan/install, job records and output |
 | `ui` | read and control browser view state |
@@ -49,6 +52,12 @@ An observation credential does not permit agent prompts, configuration, private 
 
 ACP, management and UI are individually optional, but at least one is required. `POST endpoints/{id}/inspect` records a dated management observation. `POST endpoints/{id}/probe` negotiates standard ACP. Neither test implies successful work or persona fidelity. The UI pins a newly inspected installation ID when connecting; API callers should inspect and pin deliberately.
 
+Optional `host_id` is a saved host UUID or null. Omitting it on PUT preserves the
+association; null clears it. A host cannot be removed while endpoints refer to it.
+Unassigned endpoints remain visible. This is an explicit inventory association,
+not a reachability check or an installation move. Inspection may return HTTP 200
+with `health: "unavailable"`; check the observation before claiming connection.
+
 Agent entries use `kind: "agent"` even when they offer ACP alone. Register their
 conversation adapters separately with `kind: "adapter"` and a `uses` relationship
 from adapter to agent. An adapter entry does not automatically register its agent;
@@ -67,6 +76,59 @@ still requires `interact`; reading its recorded result requires `observe`.
 `POST endpoints/{id}/operations/{operation}` sends a body to an explicit management mapping. The provider's registry chooses the HTTP method/path and required Observatory scope; callers cannot select an arbitrary URL. Built-in operations include `config`, `validate-config`, `apply-config`, `lifecycle`, `work`, `organization`, `profile-use`, `sessions`, `activity` and `permissions` where the particular provider implements them. Unsupported remote features return an explicit failure; they do not fall back to private files.
 
 For `generic-json`, `management.operations` contains `{id,method,path,access}`. Paths are bounded relative API paths; observe and work operations must be GET; descriptor/status always require observe access and GET. Any write also requires a management connection explicitly set to `manage`. The operator can map a different implementation's explicit interfaces while leaving ACP unchanged.
+
+### Saved service connections
+
+Agent Instance mappings require the pinned identity, advertised capability
+`constellation.service-connections/1`, and the exact advertised operation method
+and path. `POST endpoints/{id}/operations/service-connections {}` reads the
+installation's catalog with `observe`. The `service-connection-action` operation
+requires `manage` and forwards one of these bodies unchanged:
+
+```json
+{"connection_id":"slack-design","revision":"catalog-revision","action":"disconnect","request_id":"49c18585-903d-4481-bd5f-7b5863aa7b1a"}
+```
+
+Use `action: "connect"` for a saved connection. An advertised typed Add accepts
+`{service_id,revision,action:"add",request_id,values}`. IDs are bounded, request IDs
+must be canonical UUIDs, and values are bounded strings, integers or booleans;
+credential fields are rejected. Callers cannot select a host command or provider
+destination through this mapping. Available choices, revision checks, durable request reconciliation and
+actual/desired state remain owned by the
+[installation's connection API](https://github.com/microsoft/amplifier-constellation-instance/blob/main/docs/service-connections.md).
+An accepted request is not proof of completed connection. Read the catalog to
+observe settlement; an unavailable catalog is unknown, not disconnected.
+
+### Display places
+
+`GET/POST places`, `PUT/DELETE places/{id}`. Reading requires `observe`; changes
+require `manage`, with `expected_revision` on PUT/DELETE. The server supplies each
+record's UUID and revision. A place groups connections across installations:
+
+```json
+{
+  "label":"Studio",
+  "service":"slack",
+  "kind":"workspace",
+  "external_id":"T1234",
+  "rooms":[{"id":"C1234","label":"#design"}],
+  "bindings":[{"endpoint_id":"9c7b4074-0209-4d7d-9d9a-a7a0919689ab","connection_id":"slack-design","room_id":"C1234"}]
+}
+```
+
+Kinds are `workspace`, `server` or `experience`; service is a lowercase slug.
+`external_id` and binding `room_id` are optional. Rooms and bindings may be empty.
+Each binding must name an existing endpoint and, when supplied, a declared room.
+The same endpoint/connection pair can belong to only one place. This registry
+never creates a remote room, changes a connector or certifies live presence.
+Unmapped connections remain separate by endpoint and connection ID; matching
+labels do not merge them. Removed endpoints or missing catalog entries leave
+unknown bindings rather than invented status.
+
+Labels are at most 160 bytes; opaque external, room and connection IDs are at
+most 200 ASCII letters, digits or `._:-`. A place permits up to 500 rooms and
+1,000 bindings. There are no URL, credential or command fields; unknown fields
+are rejected.
 
 ### Optional memory, continued work and engine settings
 
@@ -103,7 +165,7 @@ The Memory tab shows attributed alternatives, audience, source counts and source
 
 These reference-client views are programmable: use `tab: "memory"` or `"background"`; `draft.memory_details` and `draft.run_report` select source/report disclosures. Use `tab: "embedded"` and `draft.embedded_route: "memory"`, `"work"`, or `"configuration"` to display the corresponding independent screen. All domain changes remain available through the operation mappings above, without driving browser pixels.
 
-`GET credentials` returns names only. `POST credentials {name,value}` writes a private credential. Environment secret references name those files. The host control credential cannot be referenced by an attached endpoint.
+`GET credentials` returns names only. `POST credentials {name,value}` writes a private credential. Add `create_only:true` to refuse an existing name atomically; the new-agent connection form uses this mode so it cannot replace another installation’s grant. Environment secret references name those files. The host control credential cannot be referenced by an attached endpoint.
 
 ## Conversations
 
@@ -198,7 +260,17 @@ The client supports text, live tool/plan progress, explicit permission decisions
 
 The host/recipe is a privileged operator configuration. Pin actual executables or release directories; a version label alone does not verify a mutable executable. `local` uses an argument array directly. `ssh` runs a fixed Python dispatcher with JSON on stdin; it does not evaluate a model-supplied shell command. SSH requires a working configured key and known host, plus remote Python. The initial SSH dispatcher targets POSIX hosts; native Windows installers can be invoked through another explicit host recipe or their own management wrapper.
 
+Empty `recipes` and `install_roots` together save inventory only. Saving a host
+does not contact it or install a pairing helper. Installation requires an approved
+recipe and an allowed root; device-code pairing is not implemented.
+
 `POST install/plan {host_id,recipe_id,name,home,port}` returns a revisioned plan and `plan_digest`. `POST install` takes the same fields plus that digest and `request_id:<UUID>`. One pending/running installation per host is allowed. `GET jobs`, `GET jobs/{id}`, `GET jobs/{id}/log/{stdout|stderr}` observe it. Logs are bounded to 1 MB each and require provisioning scope. The dispatcher stops the installer process group on timeout or control-connection loss, including descendants. Successful installers must register long-running services separately (for example, with systemd), rather than leave background children. Interrupted installations are never automatically rerun.
+
+Keep the exact request ID and body if a reply is lost, and inspect that saved job
+before another attempt. An identical repeated ID returns the existing job;
+changing its body is rejected. `completed` records installer success, not endpoint
+registration or model access. Connect and inspect the resulting installation
+separately.
 
 ## Views, reports and links
 
@@ -217,6 +289,26 @@ The host/recipe is a privileged operator configuration. Pin actual executables o
 ```
 
 Other fields are `session_id`, `filter`, `modal`, `draft`, `focus`, and `scroll:{x,y}`. The browser acknowledges the rendered revision with `{revision}`. Stale mutations return 409. A selected conversation must belong to the selected endpoint; contradictory commands fail atomically. Selecting another endpoint clears the previous conversation unless a matching conversation is explicitly supplied. Installation results can be opened with `modal: "job"` and `draft: {job_id}`. View acknowledgments and ordinary navigation are not activity events. Passwords and credential values are never form draft fields.
+
+Set `screen: "world"` for the systems map. Its top-level `world` field stores the
+layout and navigation; the selected agent still uses `selected_id`:
+
+```json
+{
+  "camera":{"x":0,"y":0,"scale":1},
+  "positions":{"machine:9c7b4074-0209-4d7d-9d9a-a7a0919689ab":{"x":160,"y":80}},
+  "machine_id":null,"place_id":null,"room_id":null,"navigation":"world"
+}
+```
+
+World members are optional; unknown members are rejected. Camera scale is
+0.05–2.5; all coordinates must be finite and within ±1,000,000. At most 500 layout
+positions are accepted, keyed by `machine:<UUID>`, `agent:<UUID>` or
+`place:<opaque-key>`. Machine selection is a UUID; place and room keys use the
+opaque-ID format above. Navigation is `world`, `machine`, `agent`, `place` or
+`room`. Layout limits are not fleet capacity limits. These view commands only
+change presentation; they cannot move installations or dispatch connection or
+host operations.
 
 `GET/POST links`, `PUT/DELETE links/{id}` describe `{label,from,to,relation,notes?}`, with relation `connects`, `uses`, `observes`, or `coordinates`. These are inventory descriptions, not a delegation authority or a network connection setup shortcut.
 
