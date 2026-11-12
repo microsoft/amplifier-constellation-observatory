@@ -10,28 +10,69 @@ permissions:
   contents: read
 
 jobs:
-  linux:
+  observatory:
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            executable: agent-observatory
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+            executable: agent-observatory
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            executable: agent-observatory
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x86_64
+            executable: agent-observatory
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            executable: agent-observatory.exe
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+            executable: agent-observatory.exe
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      OBSERVATORY_RELEASE_BINARY: target/${{ matrix.target }}/release/${{ matrix.executable }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
       - name: Check release retries preserve published assets
+        if: runner.os == 'Linux'
         run: |
-          python3 scripts/test-upload-release.py
-          python3 scripts/test-machine-helper-packaging.py
-          python3 scripts/test-machine-helper-imports.py
-          python3 scripts/test-machine-helper-elf.py
+          python scripts/test-upload-release.py
+          python scripts/test-machine-helper-packaging.py
+          python scripts/test-machine-helper-imports.py
+          python scripts/test-machine-helper-elf.py
+          python scripts/test-native-packaging.py
       - name: Install prerequisites
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
       - name: Install Rust
         run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt --component clippy
+      - name: Configure the native build target and static Windows CRT
+        run: |
+          rustup +1.93.0 target add "$CARGO_BUILD_TARGET"
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            target_env="${CARGO_BUILD_TARGET//-/_}"
+            echo "CARGO_TARGET_${target_env^^}_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+          fi
+          rustc +1.93.0 -vV
+          python -c 'import platform; print(platform.platform(), platform.machine())'
       - run: cargo +1.93.0 fmt --check
       - run: cargo +1.93.0 test --locked
       - run: cargo +1.93.0 clippy --locked --all-targets -- -D warnings
@@ -39,11 +80,11 @@ jobs:
       - name: Verify actual helper pairing over TLS
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
-          OBSERVATORY_BINARY: ${{ github.workspace }}/target/release/agent-observatory
-          MACHINE_HELPER_BINARY: ${{ github.workspace }}/machine-helper/target/debug/constellation-machine-helper
+          OBSERVATORY_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}
+          MACHINE_HELPER_BINARY: ${{ github.workspace }}/machine-helper/target/${{ matrix.target }}/debug/constellation-machine-helper
         run: |
           cargo +1.93.0 build --manifest-path machine-helper/Cargo.toml --locked
-          python3 machine-helper/tests/actual-server.py
+          python machine-helper/tests/actual-server.py
       - uses: actions/setup-node@v4
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         with:
@@ -51,10 +92,11 @@ jobs:
       - name: Check browser setup and conversation journeys
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
-          OBSERVATORY_BINARY: ${{ github.workspace }}/target/release/agent-observatory
+          OBSERVATORY_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}
         run: |
           npm ci --ignore-scripts
           npx playwright install --with-deps chromium
+          node tests/desktop-browser.mjs
           node tests/browser.mjs
           node tests/management-browser.mjs
           node tests/intake-browser.mjs
@@ -62,16 +104,26 @@ jobs:
           node tests/world-model.mjs
           node tests/world-browser.mjs
           node tests/machine-pairing-browser.mjs
-      - name: Package standalone executable
+      - name: Verify Windows does not require a separate VC++ runtime
+        if: runner.os == 'Windows'
+        run: python scripts/check-machine-helper-imports.py --binary "$OBSERVATORY_RELEASE_BINARY" --platform "${{ matrix.platform }}"
+      - name: Verify macOS imports only system frameworks and libraries
+        if: runner.os == 'macOS'
+        run: python scripts/check-native-macho.py --binary "$OBSERVATORY_RELEASE_BINARY" --architecture "${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}"
+      - name: Package standalone application
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          version=$(target/release/agent-observatory --version | cut -d' ' -f2)
+          version=$("$OBSERVATORY_RELEASE_BINARY" --version | cut -d' ' -f2)
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then test "$GITHUB_REF_NAME" = "v$version"; fi
-          mkdir dist
-          archive="agent-observatory-$version-$TARGET.tar.gz"
-          tar -czf "dist/$archive" -C target/release agent-observatory
-          (cd dist && sha256sum "$archive" > "$archive.sha256")
+          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --output dist
+      - name: Verify downloaded native app setup, restart and login
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          for metadata in dist/agent-observatory-*-"$TARGET".*.json; do
+            python scripts/check-native-launch.py --metadata "$metadata"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
@@ -93,28 +145,39 @@ jobs:
             build_target: aarch64-unknown-linux-musl
           - runner: macos-15
             platform: macos-aarch64
+            build_target: aarch64-apple-darwin
             executable: constellation-machine-helper
           - runner: macos-15-intel
             platform: macos-x86_64
+            build_target: x86_64-apple-darwin
             executable: constellation-machine-helper
           - runner: windows-2025
             platform: windows-x86_64
+            build_target: x86_64-pc-windows-msvc
+            executable: constellation-machine-helper.exe
+          - runner: windows-11-arm
+            platform: windows-aarch64
+            build_target: aarch64-pc-windows-msvc
             executable: constellation-machine-helper.exe
     runs-on: ${{ matrix.runner }}
     env:
-      HELPER_RELEASE_BINARY: machine-helper/target/release/${{ matrix.executable }}
+      HELPER_RELEASE_BINARY: machine-helper/target/${{ matrix.build_target }}/release/${{ matrix.executable }}
+      CARGO_BUILD_TARGET: ${{ matrix.build_target }}
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
       - name: Keep the Windows helper independent of a VC++ runtime install
         if: runner.os == 'Windows'
         run: |
-          echo "CARGO_BUILD_TARGET=x86_64-pc-windows-msvc" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
-          echo "HELPER_RELEASE_BINARY=machine-helper/target/x86_64-pc-windows-msvc/release/${{ matrix.executable }}" >> "$GITHUB_ENV"
+          target_env="${CARGO_BUILD_TARGET//-/_}"
+          echo "CARGO_TARGET_${target_env^^}_RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
       - run: rustup toolchain install 1.93.0 --profile minimal --component rustfmt --component clippy
+      - run: rustup +1.93.0 target add "$CARGO_BUILD_TARGET"
       - name: Keep the Linux helper independent of the host C library
         if: runner.os == 'Linux'
         env:
@@ -146,12 +209,15 @@ jobs:
       - run: cargo +1.93.0 build --manifest-path machine-helper/Cargo.toml --release --locked
       - name: Verify the actual Windows executable has no external VC++ runtime dependency
         if: runner.os == 'Windows'
-        run: python3 scripts/check-machine-helper-imports.py --binary "$HELPER_RELEASE_BINARY"
+        run: python scripts/check-machine-helper-imports.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}"
       - name: Verify the actual Linux executable has no dynamic loader or shared dependencies
         if: runner.os == 'Linux'
-        run: python3 scripts/check-machine-helper-elf.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}"
+        run: python scripts/check-machine-helper-elf.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}"
+      - name: Verify macOS helper imports only system libraries
+        if: runner.os == 'macOS'
+        run: python scripts/check-native-macho.py --binary "$HELPER_RELEASE_BINARY" --architecture "${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}"
       - name: Package the native computer helper
-        run: python3 machine-helper/packaging/package.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}" --version 0.1.0 --output dist
+        run: python machine-helper/packaging/package.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}" --version 0.2.0 --output dist
       - uses: actions/upload-artifact@v4
         with:
           name: release-helper-${{ matrix.platform }}
@@ -160,7 +226,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux, machine-helper]
+    needs: [observatory, machine-helper]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -170,6 +236,9 @@ jobs:
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -177,5 +246,5 @@ jobs:
           path: dist
       - name: Create draft release and attach verified builds
         run: |
-          python3 scripts/package-machine-helpers.py --directory dist
-          python3 scripts/upload-release.py --tag "$RELEASE_TAG" --directory dist
+          python scripts/package-machine-helpers.py --directory dist
+          python scripts/upload-release.py --tag "$RELEASE_TAG" --directory dist

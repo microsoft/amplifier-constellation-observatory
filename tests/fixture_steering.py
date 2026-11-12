@@ -1,8 +1,9 @@
 """Disposable ACP peer: records actual prompt/effect counts and asynchronous input."""
 import json
 import os
-import select
+import queue
 import sys
+import threading
 import time
 
 mode, journal = sys.argv[1:]
@@ -11,6 +12,20 @@ active = None
 updates = []
 permission = False
 pending = b""
+incoming = queue.Queue()
+
+
+def read_input():
+    # Windows select() supports sockets, not redirected stdin. A single reader
+    # preserves arbitrary byte framing on every OS without blocking timers.
+    while True:
+        chunk = os.read(sys.stdin.fileno(), 65536)
+        incoming.put(chunk)
+        if not chunk:
+            break
+
+
+threading.Thread(target=read_input, daemon=True).start()
 
 
 def record(kind, **data):
@@ -34,13 +49,13 @@ def finish():
 while True:
     if active and not permission and time.monotonic() >= active["due"]:
         finish()
-    # select() cannot see lines already buffered by TextIOWrapper. The SDK may
-    # legitimately flush several requests together; consume every complete
-    # frame before waiting for more bytes.
+    # The SDK may flush several requests together; consume every complete frame
+    # before waiting for more bytes from the portable reader.
     if b"\n" not in pending:
-        if not select.select([sys.stdin], [], [], 0.02)[0]:
+        try:
+            chunk = incoming.get(timeout=0.02)
+        except queue.Empty:
             continue
-        chunk = os.read(sys.stdin.fileno(), 65536)
         if not chunk:
             break
         pending += chunk
@@ -68,6 +83,9 @@ while True:
             permission = True
             send(id="permission", method="session/request_permission", params={"sessionId": session, "toolCall": {"toolCallId": "write", "title": "Write once"}, "options": [{"optionId": "once", "name": "Allow once", "kind": "allow_once"}]})
         if text == "partial":
+            # This scenario finishes only after the intended follow-up arrives,
+            # independent of CI scheduling delays while the frame is partial.
+            active["due"] = float("inf")
             # Tick cancellation must not discard a partially read JSON frame.
             frame=json.dumps(dict(jsonrpc="2.0",method="session/update",params={"sessionId":session,"update":{"sessionUpdate":"tool_call","toolCallId":"big","title":"x"*20000}}))+"\n"
             for part in [frame[:8000],frame[8000:16000],frame[16000:]]:
@@ -111,6 +129,8 @@ while True:
             record("queued-chain")
         else:
             updates.append(text)
+            if active["text"] == "partial":
+                active["due"] = time.monotonic() + 0.1
             # Incorporation can precede the request acknowledgment.
             send(method="session/update", params={"sessionId": session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ""}, "_meta": {"io.github.bkrabach.agent-runtime": {"inputReceipt": {"inputId": meta["inputId"], "state": "incorporated"}}}}})
             send(id=rid, result={"outcome": "injected"})

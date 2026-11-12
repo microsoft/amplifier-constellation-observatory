@@ -18,6 +18,8 @@ fn fixture() -> (TempDir, Arc<AppState>, String) {
         bind: "127.0.0.1".into(),
         port: 0,
         public_url: "https://observatory.fixture.invalid".into(),
+        auth_mode: Default::default(),
+        web_transport: Default::default(),
         pam_service: "unused".into(),
         tls_cert: PathBuf::new(),
         tls_key: PathBuf::new(),
@@ -709,12 +711,27 @@ async fn setup_download_binds_public_observatory_metadata_without_code_or_creden
         .unwrap();
     let data = archive.finish().unwrap().into_inner();
     std::fs::write(artifacts.join("linux.zip"), &data).unwrap();
-    let manifest = json!({"schema":1,"artifacts":[{"platform":"linux-aarch64","label":"Linux","architecture":"ARM64","filename":"linux.zip","sha256":format!("{:x}",Sha256::digest(&data)),"version":"0.1.0"}]});
+    let platforms = [
+        "windows-x86_64",
+        "windows-aarch64",
+        "macos-x86_64",
+        "macos-aarch64",
+        "linux-x86_64",
+        "linux-aarch64",
+    ];
+    let manifest = json!({"schema":1,"artifacts":platforms.map(|platform|json!({"platform":platform,"label":"Fixture","architecture":"fixture","filename":"linux.zip","sha256":format!("{:x}",Sha256::digest(&data)),"version":"0.1.0"}))});
     std::fs::write(artifacts.join("manifest.json"), manifest.to_string()).unwrap();
     let app = server::router(state.clone());
     let created = create(&app, &admin).await;
-    assert_eq!(created["downloads"].as_array().unwrap().len(), 1);
-    let url = created["downloads"][0]["url"].as_str().unwrap();
+    assert_eq!(created["downloads"].as_array().unwrap().len(), 6);
+    let url = created["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["platform"] == "windows-aarch64")
+        .unwrap()["url"]
+        .as_str()
+        .unwrap();
     assert_eq!(
         request(&app, "", "GET", url, Value::Null).await.0,
         StatusCode::UNAUTHORIZED

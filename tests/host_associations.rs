@@ -17,6 +17,8 @@ fn state() -> (TempDir, Arc<AppState>, String) {
         bind: "127.0.0.1".into(),
         port: 0,
         public_url: String::new(),
+        auth_mode: Default::default(),
+        web_transport: Default::default(),
         pam_service: "unused".into(),
         tls_cert: PathBuf::new(),
         tls_key: PathBuf::new(),

@@ -4,6 +4,7 @@ mod answer;
 pub mod auth;
 pub mod config;
 pub mod context;
+pub mod desktop;
 pub mod elicitation;
 pub mod error;
 pub mod experiments;
@@ -11,6 +12,8 @@ pub mod intake;
 pub mod machines;
 pub mod permissions;
 pub mod places;
+#[cfg(windows)]
+mod process_tree;
 pub mod provider;
 pub mod provision;
 pub mod server;

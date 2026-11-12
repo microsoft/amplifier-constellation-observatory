@@ -59,6 +59,8 @@ struct Client {
     steering: Value,
     #[cfg(unix)]
     pid: i32,
+    #[cfg(windows)]
+    _job: crate::process_tree::ProcessJob,
 }
 impl Drop for Client {
     fn drop(&mut self) {
@@ -86,6 +88,11 @@ impl Client {
         for k in [
             "PATH",
             "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "HOMEDRIVE",
+            "HOMEPATH",
             "USER",
             "LANG",
             "SYSTEMROOT",
@@ -127,6 +134,10 @@ impl Client {
         let mut child = cmd.spawn()?;
         #[cfg(unix)]
         let pid = child.id().context("ACP process exited")? as i32;
+        // Same kill-on-job-close lifecycle used by Instance. Attach before any
+        // ACP negotiation; a setup failure drops both the job and its child.
+        #[cfg(windows)]
+        let job = crate::process_tree::ProcessJob::attach(&child)?;
         Ok(Self {
             connection: amplifier_acp_connection::Connection::client(
                 child.stdout.take().context("Missing ACP output")?,
@@ -140,6 +151,8 @@ impl Client {
             steering: Value::Null,
             #[cfg(unix)]
             pid,
+            #[cfg(windows)]
+            _job: job,
         })
     }
     async fn send(&mut self, v: Value) -> Result<()> {

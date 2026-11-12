@@ -587,7 +587,7 @@ fn artifacts(s: &AppState) -> ApiResult<Vec<Artifact>> {
         .map_err(|_| ApiError::bad("Computer helper downloads need repair"))?;
     let all: Vec<Artifact> = serde_json::from_value(raw["artifacts"].clone())
         .map_err(|_| ApiError::bad("Computer helper downloads need repair"))?;
-    if raw["schema"] != 1 || all.len() > 5 {
+    if raw["schema"] != 1 || all.len() > 6 {
         return Err(ApiError::bad("Invalid helper manifest"));
     }
     let mut seen = std::collections::HashSet::new();
@@ -595,6 +595,7 @@ fn artifacts(s: &AppState) -> ApiResult<Vec<Artifact>> {
     for a in all {
         if ![
             "windows-x86_64",
+            "windows-aarch64",
             "macos-aarch64",
             "macos-x86_64",
             "linux-aarch64",

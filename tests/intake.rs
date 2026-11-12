@@ -9,6 +9,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 async fn api(
     app: &Router,
     token: &str,
@@ -46,6 +48,8 @@ async fn setup(mode: &str) -> (TempDir, Arc<AppState>, Router, String, String) {
         bind: "127.0.0.1".into(),
         port: 0,
         public_url: String::new(),
+        auth_mode: Default::default(),
+        web_transport: Default::default(),
         pam_service: "unused".into(),
         tls_cert: PathBuf::new(),
         tls_key: PathBuf::new(),
@@ -58,7 +62,7 @@ async fn setup(mode: &str) -> (TempDir, Arc<AppState>, Router, String, String) {
     let token = std::fs::read_to_string(dir.path().join("secrets/control-token")).unwrap();
     let app = server::router(state.clone());
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixture_steering.py");
-    let (_,endpoint)=api(&app,&token,"POST","/endpoints",json!({"label":"Fixture","acp":{"command":"python3","args":[fixture,mode,dir.path().join("journal")],"cwd":dir.path()}})).await;
+    let (_,endpoint)=api(&app,&token,"POST","/endpoints",json!({"label":"Fixture","acp":{"command":PYTHON,"args":[fixture,mode,dir.path().join("journal")],"cwd":dir.path()}})).await;
     let (_, session) = api(
         &app,
         &token,

@@ -2,6 +2,30 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMode {
+    #[default]
+    Pam,
+    LocalPassword,
+}
+impl AuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pam => "pam",
+            Self::LocalPassword => "local-password",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebTransport {
+    #[default]
+    Https,
+    LocalHttp,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -10,6 +34,11 @@ pub struct Config {
     pub bind: String,
     pub port: u16,
     pub public_url: String,
+    #[serde(default)]
+    pub auth_mode: AuthMode,
+    #[serde(default)]
+    pub web_transport: WebTransport,
+    #[serde(default)]
     pub pam_service: String,
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
@@ -32,10 +61,26 @@ impl Config {
             !self.owner.is_empty() && self.owner.len() < 100,
             "Choose an owner account"
         );
-        ensure!(
-            self.public_url.is_empty() || valid_origin(&self.public_url),
-            "Use an HTTPS origin"
-        );
+        match self.web_transport {
+            WebTransport::Https => ensure!(
+                self.public_url.is_empty() || valid_origin(&self.public_url),
+                "Use an HTTPS origin"
+            ),
+            WebTransport::LocalHttp => {
+                ensure!(
+                    self.bind == "127.0.0.1"
+                        && self.port != 0
+                        && (self.public_url == format!("http://127.0.0.1:{}", self.port)
+                            || self.public_url == format!("http://localhost:{}", self.port))
+                        && self.embed_origins.is_empty(),
+                    "Local HTTP requires a loopback-only address and matching local origin"
+                );
+                ensure!(
+                    self.auth_mode == AuthMode::LocalPassword,
+                    "Local HTTP uses an Observatory password, not a system account"
+                );
+            }
+        }
         ensure!(
             self.embed_origins.iter().all(|x| valid_origin(x)),
             "Use HTTPS embedding origins"
@@ -66,27 +111,11 @@ pub fn safe_name(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
 }
 pub fn private_dir(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
+    amplifier_native_platform::private_dir(path)
 }
 pub fn private_write(path: &Path, data: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let temporary = path.with_file_name(format!(".write-{}", uuid::Uuid::new_v4()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    file.write_all(data)?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)?;
-    Ok(())
+    amplifier_native_platform::private_write(path, data)
+}
+pub fn private_create(path: &Path, data: &[u8]) -> Result<()> {
+    amplifier_native_platform::private_create(path, data)
 }

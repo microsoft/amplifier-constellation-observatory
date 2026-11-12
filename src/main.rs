@@ -1,9 +1,10 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 use agent_observatory::{
-    config::{self, Config},
-    server,
+    config::{self, AuthMode, Config, WebTransport},
+    desktop,
     state::AppState,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -11,9 +12,11 @@ use std::path::{Path, PathBuf};
 #[command(version, about = "Observe and manage independent ACP agents")]
 struct Args {
     #[arg(long, env = "OBSERVATORY_HOME")]
-    home: PathBuf,
+    home: Option<PathBuf>,
+    #[arg(long)]
+    no_browser: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 #[derive(Subcommand)]
 enum Command {
@@ -28,6 +31,12 @@ enum Command {
         public_url: String,
         #[arg(long, default_value = "agent-observatory")]
         pam_service: String,
+        #[arg(long, value_parser=["pam","local-password"], default_value="pam")]
+        auth_mode: String,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        #[arg(long)]
+        local_only: bool,
     },
     Serve,
     Status,
@@ -48,20 +57,66 @@ enum Command {
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let args = Args::parse();
-    match args.command {
+    let home = args.home.map(Ok).unwrap_or_else(desktop::default_home)?;
+    let Some(command) = args.command else {
+        let result = desktop::launch(home, args.no_browser).await;
+        if !args.no_browser
+            && let Err(error) = &result
+        {
+            amplifier_native_platform::show_launch_error(
+                &amplifier_native_platform::OBSERVATORY,
+                &format!(
+                    "Observatory could not open: {error:#}\n\nYour saved installations have been preserved."
+                ),
+            );
+        }
+        return result;
+    };
+    match command {
         Command::Init {
             owner,
             bind,
             port,
             public_url,
             pam_service,
+            auth_mode,
+            password_file,
+            local_only,
         } => {
-            config::private_dir(&args.home)?;
+            config::private_dir(&home)?;
             ensure!(
-                !args.home.join("config.json").exists(),
+                !home.join("config.json").exists(),
                 "An installation already exists here"
             );
-            let (tls_cert, tls_key, tls_ca) = generate_tls(&args.home)?;
+            let auth_mode = if auth_mode == "local-password" {
+                AuthMode::LocalPassword
+            } else {
+                AuthMode::Pam
+            };
+            ensure!(
+                !local_only || auth_mode == AuthMode::LocalPassword,
+                "Local-only setup requires an Observatory password"
+            );
+            if auth_mode == AuthMode::LocalPassword {
+                let file = password_file
+                    .context("Supply --password-file for noninteractive local account setup")?;
+                let password = std::fs::read_to_string(file)?;
+                agent_observatory::auth::initialize_local_password(
+                    &home,
+                    password.trim_end_matches(['\r', '\n']),
+                )?;
+            } else {
+                ensure!(
+                    password_file.is_none(),
+                    "Password files apply only to local-password setup"
+                );
+            }
+            let (tls_cert, tls_key, tls_ca) = generate_tls(&home)?;
+            let bind = if local_only {
+                "127.0.0.1".to_owned()
+            } else {
+                bind
+            };
             let port = if port == 0 {
                 std::net::TcpListener::bind((bind.as_str(), 0))?
                     .local_addr()?
@@ -74,59 +129,35 @@ async fn main() -> Result<()> {
                 owner,
                 bind,
                 port,
-                public_url,
+                public_url: if local_only {
+                    format!("http://127.0.0.1:{port}")
+                } else {
+                    public_url
+                },
+                auth_mode,
+                web_transport: if local_only {
+                    WebTransport::LocalHttp
+                } else {
+                    WebTransport::Https
+                },
                 pam_service,
                 tls_cert,
                 tls_key,
                 tls_ca,
                 embed_origins: vec![],
             };
-            c.save(&args.home)?;
-            AppState::open(args.home.clone())?;
+            c.save(&home)?;
+            AppState::open(home.clone())?;
             println!(
                 "{}",
-                json!({"home":args.home,"id":c.id,"port":c.port,"url":if c.public_url.is_empty(){format!("https://localhost:{}",c.port)}else{c.public_url}})
+                json!({"home":home,"id":c.id,"port":c.port,"url":if c.public_url.is_empty(){format!("https://localhost:{}",c.port)}else{c.public_url}})
             );
         }
-        Command::Serve => {
-            use fs2::FileExt;
-            let lock = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(args.home.join("service.lock"))?;
-            lock.try_lock_exclusive()?;
-            let s = AppState::open(args.home.clone())?;
-            let weak = std::sync::Arc::downgrade(&s);
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    let Some(state) = weak.upgrade() else {
-                        break;
-                    };
-                    agent_observatory::acp::evict_idle(&state);
-                }
-            });
-            let address: std::net::SocketAddr =
-                format!("{}:{}", s.config.bind, s.config.port).parse()?;
-            let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-                &s.config.tls_cert,
-                &s.config.tls_key,
-            )
-            .await?;
-            config::private_write(&args.home.join("runtime.json"),serde_json::to_vec(&json!({"pid":std::process::id(),"port":s.config.port,"url":s.config.public_url,"version":env!("CARGO_PKG_VERSION")}))?.as_slice())?;
-            axum_server::bind_rustls(address, tls)
-                .serve(server::router(s).into_make_service())
-                .await?;
-        }
-        Command::Config => println!(
-            "{}",
-            serde_json::to_string_pretty(&Config::load(&args.home)?)?
-        ),
+        Command::Serve => desktop::serve(home.clone(), false).await?,
+        Command::Config => println!("{}", serde_json::to_string_pretty(&Config::load(&home)?)?),
         Command::Status => println!(
             "{}",
-            serde_json::to_string_pretty(&api(&args.home, "GET", "status", None).await?)?
+            serde_json::to_string_pretty(&api(&home, "GET", "status", None).await?)?
         ),
         Command::Api {
             method,
@@ -140,7 +171,7 @@ async fn main() -> Result<()> {
                 .transpose()?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&api(&args.home, &method, &path, body).await?)?
+                serde_json::to_string_pretty(&api(&home, &method, &path, body).await?)?
             );
         }
         Command::Credential { name, value_file } => {
@@ -153,42 +184,14 @@ async fn main() -> Result<()> {
                 !value.is_empty() && value.len() < 65536,
                 "Invalid credential"
             );
-            config::private_write(&args.home.join("secrets").join(name), &value)?;
+            config::private_write(&home.join("secrets").join(name), &value)?;
             println!("Credential stored");
         }
     }
     Ok(())
 }
 async fn api(home: &Path, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
-    ensure!(
-        !path.starts_with('/') && !path.contains(".."),
-        "Use a relative API path"
-    );
-    let c = Config::load(home)?;
-    let ca = std::fs::read(c.tls_ca.as_ref().unwrap_or(&c.tls_cert))?;
-    let client = reqwest::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_pem(&ca)?)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    let token = std::fs::read_to_string(home.join("secrets/control-token"))?;
-    let mut request = client
-        .request(
-            method.parse()?,
-            format!("https://127.0.0.1:{}/api/v1/{path}", c.port),
-        )
-        .bearer_auth(token.trim());
-    if let Some(b) = body {
-        request = request.json(&b);
-    }
-    let response = request.send().await?;
-    let status = response.status();
-    let v: Value = response.json().await?;
-    ensure!(
-        status.is_success(),
-        "{}",
-        v["error"].as_str().unwrap_or("Request failed")
-    );
-    Ok(v)
+    desktop::local_api(home, method, path, body).await
 }
 fn generate_tls(home: &Path) -> Result<(PathBuf, PathBuf, Option<PathBuf>)> {
     use rcgen::{
