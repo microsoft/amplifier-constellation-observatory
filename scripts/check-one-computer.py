@@ -129,7 +129,7 @@ def main():
                 account = request('/desktop/create', {'request_id': str(uuid.uuid4()), 'name': 'Native café 日本',
                     'password': 'Disposable native check ' + uuid.uuid4().hex, 'start_at_signin': False}, True)
                 assert account['authenticated']; csrf = request('/auth/session')['csrf']
-                hosts = request('/api/v1/hosts'); assert len(hosts) == 1 and hosts[0]['native_local']
+                hosts = request('/api/v1/hosts')['hosts']; assert len(hosts) == 1 and hosts[0]['native_local']
                 body = {'host_id': hosts[0]['id'], 'recipe_id': 'bundled-instance', 'request_id': str(uuid.uuid4()), 'name': 'Robot café 日本'}
                 plan = request('/api/v1/install/plan', body); agent_home = Path(plan['home'])
                 assert agent_home.name == body['request_id'] and not agent_home.exists()
@@ -140,11 +140,11 @@ def main():
                     if job['status'] not in ('queued', 'running'): break
                     time.sleep(1)
                 assert job['status'] == 'completed' and job.get('endpoint_id') == body['request_id'], job.get('note')
-                endpoints = request('/api/v1/endpoints')
+                endpoints = request('/api/v1/endpoints')['endpoints']
                 assert len(endpoints) == 1 and endpoints[0]['id'] == body['request_id']
                 before = {name: (agent_home / name).read_bytes() for name in ('config.json', 'secrets/control-token', 'tls/root-ca.crt')}
                 repeated = request('/api/v1/install', body); assert repeated['id'] == job['id']
-                assert request('/api/v1/endpoints') == endpoints
+                assert request('/api/v1/endpoints')['endpoints'] == endpoints
                 for name, value in before.items(): assert (agent_home / name).read_bytes() == value
                 manifest = json.loads((home / 'support/instance/consumer-bundle.json').read_text())
                 installed = json.loads((agent_home / 'engine/installation.json').read_text())
