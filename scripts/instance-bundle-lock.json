@@ -1,7 +1,7 @@
 {
   "repository": "microsoft/amplifier-constellation-instance",
   "version": "0.22.1",
-  "source": "d4aacb5603309059248d0473e6b2e140cdd5fc15",
+  "source": "425f2879599aa9fbbf887deaa66dc797d2c854ce",
   "targets": {
     "x86_64-apple-darwin": {
       "sha256": "2a845d6fce16eced657e1abd0db1e595ae21fa347ed9e891c9ac12122cd79a38"
