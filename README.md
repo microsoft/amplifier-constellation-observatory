@@ -2,9 +2,9 @@
 
 Part of [Amplifier Constellation](https://github.com/microsoft/amplifier-constellation).
 
-An optional management and observation client for independent agents. Connect
-through ACP or an installation's declared management interface to inspect,
-interact and operate across different machines and implementations.
+An optional home for seeing and managing the systems behind your agents:
+machines, instances, engines, services and connections. Connect through ACP or
+an installation's declared management interface across different implementations.
 
 Start with the [vision](docs/VISION.md) for intended value and the
 [public boundaries](docs/contracts.md) for Observatory's interface commitments.
@@ -16,6 +16,11 @@ administration access; future experiences can use the same service boundaries.
 
 The sections below explain the installation and its controls. Discover the actual
 endpoint's capabilities before relying on optional management behavior.
+
+The product direction targets personal and team use on Windows, macOS and Linux,
+with approachable machine pairing. The implementation described below currently
+uses Linux hosting and explicit local/SSH installation recipes; those future
+flows are not yet installation options.
 
 ## Install on Linux
 
