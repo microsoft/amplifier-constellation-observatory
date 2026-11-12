@@ -289,17 +289,20 @@ async fn execute_inner(state: &AppState, id: &str, plan: &Value) -> ApiResult<i3
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(not(windows))]
     let mut child = cmd
         .spawn()
         .map_err(|_| ApiError::bad("Could not start the host installer"))?;
     #[cfg(unix)]
     let pid = child.id().unwrap_or(0) as i32;
     #[cfg(windows)]
-    let process_job = crate::process_tree::ProcessJob::attach(&child).map_err(|_| {
-        ApiError::bad(
-            "Could not establish installer process cleanup; inspect the host before retrying",
-        )
-    })?;
+    let (mut child, process_job) = crate::process_tree::ProcessJob::spawn(&mut cmd)
+        .await
+        .map_err(|_| {
+            ApiError::bad(
+                "Could not establish installer process cleanup; inspect the host before retrying",
+            )
+        })?;
     // Keep the remote control stream open for the whole operation. EOF means the
     // initiating process/SSH channel disappeared and the remote group must stop.
     let mut remote_control = None;

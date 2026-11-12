@@ -131,13 +131,12 @@ impl Client {
                 );
             }
         }
+        #[cfg(not(windows))]
         let mut child = cmd.spawn()?;
+        #[cfg(windows)]
+        let (mut child, job) = crate::process_tree::ProcessJob::spawn(&mut cmd).await?;
         #[cfg(unix)]
         let pid = child.id().context("ACP process exited")? as i32;
-        // Same kill-on-job-close lifecycle used by Instance. Attach before any
-        // ACP negotiation; a setup failure drops both the job and its child.
-        #[cfg(windows)]
-        let job = crate::process_tree::ProcessJob::attach(&child)?;
         Ok(Self {
             connection: amplifier_acp_connection::Connection::client(
                 child.stdout.take().context("Missing ACP output")?,
