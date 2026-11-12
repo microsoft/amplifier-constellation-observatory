@@ -267,6 +267,9 @@ pairing does not grant an installer or remote shell.
 
 ### Computer pairing and presence
 
+The descriptor advertises `capabilities.machine_pairing:true` for this schema-1
+interface. Download availability is reported by the pairing endpoints.
+
 `POST machine-pairings {request_id:<UUID>}` creates a ten-minute pairing. An exact
 request retry returns the same record. `GET machine-pairings` lists pairings;
 `GET machine-pairings/{id}` reads one. Pairings and their codes remain private to

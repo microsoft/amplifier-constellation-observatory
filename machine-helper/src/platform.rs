@@ -351,12 +351,21 @@ pub fn task_matches(
     }
     let command = element(document, "Command").map(decode);
     let args = element(document, "Arguments").map(decode);
+    // Task Scheduler omits the optional RunLevel when it has the default
+    // least-privilege value. Do not confuse an invalid/duplicate element with
+    // that omission: only no mention or one exact value is accepted.
+    let least_privilege =
+        match document.matches("<RunLevel").count() + document.matches("</RunLevel").count() {
+            0 => true,
+            2 => element(document, "RunLevel") == Some("LeastPrivilege"),
+            _ => false,
+        };
     Ok(document.matches("<Exec>").count() == 1
         && document.matches("<Principal ").count() == 1
         && !document.contains("<Principal>")
         && element(document, "UserId").map(decode).as_deref() == Some(expected_sid)
         && element(document, "LogonType") == Some("InteractiveToken")
-        && element(document, "RunLevel") == Some("LeastPrivilege")
+        && least_privilege
         && !document.contains("<ComHandler>")
         && command.as_deref() == Some(safe_path(executable)?)
         && args.as_deref()

@@ -244,6 +244,44 @@ fn windows_task_ownership_requires_exact_command_and_home() {
 }
 
 #[test]
+fn windows_task_query_may_omit_only_the_default_run_level() {
+    // Captured Windows Server 2025 schtasks /Query XML from the native smoke
+    // test, with generated identities/paths replaced and re-encoded as UTF-8.
+    let text = include_str!("fixtures/windows-task-query.xml");
+    let home = Path::new(r"C:\Users\Example\AppData\Local\Temp\fixture\helper with spaces");
+    let exe = Path::new(
+        r"C:\Users\Example\AppData\Local\Temp\fixture\helper with spaces\bin\constellation-machine-helper.exe",
+    );
+    let sid = "S-1-5-21-100-200-300-1001";
+    assert!(platform::task_matches(text, exe, home, sid).unwrap());
+    assert!(!platform::task_matches(text, exe, home, "S-1-5-18").unwrap());
+    assert!(
+        !platform::task_matches(
+            &text.replace("InteractiveToken", "ServiceAccount"),
+            exe,
+            home,
+            sid,
+        )
+        .unwrap()
+    );
+    for invalid in [
+        "<RunLevel>HighestAvailable</RunLevel>",
+        "<RunLevel></RunLevel>",
+        "<RunLevel />",
+        "<RunLevel>LeastPrivilege",
+        "<RunLevel><nested>LeastPrivilege</nested></RunLevel>",
+        "<RunLevel>LeastPrivilege</RunLevel><RunLevel>LeastPrivilege</RunLevel>",
+        "<RunLevel>LeastPrivilege</RunLevel><RunLevel />",
+    ] {
+        let altered = text.replace("</Principal>", &format!("{invalid}</Principal>"));
+        assert!(
+            !platform::task_matches(&altered, exe, home, sid).unwrap(),
+            "must refuse {invalid}",
+        );
+    }
+}
+
+#[test]
 fn moved_mac_app_keeps_public_bootstrap_inside_resources() {
     let temp = tempfile::tempdir().unwrap();
     let app = temp.path().join("translocated/Constellation Computer.app");
