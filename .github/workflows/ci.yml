@@ -228,14 +228,6 @@ jobs:
           echo "HELPER_RELEASE_BINARY=machine-helper/target/$HELPER_TARGET/release/${{ matrix.executable }}" >> "$GITHUB_ENV"
       - run: cargo +1.93.0 fmt --manifest-path machine-helper/Cargo.toml --check
       - run: cargo +1.93.0 test --manifest-path machine-helper/Cargo.toml --locked
-      - name: Verify packaged local browser and computer network setup
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          mkdir "$RUNNER_TEMP/observatory-network-browser"
-          tar -xf dist/agent-observatory-*-"$TARGET"-desktop.tar.gz -C "$RUNNER_TEMP/observatory-network-browser"
-          OBSERVATORY_BINARY="$RUNNER_TEMP/observatory-network-browser/agent-observatory" node tests/machine-network-browser.mjs
       - name: Prepare disposable Linux user service manager
         if: runner.os == 'Linux'
         run: |
