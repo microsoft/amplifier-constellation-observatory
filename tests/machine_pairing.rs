@@ -791,7 +791,9 @@ async fn mac_setup_carries_public_bootstrap_inside_app_for_translocation_safe_lo
     archive
         .start_file(
             binary_path,
-            zip::write::SimpleFileOptions::default().unix_permissions(0o755),
+            zip::write::SimpleFileOptions::default()
+                .system(zip::System::Unix)
+                .unix_permissions(0o755),
         )
         .unwrap();
     archive.write_all(executable).unwrap();
