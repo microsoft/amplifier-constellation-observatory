@@ -65,11 +65,7 @@ node tests/management-browser.mjs
 
 Tests use disposable state, real HTTPS, real browser interactions, and deterministic ACP subprocesses. They do not post into a real collaboration service. Browser artifacts are private and ignored by Git.
 
-Experiment cards can open an authenticated public transcript with rendered
-Markdown and distinct human simulation, agent, and operator labels. The runner
-attaches delivered messages through the revisioned transcript API; the fleet does
-not fetch agent databases or expose unpublished drafts. Transcript selection and
-measurement disclosure are part of the same programmatic view contract.
+For experiment transcripts, see [recorded experiment conversations](docs/api.md#recorded-experiment-conversations).
 
 ## Contributing
 
