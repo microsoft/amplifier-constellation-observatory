@@ -95,7 +95,7 @@ fn invalid_world_update_cannot_overwrite_current_layout_or_navigation() {
     )
     .unwrap();
     let bad = [
-        json!({"camera":{"x":0,"y":0,"scale":0.19}}),
+        json!({"camera":{"x":0,"y":0,"scale":0.049}}),
         json!({"camera":{"x":0,"y":0,"scale":2.51}}),
         json!({"camera":{"x":1e300,"y":0,"scale":1}}),
         json!({"camera":{"x":"NaN","y":0,"scale":1}}),
@@ -139,7 +139,7 @@ fn world_positions_allow_the_bound_and_refuse_overflow() {
         &set_world(
             1,
             json!({
-                "positions":positions,"camera":{"x":-1000000,"y":1000000,"scale":0.2}
+                "positions":positions,"camera":{"x":-1000000,"y":1000000,"scale":0.05}
             }),
         ),
     )

@@ -302,7 +302,7 @@ layout and navigation; the selected agent still uses `selected_id`:
 ```
 
 World members are optional; unknown members are rejected. Camera scale is
-0.2–2.5; all coordinates must be finite and within ±1,000,000. At most 500 layout
+0.05–2.5; all coordinates must be finite and within ±1,000,000. At most 500 layout
 positions are accepted, keyed by `machine:<UUID>`, `agent:<UUID>` or
 `place:<opaque-key>`. Machine selection is a UUID; place and room keys use the
 opaque-ID format above. Navigation is `world`, `machine`, `agent`, `place` or

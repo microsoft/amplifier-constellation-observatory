@@ -50,7 +50,7 @@ fn world(v: &Value) -> bool {
                     && coordinate(&value["y"])
                     && value["scale"]
                         .as_f64()
-                        .is_some_and(|n| n.is_finite() && (0.2..=2.5).contains(&n))
+                        .is_some_and(|n| n.is_finite() && (0.05..=2.5).contains(&n))
             }),
             "positions" => value.as_object().is_some_and(|nodes| {
                 nodes.len() <= 500
