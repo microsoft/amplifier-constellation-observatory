@@ -21,6 +21,7 @@ use std::sync::Arc;
 pub fn router(s: Arc<AppState>) -> Router {
     Router::new()
         .merge(crate::machines::routes())
+        .merge(crate::machine_network::routes())
         .route(
             "/markdown-notices.txt",
             get(|| async {
@@ -203,6 +204,21 @@ async fn styles() -> impl IntoResponse {
         ),
     )
 }
+pub(crate) fn update_hold_response(
+    s: &AppState,
+    method: &axum::http::Method,
+    path: &str,
+) -> Option<axum::response::Response> {
+    if crate::desktop_update::busy(s)
+        && *method != axum::http::Method::GET
+        && !path.starts_with("/api/v1/native-update/")
+    {
+        Some((axum::http::StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":"Observatory is reopening after its local update. Your agents keep running."}))).into_response())
+    } else {
+        None
+    }
+}
+
 async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
     if !req.headers().contains_key(header::HOST)
         && let Some(authority) = req.uri().authority().map(|a| a.as_str().to_owned())
@@ -245,11 +261,8 @@ async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -
             return ApiError::forbidden().into_response();
         }
     }
-    if crate::desktop_update::busy(&s)
-        && req.method() != axum::http::Method::GET
-        && !req.uri().path().starts_with("/api/v1/native-update/")
-    {
-        return (axum::http::StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":"Observatory is reopening after its local update. Your agents keep running."}))).into_response();
+    if let Some(response) = update_hold_response(&s, req.method(), req.uri().path()) {
+        return response;
     }
     let mut response = next.run(req).await;
     let h = response.headers_mut();
@@ -283,7 +296,7 @@ async fn update_finish(
 async fn descriptor(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
     auth::check(&s, &h, "observe", false)?;
     Ok(Json(
-        json!({"id":s.config.id,"name":"Agent Observatory","version":env!("CARGO_PKG_VERSION"),"contract":"agent-observatory/1","boundary":"ACP with optional independent management providers","capabilities":{"endpoints":true,"management_providers":true,"host_installation":true,"machine_pairing":s.config.web_transport != config::WebTransport::LocalHttp,"stdio_acp":true,"semantic_views":true,"work_observation":true,"experiment_reports":true,"experiment_transcripts":true},"scopes":["observe","work","work:execute","memory:read","memory","manage","interact","provision","ui","admin"]}),
+        json!({"id":s.config.id,"name":"Agent Observatory","version":env!("CARGO_PKG_VERSION"),"contract":"agent-observatory/1","boundary":"ACP with optional independent management providers","capabilities":{"endpoints":true,"management_providers":true,"host_installation":true,"machine_pairing":crate::machine_network::endpoint(&s).await.is_ok(),"stdio_acp":true,"semantic_views":true,"work_observation":true,"experiment_reports":true,"experiment_transcripts":true},"scopes":["observe","work","work:execute","memory:read","memory","manage","interact","provision","ui","admin"]}),
     ))
 }
 async fn status(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {

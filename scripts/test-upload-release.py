@@ -64,6 +64,22 @@ class ReleaseTests(unittest.TestCase):
     def test_differing_partial_draft_is_not_overwritten(self):
         self.exercise(True, {"binary.tar.gz": b"different build"}, "Draft asset differs")
 
+    def test_helper_release_does_not_become_latest_observatory_release(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1 if argv[2] == 'view' else 0, '')
+
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / 'constellation-machine-helpers-0.2.1.zip').write_bytes(b'qualified helper bundle')
+            upload.stage('machine-helper-v0.2.1', directory, run)
+        create = next(argv for argv in calls if argv[2] == 'create')
+        self.assertIn('--draft', create)
+        self.assertIn('--latest=false', create)
+        self.assertEqual(create[create.index('--title') + 1], 'Constellation Computer 0.2.1')
+
 
 if __name__ == "__main__":
     unittest.main()

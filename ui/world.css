@@ -110,7 +110,7 @@
 #observatory-world .ow-pair-intro .ow-mini-computer{flex:none;width:145px;height:105px;margin:0}
 #observatory-world .ow-pair-intro p{max-width:38ch;font-size:15px;line-height:1.55}
 #observatory-world .ow-pair-platform{display:grid;gap:7px;font-weight:700;font-size:14px;max-width:370px}
-#observatory-world .ow-pair-platform select{min-height:44px;max-width:100%;padding:10px 12px;border:1px solid #b49470;border-radius:10px;background:#fffaf1;color:#4b2b18}
+#observatory-world .ow-pair-platform select{min-width:0;width:100%;min-height:44px;max-width:100%;padding:10px 12px;border:1px solid #b49470;border-radius:10px;background:#fffaf1;color:#4b2b18}
 #observatory-world .ow-pair-steps{margin:24px 0 18px;padding-left:26px;display:grid;gap:22px}
 #observatory-world .ow-pair-steps li{padding-left:7px;font-size:15px;line-height:1.55}
 #observatory-world .ow-pair-steps li::marker{font-weight:800;color:#315d43}
