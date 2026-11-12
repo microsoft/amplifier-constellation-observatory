@@ -818,6 +818,13 @@ async fn offer_request_inner(State(s): State<Arc<Offer>>, request: Request) -> R
         )
             .into_response();
     }
+    if path == "/desktop/nunito.woff2" && request.method() == "GET" {
+        return (
+            [(header::CONTENT_TYPE, "font/woff2")],
+            include_bytes!("../ui/world-assets/nunito.woff2").as_slice(),
+        )
+            .into_response();
+    }
     if path == "/setup.css" && request.method() == "GET" {
         return (
             [(header::CONTENT_TYPE, "text/css; charset=utf-8")],

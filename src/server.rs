@@ -224,7 +224,24 @@ async fn headers(State(s): State<Arc<AppState>>, mut req: Request, next: Next) -
             .headers()
             .get("sec-fetch-site")
             .is_some_and(|h| !matches!(h.to_str().ok(), Some("same-origin" | "none")));
-        if actual_host != Some(expected_host) || foreign_origin || foreign_site {
+        // The explicit native update offer uses a separate loopback port.
+        // Only navigation to the public entry document may cross that port;
+        // API calls, subresources, foreign origins and cross-site pages stay refused.
+        let local_entry = req.method() == axum::http::Method::GET
+            && req.uri().path() == "/"
+            && req
+                .headers()
+                .get("sec-fetch-site")
+                .is_some_and(|h| h == "same-site")
+            && req
+                .headers()
+                .get("sec-fetch-mode")
+                .is_some_and(|h| h == "navigate")
+            && req
+                .headers()
+                .get("sec-fetch-dest")
+                .is_some_and(|h| h == "document");
+        if actual_host != Some(expected_host) || foreign_origin || (foreign_site && !local_entry) {
             return ApiError::forbidden().into_response();
         }
     }

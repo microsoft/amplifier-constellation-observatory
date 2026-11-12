@@ -385,3 +385,64 @@ async fn https_local_auth_retains_secure_cookie_and_old_origin_rules() {
         StatusCode::FORBIDDEN
     );
 }
+
+#[tokio::test]
+async fn update_offer_can_navigate_to_public_root_but_not_call_local_api() {
+    let (_home, _state, app) = fixture(true);
+    for (path, mode, destination, site, expected) in [
+        ("/", "navigate", "document", "same-site", StatusCode::OK),
+        (
+            "/",
+            "navigate",
+            "document",
+            "cross-site",
+            StatusCode::FORBIDDEN,
+        ),
+        ("/", "cors", "empty", "same-site", StatusCode::FORBIDDEN),
+        (
+            "/api/v1/status",
+            "navigate",
+            "document",
+            "same-site",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "/auth/status",
+            "navigate",
+            "document",
+            "same-site",
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("host", "127.0.0.1:49152")
+                    .header("sec-fetch-site", site)
+                    .header("sec-fetch-mode", mode)
+                    .header("sec-fetch-dest", destination)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{path}/{mode}/{site}");
+    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("host", "127.0.0.1:49152")
+                .header("origin", "http://127.0.0.1:12345")
+                .header("sec-fetch-site", "same-site")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
