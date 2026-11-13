@@ -365,12 +365,10 @@ impl App {
                                     .installation_result(&receipt, &self.secret, &result)
                                     .await
                                     .is_ok()
-                                {
-                                    if let Err(error) =
+                                    && let Err(error) =
                                         crate::installation::acknowledged(&self.store, &result)
-                                    {
-                                        self.observation.lock().await.message = error.to_string();
-                                    }
+                                {
+                                    self.observation.lock().await.message = error.to_string();
                                 }
                             }
                             Err(error) => self.observation.lock().await.message = error.to_string(),

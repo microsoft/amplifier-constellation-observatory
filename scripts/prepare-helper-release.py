@@ -32,7 +32,8 @@ def ordinary(path):
         raise ValueError('Expected an ordinary release file: ' + path.name)
 
 
-def prepare(source, output, version):
+def prepare(source, output, version, expected_source=None):
+    if expected_source is not None and not re.fullmatch(r"[0-9a-f]{40}",expected_source):raise ValueError("Use exact source revision")
     if not re.fullmatch(r'\d+\.\d+\.\d+', version):
         raise ValueError('Use an exact helper release version')
     if output.exists() and (output.is_symlink() or not output.is_dir() or any(output.iterdir())):
@@ -49,6 +50,8 @@ def prepare(source, output, version):
                     'signed_or_notarized': False}
         if any(record.get(key) != value for key, value in expected.items()):
             raise ValueError('Helper release metadata differs: ' + name)
+        if expected_source is not None and record.get('source') != expected_source:
+            raise ValueError('Helper source revision differs: ' + name)
         actual = digest(archive)
         if record.get('sha256') != actual or checksum.read_text(encoding='utf-8') != actual + '  ' + name + '\n':
             raise ValueError('Helper release checksum differs: ' + name)
@@ -85,5 +88,6 @@ if __name__ == '__main__':
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--version', required=True)
+    parser.add_argument('--source')
     args = parser.parse_args()
-    print(json.dumps(prepare(args.directory, args.output, args.version), indent=2))
+    print(json.dumps(prepare(args.directory, args.output, args.version, args.source), indent=2))

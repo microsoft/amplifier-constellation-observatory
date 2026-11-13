@@ -79,6 +79,19 @@ class PackagingTests(unittest.TestCase):
                 archive.writestr(name, data)
         return out
 
+    def test_same_source_capability_closure_and_mixed_source_refusal(self):
+        folder=self.root/'qualified';self.inputs(folder,version='0.3.0')
+        for path in folder.glob('*.zip.json'):
+            row=json.loads(path.read_text());row.update(source='a'*40,installation_protocol=1);path.write_text(json.dumps(row))
+        bundle=packaging.package(folder,'0.3.0')
+        with zipfile.ZipFile(bundle) as z:manifest=json.loads(z.read('manifest.json'))
+        self.assertEqual(manifest['source'],'a'*40)
+        self.assertTrue(all(a['source']=='a'*40 and a['installation_protocol']==1 for a in manifest['artifacts']))
+        path=next(folder.glob('*.zip.json'));row=json.loads(path.read_text());row['source']='b'*40;path.write_text(json.dumps(row))
+        before=bundle.read_bytes()
+        with self.assertRaisesRegex(ValueError,'source revisions'):packaging.package(folder,'0.3.0')
+        self.assertEqual(before,bundle.read_bytes())
+
     def assert_protected(self):
         for name, content in self.protected.items():
             self.assertEqual((self.home / name).read_bytes(), content)

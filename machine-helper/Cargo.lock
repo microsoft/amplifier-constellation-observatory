@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "constellation-machine-helper"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "amplifier-native-platform",
  "anyhow",
