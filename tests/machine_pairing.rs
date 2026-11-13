@@ -726,7 +726,8 @@ async fn setup_download_binds_public_observatory_metadata_without_code_or_creden
         "linux-x86_64",
         "linux-aarch64",
     ];
-    let manifest = json!({"schema":1,"artifacts":platforms.map(|platform|json!({"platform":platform,"label":"Fixture","architecture":"fixture","filename":"linux.zip","sha256":format!("{:x}",Sha256::digest(&data)),"version":"0.1.0"}))});
+    let source = "f922e7663e39bb54b1b821d7785434cf9b33b02a";
+    let manifest = json!({"schema":1,"source":source,"artifacts":platforms.map(|platform|json!({"platform":platform,"label":"Fixture","architecture":"fixture","filename":"linux.zip","sha256":format!("{:x}",Sha256::digest(&data)),"version":"0.3.0","installation_protocol":1,"source":source}))});
     std::fs::write(artifacts.join("manifest.json"), manifest.to_string()).unwrap();
     let app = server::router(state.clone());
     let created = create(&app, &admin).await;
@@ -1154,4 +1155,79 @@ async fn paired_install_verifies_tls_identity_then_attaches_once_and_preserves_s
             .is_client_error()
     );
     task.abort();
+}
+
+#[tokio::test]
+async fn helper_source_provenance_is_optional_but_must_match_the_complete_inventory() {
+    use sha2::{Digest, Sha256};
+    let (_dir, state, admin) = fixture();
+    let artifacts = state.home.join("machine-helper-artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    let bytes = b"inert archive inventory fixture; never downloaded or executed";
+    std::fs::write(artifacts.join("fixture.zip"), bytes).unwrap();
+    let source = "f922e7663e39bb54b1b821d7785434cf9b33b02a";
+    let platforms = [
+        "windows-x86_64",
+        "windows-aarch64",
+        "macos-x86_64",
+        "macos-aarch64",
+        "linux-x86_64",
+        "linux-aarch64",
+    ];
+    let modern = json!({"schema":1,"source":source,"artifacts":platforms.map(|platform|json!({
+        "platform":platform,"label":"Fixture","architecture":"fixture","filename":"fixture.zip",
+        "sha256":format!("{:x}",Sha256::digest(bytes)),"version":"0.3.0","installation_protocol":1,"source":source
+    }))});
+    let app = server::router(state.clone());
+    let file = artifacts.join("manifest.json");
+    for legacy in [false, true] {
+        let mut manifest = modern.clone();
+        if legacy {
+            manifest.as_object_mut().unwrap().remove("source");
+            for row in manifest["artifacts"].as_array_mut().unwrap() {
+                row.as_object_mut().unwrap().remove("source");
+            }
+        }
+        let original = manifest.to_string();
+        std::fs::write(&file, &original).unwrap();
+        let (status, result) =
+            request(&app, &admin, "GET", "/api/v1/machine-pairings", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["downloads"].as_array().unwrap().len(), 6);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+    }
+    for defect in [
+        "invalid-root",
+        "short-root",
+        "different-row",
+        "missing-row",
+        "missing-root",
+        "unknown-row-field",
+    ] {
+        let mut manifest = modern.clone();
+        match defect {
+            "invalid-root" => manifest["source"] = json!(42),
+            "short-root" => manifest["source"] = json!("f922e766"),
+            "different-row" => manifest["artifacts"][0]["source"] = json!("a".repeat(40)),
+            "missing-row" => {
+                manifest["artifacts"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source");
+            }
+            "missing-root" => {
+                manifest.as_object_mut().unwrap().remove("source");
+            }
+            "unknown-row-field" => manifest["artifacts"][0]["arbitrary"] = json!(true),
+            _ => unreachable!(),
+        }
+        let original = manifest.to_string();
+        std::fs::write(&file, &original).unwrap();
+        let (status, _) =
+            request(&app, &admin, "GET", "/api/v1/machine-pairings", Value::Null).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{defect}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+    }
+    assert!(state.list("hosts").unwrap().is_empty());
+    assert!(state.list("jobs").unwrap().is_empty());
 }

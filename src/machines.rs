@@ -688,6 +688,8 @@ struct Artifact {
     version: String,
     #[serde(default)]
     installation_protocol: Option<u8>,
+    #[serde(default)]
+    source: Option<String>,
 }
 impl Artifact {
     fn descriptor(&self, id: Option<&str>) -> Value {
@@ -709,6 +711,21 @@ fn artifacts(s: &AppState) -> ApiResult<Vec<Artifact>> {
     if raw["schema"] != 1 || all.len() > 6 {
         return Err(ApiError::bad("Invalid helper manifest"));
     }
+    // Historical downloads have no source field. New same-run bundles bind
+    // every platform to one exact revision; partial or mixed provenance is not
+    // an older manifest and must not be silently treated as one.
+    let source = match raw.get("source") {
+        None => None,
+        Some(Value::String(source))
+            if source.len() == 40
+                && source
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            Some(source.as_str())
+        }
+        _ => return Err(ApiError::bad("Invalid helper source revision")),
+    };
     let mut seen = std::collections::HashSet::new();
     let mut ready = vec![];
     for a in all {
@@ -728,6 +745,7 @@ fn artifacts(s: &AppState) -> ApiResult<Vec<Artifact>> {
             || a.version.len() > 40
             || a.label.len() > 80
             || a.architecture.len() > 80
+            || a.source.as_deref() != source
         {
             return Err(ApiError::bad("Invalid helper download"));
         }
