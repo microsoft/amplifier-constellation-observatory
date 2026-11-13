@@ -3,8 +3,10 @@
 Part of [Amplifier Constellation](https://github.com/microsoft/amplifier-constellation).
 
 An optional home for seeing and managing the systems behind your agents:
-machines, instances, engines, services and connections. Connect through ACP or
-an installation's declared management interface across different implementations.
+machines, agents, services and connections. Observatory is an
+[Experience](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/experience.md)
+using ACP and declared management interfaces. Agent internals are implementation
+choices; engine details appear where the endpoint exposes them.
 
 Start with the [vision](docs/VISION.md) for intended value and the
 [public boundaries](docs/contracts.md) for Observatory's interface commitments.
@@ -111,7 +113,7 @@ existing**. Supply the executable, arguments and working folder used by a
 compatible ACP client. A remote agent can use an explicit SSH attach command.
 Credentials belong in private secret references, never command-line arguments.
 
-Built-in management mappings support Agent Instance, ACP Slack Adapter, and Persona Workshop. `generic-json` accepts a bounded list of explicitly configured operation mappings. An ACP-only endpoint remains usable without any management provider. Remote installation IDs are pinned before private reads or management writes. An optional `acp.session_cwd` selects the folder on a remote agent; `acp.cwd` is the local attach process folder.
+Built-in management mappings support Constellation Instance, ACP Slack Adapter, and Persona Workshop. `generic-json` accepts a bounded list of explicitly configured operation mappings. An ACP-only endpoint remains usable without any management provider. Remote installation IDs are pinned before private reads or management writes. An optional `acp.session_cwd` selects the folder on a remote agent; `acp.cwd` is the local attach process folder.
 
 ## Pair a computer
 
@@ -162,11 +164,11 @@ opened setup file rather than modifying a signed bundle.
 Existing local and SSH hosts remain available under advanced setup. Saving those
 inventory entries does not install the helper or test access. **Create an agent**
 uses one of that computer's approved installation recipes; configure recipes and
-allowed folders under Advanced controls. Pairing alone provides no such recipe.
+allowed folders under Advanced controls. Observation-only pairing provides no such recipe; the fixed paired-agent setup uses the separate grant described above.
 Each plan binds the selected recipe and host revision.
 Saved job results survive a lost browser response. After an installer finishes,
 complete its own setup and connect its endpoint here. Recipes can install any
-implementation; they do not need to install Agent Instance.
+implementation; they do not need to install the supplied Constellation Instance implementation.
 
 For optional update controls, see [installation updates](docs/api.md#installation-updates).
 

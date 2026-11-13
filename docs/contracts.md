@@ -3,8 +3,10 @@
 <a id="public-boundaries"></a>
 
 For people managing their systems, clients and management-provider authors.
-The promise: Observatory combines useful access to independent agents without
-becoming the owner of their state or confusing observation with successful action.
+The promise: Observatory provides a systems-management
+[Experience](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/experience.md)
+through independently owned interfaces. The five primitive boundaries and shared
+state/access rules remain in [composition](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md).
 
 **Example:** A person pairs another computer, sees the installations it exposes,
 and connects one agent to a service. A later network failure shows which step
@@ -21,14 +23,16 @@ commitment does not advertise an unimplemented interface.
    management, a dashboard or a combination. Agent and adapter entries remain
    distinct; an inventory relationship neither connects them nor grants access.
    Check each attached interface and preserve its own timestamp, checked revision
-   and outcome. Distinguish machine containment, selected engine, service
-   authorization and active conversation connections. One failing endpoint does
-   not prevent inspecting the rest. Preserve each source's hierarchy: Slack
+   and outcome. Distinguish machine placement, advertised internal capabilities,
+   service authorization and active conversation connections. Engine details apply
+   only where the agent exposes them; an Agent Instance need not contain one engine.
+   An ACP-only agent remains usable without machine or engine disclosure. One failing
+   endpoint does not prevent inspecting the rest. Preserve each source's hierarchy: Slack
    workspaces and channels, Teams teams and channels or chats, Minecraft servers
    and their supported conversation spaces. A conversation connection shows
    participation by the existing agent under
    [composition](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md),
-   without implying an instance or engine has moved or been copied.
+   without implying the agent or its execution has moved or been copied.
 2. **Pin the intended installation.** Verify the remote installation identity
    before private management reads or writes. Observatory credentials and remote
    credentials each constrain access. Read-only observation does not imply
@@ -40,10 +44,11 @@ commitment does not advertise an unimplemented interface.
    operations and their required access. Callers cannot choose arbitrary remote
    URLs, and unsupported features do not fall back to private files. Optional work,
    memory, updates and model controls retain their distinct capabilities.
-4. **Keep agent sessions recognizable.** Preserve endpoint/session association
-   and the initiating actor's pending decisions. Advertised resume/load may restore
-   a conversation; otherwise report the limitation instead of claiming that a new
-   prompt recreates the old session. Endpoint-owned tools and retention remain
+4. **Keep attached execution sessions recognizable.** Where ACP sessions are exposed,
+   preserve endpoint/session association and the initiating actor's pending decisions.
+   Advertised resume/load may restore the execution supporting an exchange;
+   otherwise report the limitation instead of claiming that a new prompt recreates
+   the old session. Endpoint-owned tools and retention remain
    the endpoint's responsibility.
 5. **Keep machine installation a separate grant.** Explicit host recipes pin the
    installer, permitted roots and arguments. The computer owner may grant fixed
