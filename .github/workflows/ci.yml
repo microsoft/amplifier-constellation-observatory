@@ -97,6 +97,7 @@ jobs:
           python scripts/test-machine-helper-imports.py
           python scripts/test-machine-helper-elf.py
           python scripts/test-native-packaging.py
+          python scripts/test-native-launch-diagnostics.py
           python scripts/test-instance-bundle-download.py
       - name: Install prerequisites
         if: runner.os == 'Linux'

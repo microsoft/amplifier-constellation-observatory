@@ -1,7 +1,55 @@
 #!/usr/bin/env python3
 """Run the packaged native app in a disposable home; no agents, pairing or OS startup."""
-import argparse, hashlib, http.cookiejar, json, os, queue, stat, subprocess, tarfile, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, uuid, zipfile
+import argparse, hashlib, http.cookiejar, json, os, queue, stat, subprocess, sys, tarfile, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, uuid, zipfile
 from pathlib import Path
+
+SETUP_PHASES = frozenset(("staging", "password", "config", "staged_database", "agent_support",
+    "application_support", "publish", "service_lock", "final_database", "startup", "setup_receipt",
+    "runtime_receipt", "sign_in"))
+
+
+def setup_evidence(home, staged, stderr, process):
+    """Content-free observations before the fixture removes its own paths."""
+    phases = []
+    read_error = None
+    try:
+        with stderr.open('rb') as stream:
+            stream.seek(max(0, stderr.stat().st_size - 65536))
+            for line in stream.read(65536).decode('utf-8', errors='replace').splitlines():
+                if not line.startswith('OBSERVATORY_SETUP '): continue
+                try:
+                    record = json.loads(line[len('OBSERVATORY_SETUP '):])
+                    if (set(record) == {'schema', 'phase', 'state', 'elapsed_ms', 'phase_ms'}
+                        and record['schema'] == 1 and record['phase'] in SETUP_PHASES
+                        and record['state'] in ('started', 'finished', 'failed')
+                        and all(type(record[key]) is int and 0 <= record[key] <= 2**63-1
+                                for key in ('elapsed_ms', 'phase_ms'))):
+                        phases.append(record)
+                except (ValueError, TypeError, KeyError): pass
+    except OSError as error:
+        read_error = type(error).__name__
+    def kind(path):
+        try:
+            metadata = path.lstat()
+            mode = metadata.st_mode
+            linked = stat.S_ISLNK(mode) or bool(getattr(metadata, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0))
+            return 'link' if linked else 'directory' if stat.S_ISDIR(mode) else 'file' if stat.S_ISREG(mode) else 'other'
+        except FileNotFoundError: return 'absent'
+        except OSError: return 'unreadable'
+    def snapshot(root):
+        if root is None: return {'selected': False}
+        names = {'root': '.', 'password_record': 'secrets/local-password.json', 'config': 'config.json',
+                 'database': 'state.sqlite3', 'instance_directory': 'support/instance',
+                 'instance_manifest': 'support/instance/consumer-bundle.json',
+                 'helper_manifest': 'machine-helper-artifacts/manifest.json',
+                 'app_receipt': 'app-install.json', 'setup_receipt': 'desktop-setup.json'}
+        return {label: kind(root / name) for label, name in names.items()}
+    return {'schema': 1, 'kind': 'observatory-native-setup-diagnostics',
+            'child_returncode': process.poll() if process is not None else None,
+            'phase_records': phases[-64:], 'phase_read_error': read_error,
+            'home_observation': snapshot(home), 'staged_observation': snapshot(staged),
+            'limits': 'Fixed-path observations and bounded fixed phase records; no contents, recursive counts or cleanup proof.'}
+
 
 def stop(process):
     if process.poll() is None:
@@ -13,7 +61,7 @@ def run(binary, expected_version):
     version=subprocess.run([str(binary),'--version'],capture_output=True,text=True,check=True,timeout=20).stdout.strip()
     assert version==f'agent-observatory {expected_version}',version
     with tempfile.TemporaryDirectory(prefix='observatory native launch ') as temp:
-        home=Path(temp)/'My Observatory'; stderr=Path(temp)/'stderr.txt'; process=None
+        home=Path(temp)/'My Observatory'; stderr=Path(temp)/'stderr.txt'; process=None; staged=None
         try:
             with stderr.open('w') as errors:
                 process=subprocess.Popen([str(binary),'--home',str(home),'--no-browser'],stdout=subprocess.PIPE,stderr=errors,text=True)
@@ -40,6 +88,7 @@ def run(binary, expected_version):
                 assert request('/desktop/status',capability=True,extra={'Origin':'https://unrelated.invalid'})[0]==403
                 password='Disposable native check '+str(uuid.uuid4())
                 body={'request_id':str(uuid.uuid4()),'name':'Native Test','password':password,'start_at_signin':False}
+                staged=home.parent/('.observatory-install-'+body['request_id'])
                 status,data,_=request('/desktop/create','POST',body,True);assert status==200,(status,data.decode())
                 assert json.loads(data)['authenticated'] is True
                 assert json.loads(request('/desktop/status',capability=True)[1])['ready'] is True
@@ -70,7 +119,12 @@ def run(binary, expected_version):
                 assert (home/'secrets/local-password.json').read_bytes()==secret
                 print(json.dumps({'version':expected_version,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'native_os':os.name,'passed':['packaged executable','local setup page and assets','setup capability boundary','local account creation','password stored hashed','reopen existing instance','native process restart and login','configuration and password unchanged'],'startup_operations':0,'agents_created':0,'model_calls':0}))
         finally:
-            if process is not None:stop(process)
+            try:
+                if process is not None:stop(process)
+            finally:
+                # Read only the fixed diagnostic fields before TemporaryDirectory
+                # removes this fixture's stage; never emit raw stderr/state.
+                print('OBSERVATORY_SETUP_EVIDENCE '+json.dumps(setup_evidence(home,staged,stderr,process)),file=sys.stderr,flush=True)
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--metadata',type=Path,required=True);a=p.parse_args();record=json.loads(a.metadata.read_text());archive=a.metadata.parent/record['filename']
