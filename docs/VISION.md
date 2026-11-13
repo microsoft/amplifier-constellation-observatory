@@ -4,57 +4,53 @@ Observatory makes the systems behind your agents understandable and manageable.
 See what you have, where it runs, how it connects, whether it is working and what
 you can add or change, without learning each component's installation mechanics.
 
+Observatory is an [Experience](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/experience.md)
+within Constellation. It presents independently owned agents, conversations,
+connections and capabilities through their declared interfaces. Observation and
+management can use controls directly; they do not have to become conversations.
+
 ## See how the pieces fit
 
-See machines containing independent agent instances, with an engine inside each
-instance. Follow connections out to services and conversations. An authorized
-Slack workspace, an installed connector and an agent connected to a particular
-channel are different things; the view should make their relationship clear.
+Show computers, the agents they host and the places those agents participate.
+An agent's internal design may be one engine, an inner team or something else;
+show only the details its implementation exposes. An attached agent remains useful
+even when it exposes no machine or engine details. An authorized Slack workspace,
+an installed connector and an agent connected to a channel are different things.
+Make their relationships clear without implying that a connection moves or copies
+an agent.
 
-Warm robot characters can make agents easy to recognize. Computers group the
-agents running there; connected places show where those same agents participate.
-Keep growing groups readable. Use visual metaphors to explain these relationships,
-with configuration details available when needed.
-
-Select a part for its configuration, observed health and supported actions.
-Distinguish offline, still being set up and ready now without reading logs.
-The first slice is this systems view and setup controls. A work screen, task
-tracking and an attention inbox are deferred.
+Warm robot characters can make agents recognizable. Keep a dozen agents on one
+computer as understandable as one, with counts and readable groupings. Select a
+part for its observed health, configuration and supported actions. Keep offline,
+setup in progress and ready now distinguishable. This product focuses on systems
+and setup; work tracking and an attention inbox are separate scope.
 
 ## Start on one computer, grow across machines
 
-The target is ordinary Windows, Mac and Linux computers. A person can begin with
-Observatory and agents on one device, or run Observatory on an always-on machine
-and reach it from a browser over their LAN or a private network such as Tailscale.
-Model execution and services have their own hardware needs; observing and managing
-them should not require an AI workstation.
+Start on an ordinary Windows, Mac or Linux computer. Run Observatory beside agents
+or on an always-on machine reached over a LAN or private network. Models and domain
+services have their own hardware needs; observation should not require an AI rig.
 
-Adding a machine should feel like installing a familiar app and pairing it once.
-Reuse permitted working access; ask only for what is missing. A local helper
-establishes a revocable connection, while installation remains with supported
-owner tooling. Routine connection details stay out of the way; the intended
-machine and granted access stay understandable.
+Adding a machine should feel like installing an app and pairing once. Reuse
+permitted working access and ask only for what is missing. A revocable helper
+connection supports owned installation tools; the intended machine and access stay
+understandable while routine connection details stay out of the way.
 
-From there, deploy an agent, connect an existing one, authorize a service, or
-connect it to a conversation. Where domain tooling supports it, create a service
-such as a Minecraft server as an alternative to selecting an existing server.
-Keep completed setup visible when a later step fails and help the person continue
-from the actual state.
+Deploy an agent, connect an existing one, authorize a service or join a conversation.
+Offer creation of a service, such as a Minecraft server, when its domain tooling
+supports that path. If setup stops partway, retain completed steps and help the
+person continue from the actual state.
 
 ## Personal first, shared when useful
 
-Personal and team use belong to one product. Invite collaborators and share
-selected parts without rebuilding the setup. Team use adds membership, permissions,
-administrative history and ownership transfer. Returning to personal use resolves
-shared ownership and access while preserving records and team resources.
+Personal and team use belong to one product. Add collaborators and share selected
+resources without rebuilding the setup. Team use supports membership, administrative
+history and ownership transfer. Returning to personal use resolves shared access
+and ownership while preserving records and accounting for team resources.
 
-Observatory remains an optional client of independent installations. The
-[shared agreements](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md)
-keep state, authority and lifecycle with their owners. The
-[shared interaction agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md)
-owns agent recognition and product language. The
-[local agreement](contracts.md) defines Observatory's contribution; the
-[API](api.md) and [installation instructions](../README.md#install-on-linux)
-describe implemented support. Platform targets and team flows guide development;
-pairing availability does not imply remote installation, agent discovery or
-support for hosting Observatory on every target computer.
+Observatory is an optional client, not the authority behind every agent. The
+[umbrella](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md)
+owns composition; the [local agreement](contracts.md) owns fleet-specific behavior.
+The [API](api.md) and [setup instructions](../README.md#open-on-your-computer)
+describe available operations. Product direction does not establish that every
+platform, pairing or team-management journey is already supported.
