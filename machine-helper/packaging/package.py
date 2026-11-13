@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Package a platform-built helper; bootstrap is appended by its Observatory."""
-import argparse, hashlib, json, os, plistlib, stat, zipfile
+import argparse, hashlib, json, os, plistlib, re, stat, zipfile
 from pathlib import Path
 
 PLATFORMS={'windows-aarch64','windows-x86_64','macos-aarch64','macos-x86_64','linux-aarch64','linux-x86_64'}
-def package(binary,platform,version,output):
+def package(binary,platform,version,output,source=None):
+    if source is not None and not re.fullmatch(r"[0-9a-f]{40}",source):raise ValueError("Use an exact source revision")
     if platform not in PLATFORMS:raise ValueError('Unsupported platform')
     if not binary.is_file() or binary.is_symlink():raise ValueError('Supply the compiled ordinary executable')
     output.mkdir(parents=True,exist_ok=True)
@@ -24,8 +25,9 @@ def package(binary,platform,version,output):
         put(z,'NUNITO-LICENSE.txt',(Path(__file__).resolve().parents[1]/'ui/NUNITO-LICENSE.txt').read_bytes())
     digest=hashlib.sha256(archive.read_bytes()).hexdigest()
     (output/(filename+'.sha256')).write_text(digest+'  '+filename+'\n')
-    record={'platform':platform,'version':version,'filename':filename,'sha256':digest,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'bootstrap_path':'observatory-pairing.json','bootstrap_included':False,'signed_or_notarized':False}
+    record={'platform':platform,'version':version,'filename':filename,'sha256':digest,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'bootstrap_path':'observatory-pairing.json','bootstrap_included':False,'signed_or_notarized':False,'installation_protocol':1}
+    if source is not None:record['source']=source
     (output/(filename+'.json')).write_text(json.dumps(record,indent=2)+'\n')
     return record
 if __name__=='__main__':
- p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--platform',required=True,choices=sorted(PLATFORMS));p.add_argument('--version',required=True);p.add_argument('--output',type=Path,default=Path('dist'));a=p.parse_args();print(json.dumps(package(a.binary,a.platform,a.version,a.output),indent=2))
+ p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--platform',required=True,choices=sorted(PLATFORMS));p.add_argument('--version',required=True);p.add_argument('--output',type=Path,default=Path('dist'));p.add_argument('--source');a=p.parse_args();print(json.dumps(package(a.binary,a.platform,a.version,a.output,a.source),indent=2))

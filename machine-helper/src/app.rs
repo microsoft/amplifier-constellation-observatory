@@ -141,7 +141,7 @@ impl App {
                         .receipt
                         .as_ref()
                         .is_some_and(|r| r.pairing_id != bootstrap.pairing_id)));
-        json!({"can_pair":can_pair,"observatory_name":bootstrap.observatory_name,"observatory_url":bootstrap.observatory_url,"computer_name":platform::hostname(),"os":platform::os(),"arch":platform::arch(),"state":observation.state,"message":observation.message,"last_seen_at":observation.last_seen,"startup_enabled":saved.startup_enabled,"startup_error":observation.startup_error,"pending":saved.pending.is_some(),"host_id":saved.receipt.as_ref().map(|r|r.host_id),"revoke_pending":saved.revoke_pending,"helper_version":env!("CARGO_PKG_VERSION")})
+        json!({"can_pair":can_pair,"observatory_name":bootstrap.observatory_name,"observatory_url":bootstrap.observatory_url,"computer_name":platform::hostname(),"os":platform::os(),"arch":platform::arch(),"state":observation.state,"message":observation.message,"last_seen_at":observation.last_seen,"startup_enabled":saved.startup_enabled,"startup_error":observation.startup_error,"pending":saved.pending.is_some(),"host_id":saved.receipt.as_ref().map(|r|r.host_id),"revoke_pending":saved.revoke_pending,"helper_version":env!("CARGO_PKG_VERSION"),"install_agents_requested":bootstrap.install_agents,"install_agents_enabled":saved.receipt.as_ref().is_some_and(|r|r.access.contains(&crate::paired_protocol::INSTALL_ACCESS.to_owned()))})
     }
     async fn pair(&self, input: PairInput) -> Result<Value> {
         let _operation = self
@@ -190,6 +190,7 @@ impl App {
                 code,
                 name: platform::hostname(),
                 startup: input.startup,
+                install_agents: input.install_agents && bootstrap.install_agents,
             }
         };
         // Identity, secret, original code and request are durable before the first network write.
@@ -304,6 +305,35 @@ impl App {
                 Ok(r) => r,
                 Err(_) => continue,
             };
+            match crate::installation::pending(&self.store) {
+                Ok(Some(result)) => {
+                    match remote
+                        .installation_result(&receipt, &self.secret, &result)
+                        .await
+                    {
+                        Ok(()) => {
+                            if let Err(error) =
+                                crate::installation::acknowledged(&self.store, &result)
+                            {
+                                self.observation.lock().await.message = error.to_string();
+                                backoff = 15;
+                                continue;
+                            }
+                        }
+                        Err(error) => {
+                            self.observation.lock().await.message = error.message;
+                            backoff = 15;
+                            continue;
+                        }
+                    }
+                }
+                Ok(None) => (),
+                Err(error) => {
+                    self.observation.lock().await.message = error.to_string();
+                    backoff = 15;
+                    continue;
+                }
+            }
             match remote
                 .heartbeat(&receipt, &self.secret, &platform::hostname())
                 .await
@@ -314,6 +344,37 @@ impl App {
                     o.state = "connected".into();
                     o.last_seen = Some(now());
                     o.message = "This computer is connected.".into();
+                    drop(o);
+                    if let Some(request) = reply.installation {
+                        if !receipt
+                            .access
+                            .contains(&crate::paired_protocol::INSTALL_ACCESS.to_owned())
+                            || request.host_id != receipt.host_id
+                            || request.machine_id != receipt.machine_id
+                            || request.pairing_id != receipt.pairing_id
+                        {
+                            self.observation.lock().await.message="An installation request did not match this computer's saved access.".into();
+                            continue;
+                        }
+                        match crate::installation::install(&self.store, &remote.bootstrap, &request)
+                            .await
+                        {
+                            Ok(result) => {
+                                self.observation.lock().await.message = result.message.clone();
+                                if remote
+                                    .installation_result(&receipt, &self.secret, &result)
+                                    .await
+                                    .is_ok()
+                                    && let Err(error) =
+                                        crate::installation::acknowledged(&self.store, &result)
+                                {
+                                    self.observation.lock().await.message = error.to_string();
+                                }
+                            }
+                            Err(error) => self.observation.lock().await.message = error.to_string(),
+                        }
+                        backoff = 1;
+                    }
                 }
                 Err(error) => {
                     let mut o = self.observation.lock().await;
@@ -337,6 +398,8 @@ impl App {
 #[serde(deny_unknown_fields)]
 struct PairInput {
     code: String,
+    #[serde(default)]
+    install_agents: bool,
     #[serde(default)]
     startup: bool,
 }
@@ -385,6 +448,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/nunito.woff2", get(font))
         .route("/api/status", get(status))
         .route("/api/pair", post(pair))
+        .route("/api/installation-access", post(installation_access))
         .route("/api/disconnect", post(disconnect))
         .route("/api/bootstrap", post(bootstrap))
         .route("/api/startup", post(startup))
@@ -432,6 +496,27 @@ async fn pair(
 ) -> HttpResult {
     authenticate(&app, &headers, true).map_err(error)?;
     app.pair(input).await.map(Json).map_err(error)
+}
+async fn installation_access(State(app): State<Arc<App>>, headers: HeaderMap) -> HttpResult {
+    authenticate(&app, &headers, true).map_err(error)?;
+    let _operation = app.operation.lock().await;
+    let mut saved = app.saved.lock().await;
+    if saved.disconnected || saved.revoke_pending || saved.access_refused {
+        return Err(error("Reconnect this computer first"));
+    }
+    let receipt = saved
+        .receipt
+        .as_ref()
+        .ok_or_else(|| error("Pair this computer first"))?;
+    let remote = Remote::new(app.bootstrap.lock().await.clone()).map_err(error)?;
+    let reply = remote
+        .installation_access(receipt, &app.secret)
+        .await
+        .map_err(error)?;
+    saved.receipt = Some(reply);
+    app.store.save("state.json", &*saved).map_err(error)?;
+    app.wake.notify_one();
+    Ok(Json(json!({"accepted":true})))
 }
 async fn disconnect(State(app): State<Arc<App>>, headers: HeaderMap) -> HttpResult {
     authenticate(&app, &headers, true).map_err(error)?;

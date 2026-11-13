@@ -1,6 +1,6 @@
 [package]
 name = "agent-observatory"
-version = "0.11.1"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.88"
 publish = false
@@ -10,7 +10,7 @@ description = "Fleet management and observation across machines; generic ACP wit
 
 [dependencies]
 amplifier-acp-connection = { git = "https://github.com/microsoft/amplifier-constellation", rev = "e0d6a03fd342b295d349b633d400376efbbe2c40" }
-amplifier-native-platform = { git = "https://github.com/microsoft/amplifier-constellation", rev = "2d8f4a3dba21631a4fefea00303d8c9b78a46e43", features = ["local-auth"] }
+amplifier-native-platform = { git = "https://github.com/microsoft/amplifier-constellation", rev = "849ae7cb7e32979c2f66cb17473be57f83aebea2", features = ["local-auth"] }
 anyhow = "1"
 axum = { version = "0.8.9", features = ["macros"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }

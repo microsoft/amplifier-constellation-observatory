@@ -10,7 +10,42 @@ permissions:
   contents: read
 
 jobs:
+  helper-closure:
+    needs: [machine-helper]
+    runs-on: ubuntu-24.04
+    outputs:
+      sha256: ${{ steps.closure.outputs.sha256 }}
+      version: ${{ steps.closure.outputs.version }}
+      source: ${{ steps.closure.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-helper-*
+          merge-multiple: true
+          path: helper-artifacts
+      - id: closure
+        name: Bind the exact same-source six-platform helper closure
+        shell: bash
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("machine-helper/Cargo.toml", "rb"))["package"]["version"])')
+          python scripts/prepare-helper-release.py --directory helper-artifacts --output helper-closure --version "$version" --source "$GITHUB_SHA"
+          bundle="helper-closure/constellation-machine-helpers-$version.zip"
+          digest=$(python -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"),"sha256").hexdigest())' "$bundle")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+          echo "source=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qualified-machine-helpers
+          path: helper-closure/constellation-machine-helpers-*.zip*
+          if-no-files-found: error
+
   observatory:
+    needs: [helper-closure]
     if: ${{ !startsWith(github.ref, 'refs/tags/machine-helper-v') }}
     strategy:
       fail-fast: false
@@ -62,6 +97,7 @@ jobs:
           python scripts/test-machine-helper-imports.py
           python scripts/test-machine-helper-elf.py
           python scripts/test-native-packaging.py
+          python scripts/test-native-launch-diagnostics.py
           python scripts/test-instance-bundle-download.py
       - name: Install prerequisites
         if: runner.os == 'Linux'
@@ -131,14 +167,17 @@ jobs:
           done
       - name: Verify native application replacement and recovery
         run: python tests/desktop_update_live.py --binary "$OBSERVATORY_RELEASE_BINARY"
-      - name: Compose the pinned complete desktop package
+      - uses: actions/download-artifact@v4
+        with:
+          name: qualified-machine-helpers
+          path: ${{ runner.temp }}/observatory-helper-closure
+      - name: Compose the exact same-run complete desktop package
         env:
           TARGET: ${{ matrix.target }}
         run: |
           python scripts/fetch-instance-bundle.py --target "$TARGET" --output "$RUNNER_TEMP/observatory-instance-bundle"
           version=$("$OBSERVATORY_RELEASE_BINARY" --version | cut -d' ' -f2)
-          python scripts/fetch-machine-helper-bundle.py --output "$RUNNER_TEMP/observatory-machine-helpers.zip"
-          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$RUNNER_TEMP/observatory-instance-bundle" --machine-helpers "$RUNNER_TEMP/observatory-machine-helpers.zip" --helpers-sha256 212aa69c7ec3db9a682a5f7457d6fdefac5ba7b636598210d84bae001363fa91 --output dist
+          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$RUNNER_TEMP/observatory-instance-bundle" --machine-helpers "$RUNNER_TEMP/observatory-helper-closure/constellation-machine-helpers-${{ needs.helper-closure.outputs.version }}.zip" --helpers-sha256 "${{ needs.helper-closure.outputs.sha256 }}" --output dist
       - name: Verify packaged local browser and computer network setup
         if: runner.os == 'Linux' && runner.arch == 'X64'
         env:
@@ -257,7 +296,7 @@ jobs:
         run: |
           version=$(python -c 'import tomllib; print(tomllib.load(open("machine-helper/Cargo.toml", "rb"))["package"]["version"])')
           if [[ "$GITHUB_REF_NAME" == machine-helper-v* ]]; then test "$GITHUB_REF_NAME" = "machine-helper-v$version"; fi
-          python machine-helper/packaging/package.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}" --version "$version" --output dist
+          python machine-helper/packaging/package.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}" --version "$version" --source "$GITHUB_SHA" --output dist
       - uses: actions/upload-artifact@v4
         with:
           name: release-helper-${{ matrix.platform }}
@@ -266,7 +305,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [observatory, machine-helper]
+    needs: [observatory, machine-helper, helper-closure]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -284,9 +323,13 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          name: qualified-machine-helpers
+          path: helper-closure
       - name: Create draft release and attach verified builds
         run: |
-          python scripts/prepare-app-release.py --directory artifacts --output dist --version "${RELEASE_TAG#v}"
+          python scripts/prepare-app-release.py --directory artifacts --output dist --version "${RELEASE_TAG#v}" --helpers "helper-closure/constellation-machine-helpers-${{ needs.helper-closure.outputs.version }}.zip" --helpers-sha256 "${{ needs.helper-closure.outputs.sha256 }}" --helpers-source "${{ needs.helper-closure.outputs.source }}"
           python scripts/upload-release.py --tag "$RELEASE_TAG" --directory dist
 
   release-helper:
@@ -313,5 +356,5 @@ jobs:
         run: |
           python scripts/test-prepare-helper-release.py
           python scripts/test-upload-release.py
-          python scripts/prepare-helper-release.py --directory artifacts --output dist --version "${RELEASE_TAG#machine-helper-v}"
+          python scripts/prepare-helper-release.py --directory artifacts --output dist --version "${RELEASE_TAG#machine-helper-v}" --source "$GITHUB_SHA"
           python scripts/upload-release.py --tag "$RELEASE_TAG" --directory dist

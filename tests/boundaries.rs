@@ -1247,7 +1247,9 @@ for line in sys.stdin:
  else:raise RuntimeError(m)
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
 "#).unwrap();
-    let mut config = json!({"command":PYTHON,"args":[file],"cwd":dir.path(),"env":{"LOG":log}});
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let mut config = json!({"command":PYTHON,"args":[file],"cwd":dir.path(),"session_cwd":workspace,"env":{"LOG":log}});
     let first = acp::catalog(&state, &config, None, None).await.unwrap();
     assert_eq!(first["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(first["nextCursor"], "page-two");
@@ -1278,6 +1280,14 @@ for line in sys.stdin:
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
+    assert!(frames.iter().any(|f| f["method"] == "session/new"));
+    for frame in frames.iter().filter(|f| {
+        ["session/new", "session/resume", "session/list"]
+            .contains(&f["method"].as_str().unwrap_or(""))
+    }) {
+        assert_eq!(frame["params"]["cwd"], json!(workspace));
+        assert_ne!(frame["params"]["cwd"], json!(dir.path()));
+    }
     assert!(frames.iter().any(|f| f["method"] == "session/resume"));
     assert!(frames.iter().any(|f| f["method"] == "session/close"));
     assert!(!frames.iter().any(|f| f["method"] == "session/load"));

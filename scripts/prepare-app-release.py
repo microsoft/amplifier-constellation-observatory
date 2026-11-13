@@ -77,17 +77,30 @@ def archive_support(path, metadata, expected):
         archive.close()
 
 
-def prepare(source, output, version, helper_bundle=None):
+def prepare(source, output, version, helper_bundle=None, helpers_sha256=None, helpers_source=None):
     if not re.fullmatch(r'\d+\.\d+\.\d+', version):
         raise ValueError('Use an exact release version')
     if output.exists() and (output.is_symlink() or not output.is_dir() or any(output.iterdir())):
         raise ValueError('Use a new empty release staging directory')
     output.mkdir(parents=True, exist_ok=True)
-    # A local immutable copy is useful to the maintainer; it has the same pin.
+    # Historical callers keep the published pin. A new same-run helper closure
+    # must identify both exact bytes and the source shared by all six builds.
+    explicit = helpers_sha256 is not None or helpers_source is not None
+    if explicit and (helper_bundle is None or not re.fullmatch(r'[0-9a-f]{64}',helpers_sha256 or '') or not re.fullmatch(r'[0-9a-f]{40}',helpers_source or '')):
+        raise ValueError('Explicit helpers require a bundle, exact digest and source')
     if helper_bundle is None:
         helper_bundle = helpers.fetch(output / HELPER_NAME)
     ordinary(helper_bundle)
-    _, expected_support = helper_stage.verified_files(helper_bundle, helpers.SHA256)
+    helper_digest = helpers_sha256 if explicit else helpers.SHA256
+    manifest, expected_support = helper_stage.verified_files(helper_bundle, helper_digest)
+    helper_name = HELPER_NAME
+    if explicit:
+        rows=manifest['artifacts']; versions={r.get('version') for r in rows}
+        if manifest.get('source') != helpers_source or any(r.get('source') != helpers_source for r in rows) or len(versions)!=1:
+            raise ValueError('Helper closure source or version differs')
+        helper_version=next(iter(versions))
+        if not isinstance(helper_version,str) or not re.fullmatch(r'\d+\.\d+\.\d+',helper_version):raise ValueError('Invalid helper version')
+        helper_name=f'constellation-machine-helpers-{helper_version}.zip'
     selected = []
     for target, (system, architecture) in packaging.TARGETS.items():
         extension = 'tar.gz' if system == 'linux' else 'zip'
@@ -115,11 +128,11 @@ def prepare(source, output, version, helper_bundle=None):
             selected.extend((path, metadata_path, checksum_path))
     for file in selected:
         shutil.copyfile(file, output / file.name)
-    destination = output / HELPER_NAME
+    destination = output / helper_name
     if helper_bundle.resolve() != destination.resolve():
         shutil.copyfile(helper_bundle, destination)
-    (output / (HELPER_NAME + '.sha256')).write_text(helpers.SHA256 + '  ' + HELPER_NAME + '\n', encoding='utf-8')
-    expected = {file.name for file in selected} | {HELPER_NAME, HELPER_NAME + '.sha256'}
+    (output / (helper_name + '.sha256')).write_text(helper_digest + '  ' + helper_name + '\n', encoding='utf-8')
+    expected = {file.name for file in selected} | {helper_name, helper_name + '.sha256'}
     if len(expected) != 38 or {file.name for file in output.iterdir()} != expected:
         raise ValueError('Unexpected application release asset set')
     return {file.name:digest(file) for file in sorted(output.iterdir())}
@@ -131,5 +144,7 @@ if __name__ == '__main__':
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--version', required=True)
     p.add_argument('--helpers', type=Path)
+    p.add_argument('--helpers-sha256')
+    p.add_argument('--helpers-source')
     a = p.parse_args()
-    print(json.dumps(prepare(a.directory, a.output, a.version, a.helpers), indent=2))
+    print(json.dumps(prepare(a.directory, a.output, a.version, a.helpers, a.helpers_sha256, a.helpers_source), indent=2))

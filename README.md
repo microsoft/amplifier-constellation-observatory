@@ -138,6 +138,20 @@ the computer and its existing agents. A lost pairing reply can be reconciled
 without creating another computer. Revoking the pairing stops its access while
 leaving agents, connections and installation records intact.
 
+With the current helper, pairing offers one choice to let Observatory add agents.
+Then choose the computer, **Create an agent**, and give it a name. The helper
+installs its pinned complete Instance package in a new private folder and
+Observatory verifies and connects it. No SSH, keys, folder paths or developer
+tools are needed. Existing observation-only pairings stay that way; open their
+helper and choose **Allow agent setup** to upgrade that pairing once.
+
+Agent access uses the computers' shared LAN or private-network route, including
+an inbound HTTPS connection to the new agent. Pairing does not open firewall
+rules or create a relay. If setup or connection is interrupted, its saved request
+and files stay visible; an uncertain installer is never repeated automatically.
+A completed installation can finish connecting without reinstalling. Model
+access and connections remain the agent installation's own setup.
+
 Helper build support is distinct from consumer installation qualification.
 Windows and macOS packages are not yet signed/notarized; platform launch warnings
 and startup behavior must be verified on the intended OS. Do not disable system
@@ -150,7 +164,7 @@ opened setup file rather than modifying a signed bundle.
 Existing local and SSH hosts remain available under advanced setup. Saving those
 inventory entries does not install the helper or test access. **Create an agent**
 uses one of that computer's approved installation recipes; configure recipes and
-allowed folders under Advanced controls. Pairing alone provides no such recipe.
+allowed folders under Advanced controls. Observation-only pairing provides no such recipe; the fixed paired-agent setup uses the separate grant described above.
 Each plan binds the selected recipe and host revision.
 Saved job results survive a lost browser response. After an installer finishes,
 complete its own setup and connect its endpoint here. Recipes can install any

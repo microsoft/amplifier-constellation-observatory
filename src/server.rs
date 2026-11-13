@@ -675,9 +675,12 @@ async fn connect_installation(
             "Only a completed installation can finish connecting",
         ));
     }
-    let endpoint = crate::local_install::attach(&s, &job)
-        .await
-        .map_err(|error| ApiError::bad(error.to_string()))?;
+    let endpoint = if job["plan"]["transport"] == "paired" {
+        crate::paired_install::attach(&s, &job).await
+    } else {
+        crate::local_install::attach(&s, &job).await
+    }
+    .map_err(|error| ApiError::bad(error.to_string()))?;
     job["endpoint_id"] = endpoint["id"].clone();
     job["connection_pending"] = json!(false);
     job["note"] = json!(

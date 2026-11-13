@@ -51,7 +51,9 @@ commitment does not advertise an unimplemented interface.
    the old session. Endpoint-owned tools and retention remain
    the endpoint's responsibility.
 5. **Keep machine installation a separate grant.** Explicit host recipes pin the
-   installer, permitted roots and arguments. Plans bind the host revision and
+   installer, permitted roots and arguments. The computer owner may grant fixed
+   agent setup once during pairing; existing observation-only pairings never
+   acquire it silently. Plans bind the host revision and
    request identity. Record installer outcomes and interruption without automatic
    reruns; a successful installer exit still needs endpoint readiness checking.
 6. **Show observations as observations.** Provider reports and submitted experiment

@@ -13,18 +13,18 @@ spec=importlib.util.spec_from_file_location('release',Path(__file__).with_name('
 release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
 
 class ReleaseSet(unittest.TestCase):
-    def fixture(self, root):
+    def fixture(self, root, helper_source=None):
         source=root/'artifacts';source.mkdir();binary=root/'inert';binary.write_bytes(b'inert app, never executed')
         rows=[];files={}
         for platform in release.helper_stage.PLATFORMS:
             stream=io.BytesIO()
             with zipfile.ZipFile(stream,'w') as z:z.writestr('helper',b'inert '+platform.encode())
             name=platform+'.zip';data=stream.getvalue();files[name]=data
-            rows.append({'platform':platform,'filename':name,'sha256':hashlib.sha256(data).hexdigest()})
+            rows.append({'platform':platform,'filename':name,'sha256':hashlib.sha256(data).hexdigest(),**({'source':helper_source,'version':'0.3.0'} if helper_source else {})})
         helper=root/'helpers.zip'
         with zipfile.ZipFile(helper,'w') as z:
             for name,data in files.items():z.writestr(name,data)
-            z.writestr('manifest.json',json.dumps({'schema':1,'artifacts':rows}))
+            z.writestr('manifest.json',json.dumps({'schema':1,'artifacts':rows,**({'source':helper_source} if helper_source else {})}))
         pin=release.digest(helper)
         for target in release.packaging.TARGETS:
             release.packaging.package(binary,target,'0.11.1',source)
@@ -42,6 +42,18 @@ class ReleaseSet(unittest.TestCase):
             self.assertEqual(manifest[release.HELPER_NAME],pin)
             self.assertFalse(any(name.startswith('constellation-machine-helper-') for name in manifest))
             self.assertEqual((root/'out'/release.HELPER_NAME).read_bytes(),helper.read_bytes())
+    def test_explicit_same_source_closure_is_verified_without_changing_legacy_pin(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);source,helper,pin=self.fixture(root,'a'*40)
+            manifest=release.prepare(source,root/'out','0.11.1',helper,pin,'a'*40)
+            self.assertEqual(manifest['constellation-machine-helpers-0.3.0.zip'],pin)
+            self.assertNotIn(release.HELPER_NAME,manifest)
+            self.assertEqual((root/'out'/'constellation-machine-helpers-0.3.0.zip').read_bytes(),helper.read_bytes())
+            with self.assertRaisesRegex(ValueError,'source'):
+                release.prepare(source,root/'wrong-source','0.11.1',helper,pin,'b'*40)
+            with self.assertRaisesRegex(ValueError,'digest and source'):
+                release.prepare(source,root/'missing-source','0.11.1',helper,pin)
+
     def test_wrong_helper_pin_and_existing_output_are_preserved(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);source,helper,pin=self.fixture(root)

@@ -43,7 +43,10 @@ async fn request(
     let mut req = Request::builder()
         .method(method)
         .uri(path)
-        .header("content-type", "application/json");
+        .header("content-type", "application/json")
+        .extension(axum::extract::ConnectInfo(
+            "127.0.0.1:43210".parse::<std::net::SocketAddr>().unwrap(),
+        ));
     if !token.is_empty() {
         req = req.header("authorization", format!("Bearer {token}"));
     }
@@ -723,7 +726,8 @@ async fn setup_download_binds_public_observatory_metadata_without_code_or_creden
         "linux-x86_64",
         "linux-aarch64",
     ];
-    let manifest = json!({"schema":1,"artifacts":platforms.map(|platform|json!({"platform":platform,"label":"Fixture","architecture":"fixture","filename":"linux.zip","sha256":format!("{:x}",Sha256::digest(&data)),"version":"0.1.0"}))});
+    let source = "f922e7663e39bb54b1b821d7785434cf9b33b02a";
+    let manifest = json!({"schema":1,"source":source,"artifacts":platforms.map(|platform|json!({"platform":platform,"label":"Fixture","architecture":"fixture","filename":"linux.zip","sha256":format!("{:x}",Sha256::digest(&data)),"version":"0.3.0","installation_protocol":1,"source":source}))});
     std::fs::write(artifacts.join("manifest.json"), manifest.to_string()).unwrap();
     let app = server::router(state.clone());
     let created = create(&app, &admin).await;
@@ -844,4 +848,386 @@ async fn mac_setup_carries_public_bootstrap_inside_app_for_translocation_safe_lo
     binary.read_to_end(&mut retained).unwrap();
     assert_eq!(retained, executable);
     assert_eq!(std::fs::read(artifacts.join("mac.zip")).unwrap(), original);
+}
+
+#[tokio::test]
+async fn fixed_paired_install_keeps_legacy_access_and_original_request_after_lost_result() {
+    let (_dir, state, token) = fixture();
+    let app = server::router(state.clone());
+    let old = create(&app, &token).await;
+    let claimant = claim(&state, &old);
+    let (_, paired) = request(&app, "", "POST", &path(&old, "redeem"), claimant.clone()).await;
+    let host = paired["host_id"].as_str().unwrap();
+    let key = claimant["machine_credential"].as_str().unwrap();
+    let beat = json!({"schema":1,"machine_id":claimant["machine_id"],"name":"Spark","os":"linux","arch":"aarch64","helper_version":"candidate","installation_protocol":1});
+    let (_, observed) = request(
+        &app,
+        key,
+        "POST",
+        &format!("/api/v1/machines/{host}/heartbeat"),
+        beat.clone(),
+    )
+    .await;
+    assert_eq!(observed["access"], json!(["observe"]));
+    assert!(observed["installation"].is_null());
+    let body = json!({"request_id":uuid::Uuid::new_v4(),"host_id":host,"recipe_id":"paired-instance","name":"My agent"});
+    assert_eq!(
+        request(&app, &token, "POST", "/api/v1/install/plan", body.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert!(state.list("jobs").unwrap().is_empty());
+    // The on-computer owner explicitly upgrades this existing pairing, once.
+    let (status, access) = request(
+        &app,
+        key,
+        "POST",
+        &format!("/api/v1/machines/{host}/installation-access"),
+        json!({"install_agents":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(access["access"], json!(["observe", "install-agents"]));
+    let (status, plan) = request(&app, &token, "POST", "/api/v1/install/plan", body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    let mut rejected = body.clone();
+    rejected["argv"] = json!(["anything"]);
+    assert_eq!(
+        request(&app, &token, "POST", "/api/v1/install/plan", rejected)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut apply = body.clone();
+    apply["plan_digest"] = plan["plan_digest"].clone();
+    let (status, job) = request(&app, &token, "POST", "/api/v1/install", apply.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{job}");
+    let (_, again) = request(&app, &token, "POST", "/api/v1/install", apply).await;
+    assert_eq!(again["id"], job["id"]);
+    let (_, first) = request(
+        &app,
+        key,
+        "POST",
+        &format!("/api/v1/machines/{host}/heartbeat"),
+        beat.clone(),
+    )
+    .await;
+    let (_, lost) = request(
+        &app,
+        key,
+        "POST",
+        &format!("/api/v1/machines/{host}/heartbeat"),
+        beat.clone(),
+    )
+    .await;
+    assert_eq!(first["installation"], lost["installation"]);
+    assert_eq!(first["installation"], plan["request"]);
+    let result = json!({"request":first["installation"],"state":"unknown","message":"Caller stopped after original installer dispatch","attachment":null});
+    assert_eq!(
+        request(
+            &app,
+            key,
+            "POST",
+            &format!("/api/v1/machines/{host}/installation-result"),
+            result.clone()
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &app,
+            key,
+            "POST",
+            &format!("/api/v1/machines/{host}/installation-result"),
+            result
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, after) = request(
+        &app,
+        key,
+        "POST",
+        &format!("/api/v1/machines/{host}/heartbeat"),
+        beat,
+    )
+    .await;
+    assert!(after["installation"].is_null());
+    assert_eq!(state.list("jobs").unwrap().len(), 1);
+    assert_eq!(
+        state.read("jobs", job["id"].as_str().unwrap()).unwrap()["status"],
+        "interrupted"
+    );
+    assert!(state.list("endpoints").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_install_verifies_tls_identity_then_attaches_once_and_preserves_setup_on_failure() {
+    use agent_observatory::paired_protocol;
+    use sha2::{Digest, Sha256};
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (_dir, state, token) = fixture();
+    let app = server::router(state.clone());
+    let (_, created) = request(
+        &app,
+        &token,
+        "POST",
+        "/api/v1/machine-pairings",
+        json!({"request_id":uuid::Uuid::new_v4(),"install_agents":true}),
+    )
+    .await;
+    let mut claimant = claim(&state, &created);
+    claimant["install_agents"] = json!(true);
+    let paired = accept(&app, &created, &claimant).await;
+    assert_eq!(paired["access"], json!(["observe", "install-agents"]));
+    let host = paired["host_id"].as_str().unwrap();
+    let key = claimant["machine_credential"].as_str().unwrap();
+    let mut beat = heartbeat(&claimant);
+    beat.as_object_mut().unwrap().remove("install_agents");
+    beat["installation_protocol"] = json!(1);
+    assert_eq!(
+        request(
+            &app,
+            key,
+            "POST",
+            &format!("/api/v1/machines/{host}/heartbeat"),
+            beat
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let body = json!({"request_id":uuid::Uuid::new_v4(),"host_id":host,"recipe_id":"paired-instance","name":"My agent"});
+    let (_, plan) = request(&app, &token, "POST", "/api/v1/install/plan", body.clone()).await;
+    let mut apply = body;
+    apply["plan_digest"] = plan["plan_digest"].clone();
+    let (_, job) = request(&app, &token, "POST", "/api/v1/install", apply).await;
+    let job_id = job["id"].as_str().unwrap();
+
+    // The local bridge is a verified but inert inventory fixture. This test
+    // exercises real TLS management, not a model, real installer or ACP prompt.
+    let bridge = state.home.join("support/instance");
+    std::fs::create_dir_all(&bridge).unwrap();
+    let binary = if cfg!(windows) {
+        "agent-instance.exe"
+    } else {
+        "agent-instance"
+    };
+    let bytes = b"inert bridge fixture, never executed";
+    std::fs::write(bridge.join(binary), bytes).unwrap();
+    let target = paired_protocol::target(std::env::consts::OS, std::env::consts::ARCH).unwrap();
+    let manifest = json!({"schema":1,"kind":"instance-consumer-bundle","target":target,
+        "binary":binary,"native_runtime":{},"files":{binary:format!("{:x}",Sha256::digest(bytes))}});
+    std::fs::write(bridge.join("consumer-bundle.json"), manifest.to_string()).unwrap();
+    let instance_id = uuid::Uuid::new_v4();
+    let returned_identity = Arc::new(std::sync::Mutex::new(uuid::Uuid::new_v4()));
+    let id = returned_identity.clone();
+    let credential = auth::random_token();
+    let key_check = credential.clone();
+    let remote = Router::new().fallback(move |headers: axum::http::HeaderMap, uri: axum::http::Uri| {
+        let id = *id.lock().unwrap(); let key = key_check.clone();
+        async move {
+            assert_eq!(headers.get("authorization").unwrap().to_str().unwrap(),format!("Bearer {key}"));
+            if uri.path() == "/api/v1/descriptor" { axum::Json(json!({"instance_id":id,"operations":[{"path":"config","methods":["GET"]}]})) }
+            else { axum::Json(json!({"running":true,"model_access":"not_configured"})) }
+        }
+    });
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let ca = cert.pem();
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+        ca.clone().into_bytes(),
+        signing_key.serialize_pem().into_bytes(),
+    )
+    .await
+    .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let origin = format!("https://{}/", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum_server::from_tcp_rustls(listener, tls)
+            .unwrap()
+            .serve(remote.into_make_service())
+            .await
+            .unwrap();
+    });
+    let result = json!({"request":plan["request"],"state":"completed","message":"Installed",
+        "attachment":{"instance_id":instance_id,"origin":origin,"ca_pem":ca,"credential":credential,"session_cwd":format!("/fixture/agents/{job_id}/workspace")}});
+    let route = format!("/api/v1/machines/{host}/installation-result");
+    assert_eq!(
+        request(&app, key, "POST", &route, result.clone()).await.0,
+        StatusCode::OK
+    );
+    assert!(state.list("endpoints").unwrap().is_empty());
+    assert_eq!(
+        state.read("jobs", job_id).unwrap()["connection_pending"],
+        true
+    );
+    let original_receipt = std::fs::read(
+        state
+            .home
+            .join("jobs")
+            .join(format!("{job_id}.remote.json")),
+    )
+    .unwrap();
+    // Reconcile the accepted result after its reply was lost, never reinstall.
+    assert_eq!(
+        request(&app, key, "POST", &route, result.clone()).await.0,
+        StatusCode::OK
+    );
+    *returned_identity.lock().unwrap() = instance_id;
+    let (status, connected) = request(
+        &app,
+        &token,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/connect"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{connected}");
+    assert_eq!(state.list("endpoints").unwrap().len(), 1);
+    let endpoint = state.read("endpoints", job_id).unwrap();
+    assert_eq!(
+        endpoint["management"]["expected_id"],
+        instance_id.to_string()
+    );
+    assert_eq!(endpoint["host_id"], host);
+    assert_eq!(
+        endpoint["acp"]["session_cwd"],
+        format!("/fixture/agents/{job_id}/workspace")
+    );
+    assert!(
+        endpoint["acp"]["args"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("--token-file"))
+    );
+    assert!(!endpoint.to_string().contains(&credential));
+    let observed = agent_observatory::provider::inspect(&state, &endpoint)
+        .await
+        .unwrap();
+    assert_eq!(observed["health"], "reachable");
+    assert_eq!(observed["status"]["model_access"], "not_configured");
+    assert_eq!(
+        request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/connect"),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(state.list("endpoints").unwrap().len(), 1);
+    assert_eq!(
+        original_receipt,
+        std::fs::read(
+            state
+                .home
+                .join("jobs")
+                .join(format!("{job_id}.remote.json"))
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/v1/machines/{host}/revoke"),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(state.list("endpoints").unwrap().len(), 1);
+    assert!(
+        request(&app, key, "POST", &route, result)
+            .await
+            .0
+            .is_client_error()
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn helper_source_provenance_is_optional_but_must_match_the_complete_inventory() {
+    use sha2::{Digest, Sha256};
+    let (_dir, state, admin) = fixture();
+    let artifacts = state.home.join("machine-helper-artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    let bytes = b"inert archive inventory fixture; never downloaded or executed";
+    std::fs::write(artifacts.join("fixture.zip"), bytes).unwrap();
+    let source = "f922e7663e39bb54b1b821d7785434cf9b33b02a";
+    let platforms = [
+        "windows-x86_64",
+        "windows-aarch64",
+        "macos-x86_64",
+        "macos-aarch64",
+        "linux-x86_64",
+        "linux-aarch64",
+    ];
+    let modern = json!({"schema":1,"source":source,"artifacts":platforms.map(|platform|json!({
+        "platform":platform,"label":"Fixture","architecture":"fixture","filename":"fixture.zip",
+        "sha256":format!("{:x}",Sha256::digest(bytes)),"version":"0.3.0","installation_protocol":1,"source":source
+    }))});
+    let app = server::router(state.clone());
+    let file = artifacts.join("manifest.json");
+    for legacy in [false, true] {
+        let mut manifest = modern.clone();
+        if legacy {
+            manifest.as_object_mut().unwrap().remove("source");
+            for row in manifest["artifacts"].as_array_mut().unwrap() {
+                row.as_object_mut().unwrap().remove("source");
+            }
+        }
+        let original = manifest.to_string();
+        std::fs::write(&file, &original).unwrap();
+        let (status, result) =
+            request(&app, &admin, "GET", "/api/v1/machine-pairings", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["downloads"].as_array().unwrap().len(), 6);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+    }
+    for defect in [
+        "invalid-root",
+        "short-root",
+        "different-row",
+        "missing-row",
+        "missing-root",
+        "unknown-row-field",
+    ] {
+        let mut manifest = modern.clone();
+        match defect {
+            "invalid-root" => manifest["source"] = json!(42),
+            "short-root" => manifest["source"] = json!("f922e766"),
+            "different-row" => manifest["artifacts"][0]["source"] = json!("a".repeat(40)),
+            "missing-row" => {
+                manifest["artifacts"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source");
+            }
+            "missing-root" => {
+                manifest.as_object_mut().unwrap().remove("source");
+            }
+            "unknown-row-field" => manifest["artifacts"][0]["arbitrary"] = json!(true),
+            _ => unreachable!(),
+        }
+        let original = manifest.to_string();
+        std::fs::write(&file, &original).unwrap();
+        let (status, _) =
+            request(&app, &admin, "GET", "/api/v1/machine-pairings", Value::Null).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{defect}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+    }
+    assert!(state.list("hosts").unwrap().is_empty());
+    assert!(state.list("jobs").unwrap().is_empty());
 }

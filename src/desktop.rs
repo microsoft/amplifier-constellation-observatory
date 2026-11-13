@@ -258,7 +258,9 @@ pub async fn serve_guarded(
         });
         axum_server::from_tcp_rustls(listener, tls)?
             .handle(handle)
-            .serve(server::router(state).into_make_service())
+            .serve(
+                server::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
             .await?;
     }
     Ok(())
@@ -514,6 +516,25 @@ async fn dispatch(State(state): State<Arc<SetupState>>, request: Request) -> Res
     response
 }
 
+// Content-free first-account diagnostics. Failed output never changes setup.
+fn setup_step<T, E>(
+    started: std::time::Instant,
+    phase: &'static str,
+    action: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    use std::io::Write;
+    let step = std::time::Instant::now();
+    let report = |state| {
+        let record = json!({"schema":1,"phase":phase,"state":state,
+            "elapsed_ms":started.elapsed().as_millis(),"phase_ms":step.elapsed().as_millis()});
+        let _ = writeln!(std::io::stderr().lock(), "OBSERVATORY_SETUP {record}");
+    };
+    report("started");
+    let result = action();
+    report(if result.is_ok() { "finished" } else { "failed" });
+    result
+}
+
 async fn create_installation(state: Arc<SetupState>, create: Create) -> Response {
     let _creation = state.creation.lock().await;
     if let Some((id, ready, _, _)) = state.ready.lock().unwrap().as_ref() {
@@ -538,6 +559,7 @@ async fn create_installation(state: Arc<SetupState>, create: Create) -> Response
         )
             .into_response();
     }
+    let started = std::time::Instant::now();
     let home = state.home.clone();
     let origin = state.session.origin.clone();
     let id = create.request_id;
@@ -546,32 +568,36 @@ async fn create_installation(state: Arc<SetupState>, create: Create) -> Response
         let parent=home.parent().context("Missing installation parent")?;
         let staged=parent.join(format!(".observatory-install-{id}"));
         ensure!(!staged.exists(),"An earlier setup is incomplete. Its files have been preserved for recovery.");
-        config::private_dir(&staged)?;
+        setup_step(started,"staging",||config::private_dir(&staged))?;
         let url=reqwest::Url::parse(&origin)?;
         let c=Config {id:uuid::Uuid::new_v4().to_string(),owner,bind:"127.0.0.1".into(),port:url.port().context("Missing local port")?,public_url:origin,auth_mode:AuthMode::LocalPassword,web_transport:WebTransport::LocalHttp,pam_service:String::new(),tls_cert:home.join("tls/cert.pem"),tls_key:home.join("tls/key.pem"),tls_ca:None,embed_origins:vec![]};
-        auth::initialize_local_password(&staged,&create.password)?;
-        c.save(&staged)?;
+        setup_step(started,"password",||auth::initialize_local_password(&staged,&create.password))?;
+        setup_step(started,"config",||c.save(&staged))?;
         // Initialize then close SQLite before moving its private directory (also on Windows).
-        let staged_state=AppState::open(staged.clone())?;
-        let bundle=crate::local_install::bundled_path()?;
-        crate::local_install::prepare(&staged_state,&home,bundle.as_deref(),&crate::local_install::default_agent_root()?)?;
-        crate::desktop_update::retain(&staged_state)?;
+        let staged_state=setup_step(started,"staged_database",||AppState::open(staged.clone()))?;
+        setup_step(started,"agent_support",|| -> Result<()> {
+            let bundle=crate::local_install::bundled_path()?;
+            crate::local_install::prepare(&staged_state,&home,bundle.as_deref(),&crate::local_install::default_agent_root()?)
+        })?;
+        setup_step(started,"application_support",||crate::desktop_update::retain(&staged_state))?;
         drop(staged_state);
         ensure!(!home.exists(),"The destination changed during setup; the staged files were preserved.");
-        platform::publish_directory_if_absent(&staged,&home)?;
-        let service=service_lock(&home)?;
-        let ready=AppState::open(home.clone())?;
-        let warning=if create.start_at_signin {platform::install_startup(&OBSERVATORY,&home,&uuid::Uuid::parse_str(&c.id)?).err().map(|_|"Observatory is ready, but sign-in startup could not be enabled. Open the app to run it.".to_owned())}else{None};
-        config::private_write(&home.join("desktop-setup.json"),&serde_json::to_vec(&json!({"schema":1,"request_id":id,"installation_id":c.id,"ready":true,"startup_requested":create.start_at_signin,"startup_enabled":create.start_at_signin&&warning.is_none(),"startup_warning":warning}))?)?;
+        setup_step(started,"publish",||platform::publish_directory_if_absent(&staged,&home))?;
+        let service=setup_step(started,"service_lock",||service_lock(&home))?;
+        let ready=setup_step(started,"final_database",||AppState::open(home.clone()))?;
+        let warning=if create.start_at_signin {let startup_id=uuid::Uuid::parse_str(&c.id)?;setup_step(started,"startup",||platform::install_startup(&OBSERVATORY,&home,&startup_id)).err().map(|_|"Observatory is ready, but sign-in startup could not be enabled. Open the app to run it.".to_owned())}else{None};
+        setup_step(started,"setup_receipt",|| -> Result<()> {
+            config::private_write(&home.join("desktop-setup.json"),&serde_json::to_vec(&json!({"schema":1,"request_id":id,"installation_id":c.id,"ready":true,"startup_requested":create.start_at_signin,"startup_enabled":create.start_at_signin&&warning.is_none(),"startup_warning":warning}))?)
+        })?;
         Ok((ready,warning,service))
     }).await;
     match result {
         Ok(Ok((ready,warning,service)))=>{
-            if let Err(error)=record_runtime(&ready) {return (StatusCode::INTERNAL_SERVER_ERROR,axum::Json(json!({"error":error.to_string()}))).into_response()}
+            if let Err(error)=setup_step(started,"runtime_receipt",||record_runtime(&ready)) {return (StatusCode::INTERNAL_SERVER_ERROR,axum::Json(json!({"error":error.to_string()}))).into_response()}
             start_eviction(&ready);
             let mut shutdown=ready.shutdown.subscribe();let setup_shutdown=state.shutdown.clone();
             tokio::spawn(async move {if shutdown.changed().await.is_ok(){setup_shutdown.send_replace(true);}});
-            let response=auth::signed_in(&ready,&ready.config.owner,"local-setup").unwrap_or_else(IntoResponse::into_response);
+            let response=setup_step(started,"sign_in",||auth::signed_in(&ready,&ready.config.owner,"local-setup")).unwrap_or_else(IntoResponse::into_response);
             *state.ready.lock().unwrap()=Some((id,ready,warning,service));
             response
         }

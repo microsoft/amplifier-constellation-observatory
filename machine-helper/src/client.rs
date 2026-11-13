@@ -14,6 +14,8 @@ pub struct Bootstrap {
     pub pairing_id: Uuid,
     pub expires_at: u64,
     #[serde(default)]
+    pub install_agents: bool,
+    #[serde(default)]
     pub ca_pem: Option<String>,
 }
 impl Bootstrap {
@@ -60,7 +62,8 @@ impl Receipt {
                 && self.pairing_id == bootstrap.pairing_id
                 && self.observatory_id == bootstrap.observatory_id
                 && self.machine_id == machine
-                && self.access == ["observe"]
+                && (self.access == ["observe"]
+                    || self.access == ["observe", crate::paired_protocol::INSTALL_ACCESS])
                 && (5..=300).contains(&self.heartbeat_seconds),
             "Pairing reply did not match this computer and Observatory"
         );
@@ -75,6 +78,8 @@ pub struct HeartbeatReceipt {
     pub state: String,
     pub access: Vec<String>,
     pub heartbeat_seconds: u64,
+    #[serde(default)]
+    pub installation: Option<crate::paired_protocol::InstallRequest>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Pending {
@@ -82,9 +87,13 @@ pub struct Pending {
     pub code: String,
     pub name: String,
     pub startup: bool,
+    #[serde(default)]
+    pub install_agents: bool,
 }
 #[derive(Serialize)]
 struct Redeem<'a> {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    install_agents: bool,
     schema: u32,
     observatory_id: Uuid,
     code: &'a str,
@@ -98,6 +107,8 @@ struct Redeem<'a> {
 }
 #[derive(Serialize)]
 struct Heartbeat<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    installation_protocol: Option<u8>,
     schema: u32,
     machine_id: Uuid,
     name: &'a str,
@@ -220,6 +231,7 @@ impl Remote {
         pending: &Pending,
     ) -> std::result::Result<Receipt, RemoteError> {
         let body = Redeem {
+            install_agents: pending.install_agents,
             schema: 1,
             observatory_id: self.bootstrap.observatory_id,
             code: &pending.code,
@@ -247,6 +259,16 @@ impl Remote {
                 status: None,
                 message: e.to_string(),
             })?;
+        if receipt
+            .access
+            .contains(&crate::paired_protocol::INSTALL_ACCESS.to_owned())
+            && !pending.install_agents
+        {
+            return Err(RemoteError {
+                status: None,
+                message: "Installation access was not approved on this computer.".into(),
+            });
+        }
         Ok(receipt)
     }
     pub async fn heartbeat(
@@ -256,6 +278,10 @@ impl Remote {
         name: &str,
     ) -> std::result::Result<HeartbeatReceipt, RemoteError> {
         let body = Heartbeat {
+            installation_protocol: receipt
+                .access
+                .contains(&crate::paired_protocol::INSTALL_ACCESS.to_owned())
+                .then_some(1),
             schema: 1,
             machine_id: receipt.machine_id,
             name,
@@ -274,7 +300,7 @@ impl Remote {
             || reply.observatory_id != receipt.observatory_id
             || reply.host_id != receipt.host_id
             || reply.state != "connected"
-            || reply.access != ["observe"]
+            || reply.access != receipt.access
             || !(5..=300).contains(&reply.heartbeat_seconds)
         {
             return Err(RemoteError {
@@ -283,6 +309,56 @@ impl Remote {
             });
         }
         Ok(reply)
+    }
+    pub async fn installation_access(
+        &self,
+        receipt: &Receipt,
+        secret: &str,
+    ) -> std::result::Result<Receipt, RemoteError> {
+        let reply: Receipt = self
+            .post(
+                &format!("api/v1/machines/{}/installation-access", receipt.host_id),
+                &serde_json::json!({"install_agents":true}),
+                Some(secret),
+            )
+            .await?;
+        reply
+            .validate(&self.bootstrap, receipt.machine_id)
+            .map_err(|e| RemoteError {
+                status: None,
+                message: e.to_string(),
+            })?;
+        if reply.host_id != receipt.host_id
+            || reply.pairing_id != receipt.pairing_id
+            || reply.access != ["observe", crate::paired_protocol::INSTALL_ACCESS]
+        {
+            return Err(RemoteError {
+                status: None,
+                message: "Computer access did not match this saved pairing".into(),
+            });
+        }
+        Ok(reply)
+    }
+    pub async fn installation_result(
+        &self,
+        receipt: &Receipt,
+        secret: &str,
+        result: &crate::paired_protocol::InstallResult,
+    ) -> std::result::Result<(), RemoteError> {
+        let reply: serde_json::Value = self
+            .post(
+                &format!("api/v1/machines/{}/installation-result", receipt.host_id),
+                result,
+                Some(secret),
+            )
+            .await?;
+        if reply["accepted"] != true || reply["request_id"] != result.request.id.to_string() {
+            return Err(RemoteError {
+                status: None,
+                message: "Installation acknowledgement did not match the saved request".into(),
+            });
+        }
+        Ok(())
     }
     pub async fn revoke(
         &self,

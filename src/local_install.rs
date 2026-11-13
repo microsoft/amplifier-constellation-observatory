@@ -4,8 +4,9 @@ use crate::{config, provider, state::AppState};
 use amplifier_native_platform as platform;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 const INSTANCE: platform::Application = platform::Application {
     display_name: "Constellation agent",
@@ -16,115 +17,9 @@ const INSTANCE: platform::Application = platform::Application {
     background_command: "serve",
 };
 
-fn ordinary(root: &Path, relative: &str) -> Result<PathBuf> {
-    ensure!(
-        !relative.is_empty() && !relative.contains(['\\', ':']),
-        "Invalid package path"
-    );
-    let mut path = root.to_path_buf();
-    for part in Path::new(relative).components() {
-        let Component::Normal(part) = part else {
-            anyhow::bail!("Invalid package path")
-        };
-        path.push(part);
-        ensure!(!path.is_symlink(), "Package links are not supported");
-    }
-    ensure!(path.is_file(), "The agent package is incomplete");
-    Ok(path)
-}
-
-pub(crate) fn inventory(root: &Path) -> Result<(Value, Vec<(String, PathBuf)>)> {
-    let file = ordinary(root, "consumer-bundle.json")?;
-    ensure!(
-        file.metadata()?.len() <= 4 * 1024 * 1024,
-        "Excessive package inventory"
-    );
-    let manifest: Value = serde_json::from_slice(&std::fs::read(file)?)?;
-    ensure!(
-        manifest["schema"] == 1 && manifest["kind"] == "instance-consumer-bundle",
-        "Unsupported agent package"
-    );
-    let arch = if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        "x86_64"
-    };
-    let suffix = if cfg!(windows) {
-        "pc-windows-msvc"
-    } else if cfg!(target_os = "macos") {
-        "apple-darwin"
-    } else {
-        "unknown-linux-gnu"
-    };
-    ensure!(
-        manifest["target"] == format!("{arch}-{suffix}") && manifest["native_runtime"].is_object(),
-        "Use the complete agent package for this computer"
-    );
-    let expected = if cfg!(windows) {
-        "agent-instance.exe"
-    } else {
-        "agent-instance"
-    };
-    ensure!(
-        manifest["binary"] == expected,
-        "The agent package is for another platform"
-    );
-    let files = manifest["files"]
-        .as_object()
-        .context("Missing package inventory")?;
-    ensure!(
-        files.len() <= 20_000 && files.contains_key(expected),
-        "Invalid package inventory"
-    );
-    let mut total = 0u64;
-    let mut paths = Vec::new();
-    for (name, digest) in files {
-        let path = ordinary(root, name)?;
-        total += path.metadata()?.len();
-        ensure!(
-            total <= 1024 * 1024 * 1024,
-            "Agent package exceeds its size limit"
-        );
-        let actual = format!("{:x}", Sha256::digest(std::fs::read(&path)?));
-        ensure!(
-            digest.as_str() == Some(actual.as_str()),
-            "Agent package checksum mismatch: {name}"
-        );
-        paths.push((name.clone(), path));
-    }
-    Ok((manifest, paths))
-}
-
-pub(crate) fn copy_bundle(source: &Path, destination: &Path) -> Result<Value> {
-    let (manifest, files) = inventory(source)?;
-    ensure!(
-        !destination.exists(),
-        "An agent package is already installed"
-    );
-    config::private_dir(destination)?;
-    for (name, source) in files {
-        let target = destination.join(name);
-        config::private_dir(target.parent().unwrap())?;
-        std::fs::copy(&source, &target)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let executable = source.metadata()?.permissions().mode() & 0o111 != 0;
-            std::fs::set_permissions(
-                &target,
-                std::fs::Permissions::from_mode(if executable { 0o700 } else { 0o600 }),
-            )?;
-        }
-        #[cfg(windows)]
-        platform::protect_file(&target)?;
-    }
-    config::private_write(
-        &destination.join("consumer-bundle.json"),
-        &std::fs::read(source.join("consumer-bundle.json"))?,
-    )?;
-    inventory(destination)?;
-    Ok(manifest)
-}
+#[cfg(test)]
+use crate::instance_package::ordinary;
+pub(crate) use crate::instance_package::{copy_bundle, inventory};
 
 /// Called only during explicit new desktop setup. Existing registries are never
 /// rewritten by opening an application or replacing a downloaded executable.
@@ -265,7 +160,8 @@ pub async fn attach(state: &AppState, job: &Value) -> Result<Value> {
         instance_binary.is_file() && !instance_binary.is_symlink(),
         "Missing installed agent executable"
     );
-    let endpoint = json!({"id":id,"label":plan["name"],"kind":"agent","host_id":host["id"],"ui_url":origin,"acp":{"transport":"stdio","command":instance_binary,"args":["acp","--home",home],"cwd":home},"management":{"provider":"agent-instance","base_url":origin,"expected_id":instance_id,"ca_file":ca,"credential_ref":reference,"access":"manage"}});
+    let workspace = crate::instance_package::session_directory(&home)?;
+    let endpoint = json!({"id":id,"label":plan["name"],"kind":"agent","host_id":host["id"],"ui_url":origin,"acp":{"transport":"stdio","command":instance_binary,"args":["acp","--home",home],"cwd":home,"session_cwd":workspace},"management":{"provider":"agent-instance","base_url":origin,"expected_id":instance_id,"ca_file":ca,"credential_ref":reference,"access":"manage"}});
     provider::validate(&endpoint)?;
     let observed = provider::inspect(state, &endpoint).await?;
     ensure!(
