@@ -10,10 +10,13 @@ pub mod elicitation;
 pub mod error;
 pub mod experiments;
 pub(crate) mod helper_support;
+pub mod instance_package;
 pub mod intake;
 pub mod local_install;
 pub mod machine_network;
 pub mod machines;
+pub mod paired_install;
+pub mod paired_protocol;
 pub mod permissions;
 pub mod places;
 #[cfg(windows)]

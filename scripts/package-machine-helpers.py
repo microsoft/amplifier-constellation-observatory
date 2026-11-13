@@ -13,7 +13,9 @@ def package(directory,version='0.2.0'):
         if record['sha256']!=digest or record['platform']!=platform or record['version']!=version:raise ValueError('Platform build provenance mismatch')
         if record.get('signed_or_notarized') is True:raise ValueError('Signed packages require a separately opened setup file; this packager embeds public setup in the unsigned Mac bundle')
         if (directory/(filename+'.sha256')).read_text().split()!=[digest,filename]:raise ValueError('Platform checksum mismatch')
-        artifacts.append(dict(platform=platform,label=label,architecture=architecture,filename=filename,sha256=digest,version=version))
+        row=dict(platform=platform,label=label,architecture=architecture,filename=filename,sha256=digest,version=version)
+        if record.get('installation_protocol') == 1:row['installation_protocol']=1
+        artifacts.append(row)
     manifest={'schema':1,'artifacts':artifacts};output=directory/f'constellation-machine-helpers-{version}.zip'
     with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_STORED) as z:
         # Retrying a partial draft upload with the same builds must retain bytes.

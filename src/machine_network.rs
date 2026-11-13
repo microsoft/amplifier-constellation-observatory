@@ -193,7 +193,9 @@ fn launch(
     let signal = handle.clone();
     let finished = handle.clone();
     let task = tokio::spawn(async move {
-        let running = server.handle(signal).serve(router.into_make_service());
+        let running = server
+            .handle(signal)
+            .serve(router.into_make_service_with_connect_info::<SocketAddr>());
         tokio::pin!(running);
         tokio::select! {
             _ = &mut running => (),

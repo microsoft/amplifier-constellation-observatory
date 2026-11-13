@@ -61,7 +61,7 @@ impl Store {
     pub fn save<T: Serialize>(&self, name: &str, value: &T) -> Result<()> {
         let data = serde_json::to_vec_pretty(value)?;
         ensure!(data.len() <= 1024 * 1024, "Helper state is too large");
-        self.write(name, &data)
+        amplifier_native_platform::private_write_data(&self.path(name)?, &data)
     }
     pub fn write(&self, name: &str, data: &[u8]) -> Result<()> {
         let target = self.path(name)?;

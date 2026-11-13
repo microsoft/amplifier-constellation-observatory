@@ -56,5 +56,5 @@ owns agent recognition and product language. The
 [local agreement](contracts.md) defines Observatory's contribution; the
 [API](api.md) and [installation instructions](../README.md#install-on-linux)
 describe implemented support. Platform targets and team flows guide development;
-pairing availability does not imply remote installation, agent discovery or
-support for hosting Observatory on every target computer.
+a connected computer shows only the operations it has granted and supports.
+Observation-only pairing remains useful without installation access.

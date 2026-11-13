@@ -317,7 +317,7 @@ does not prove another computer's route or firewall access. Existing HTTPS mode
 reports `mode:"configured_https"` and keeps its configured public URL; this
 interface cannot reconfigure it.
 
-`POST machine-pairings {request_id:<UUID>}` creates a ten-minute pairing. An exact
+`POST machine-pairings {request_id:<UUID>,install_agents?:bool}` creates a ten-minute pairing. An exact
 request retry returns the same record. `GET machine-pairings` lists pairings;
 `GET machine-pairings/{id}` reads one. Pairings and their codes remain private to
 the credential or browser actor that created them. These operations require
@@ -336,7 +336,9 @@ installation's verified helper artifacts. Platform IDs are `windows-x86_64`,
 `windows-aarch64`, `macos-aarch64`, `macos-x86_64`, `linux-aarch64` and `linux-x86_64`; unavailable
 artifacts are not advertised. The archive's `observatory-pairing.json` contains
 `schema:1`, HTTPS `observatory_url`, `observatory_id`, `observatory_name`,
-`pairing_id`, `expires_at` and optional `ca_pem`. It contains no code or credential.
+`pairing_id`, `expires_at` and optional `ca_pem`. Current installation-capable
+artifacts also receive `install_agents`; older artifacts omit it. It contains no
+code or credential.
 The helper validates TLS, the pinned Observatory identity and its origin, without
 following redirects. Downloading setup does not establish network reachability.
 Unsigned Mac preview setups also carry this public file inside the app's
@@ -364,7 +366,10 @@ calling `POST machine-pairings/{id}/redeem`:
 
 Redemption uses that pairing ID and code, without an Observatory admin credential.
 The receipt is `{schema:1,pairing_id,observatory_id,host_id,machine_id,
-access:["observe"],heartbeat_seconds:15}`. The server stores a credential hash.
+access:["observe"],heartbeat_seconds:15}`. If the invitation requested
+`install_agents:true` and the computer owner selected it in the helper, redemption
+also sends `install_agents:true` and access includes `"install-agents"`. Missing
+fields preserve observation-only behavior. The server stores a credential hash.
 An exact accepted retry returns the same receipt even after code expiry; changing
 the accepted identity or credential is refused. A revoked or superseded pairing
 cannot be restored by its old accepted request, even if the credential is reused.
@@ -375,8 +380,10 @@ identity. It cannot replace an existing active credential.
 `{schema:1,machine_id,name,os,arch,helper_version}`. Supported OS values are
 `windows|macos|linux`; architectures are `x86_64|aarch64`. The reply contains
 `{schema:1,observatory_id,host_id,state:"connected",access:["observe"],
-heartbeat_seconds:15}`. This credential grants only its own heartbeat and revoke
-operations, not Observatory observation, management or installation APIs.
+heartbeat_seconds:15}`. With installation access, the helper also advertises
+`installation_protocol:1` and the reply may carry one fixed installation request.
+This credential controls only its own pairing, heartbeat, fixed installation
+access and result routes; it cannot use Observatory administration APIs.
 
 `POST machines/{host_id}/revoke {}` accepts `provision` or that machine's
 credential and returns `{host_id,state:"disconnected"}`. It preserves saved
@@ -386,7 +393,9 @@ pairs again.
 
 `GET hosts` adds `machine:{id,os,arch,helper_version,reported_name,access,state,
 last_seen_at,paired_at,revoked_at}` to paired inventory records. Their transport is
-`paired`, address is null, and installer roots/recipes are empty. `state` is
+`paired`, address is null, and installer roots remain empty. Observation-only
+records have no recipes; an active installation grant plus helper protocol 1
+projects only the fixed `paired-instance` recipe. `state` is
 `online` for a heartbeat within 45 seconds, `offline` when no fresh heartbeat is
 available, or `disconnected` after revocation. These observations do not change
 host configuration revisions or certify agent state. Display labels remain
@@ -399,7 +408,38 @@ Errors retain `{error:string}`: `401` invalid credentials, `403` revoked,
 attempt or capacity limit. A network error preserves the pending request and
 credential; it does not establish whether a claim committed. Reconcile the exact
 request instead of generating a replacement. Helper presence operates without
-agent prompts, session access or an inbound connection to the computer.
+agent prompts, session access or an inbound connection to the computer. Installing
+and using a remote agent additionally needs a direct shared-network route.
+
+### Fixed setup on a paired computer
+
+The local helper can explicitly upgrade an observation-only grant using
+`POST machines/{host_id}/installation-access {install_agents:true}` with its
+machine credential. This changes only that current pairing. No browser admin
+credential can impersonate the local choice, and revocation still preserves agents.
+
+`POST install/plan` uses `{host_id,recipe_id:"paired-instance",name,request_id}`.
+The server pins the package target and SHA256 from `instance-bundle-lock.json`,
+the current machine/pairing/Observatory identities, and the authenticated heartbeat
+peer address. `POST install` adds the returned `plan_digest`. No request can select
+an executable, argument, path, URL, credential endpoint or port. The helper checks
+its own route to Observatory before running fixed Instance setup in its private
+`agents/<request_id>` folder. The same operation is redelivered after reply loss;
+a durable helper start without a result remains unknown and is never rerun.
+
+`POST machines/{host_id}/installation-result` uses that machine credential and
+`{request:<exact offer>,state:"completed"|"failed"|"unknown",message,attachment}`.
+A completed attachment supplies the verified installed identity, network origin,
+CA, credential and installation-owned workspace. These are retained privately;
+only the result state and request digest enter the job record. Results must match
+the current pairing and original job. Observatory verifies TLS and Instance
+identity before registering management and the existing ACP attach bridge. The
+bridge's local working directory and remote `session_cwd` are distinct.
+
+Installed-but-unconnected results retain `connection_pending`; `POST jobs/{id}/connect`
+finishes only that saved attachment. It does not reinstall, prompt, choose model
+access or change the installed agent. Observation, package support, installed
+state, usable connection and model authorization remain distinct outcomes.
 
 ### Owner installation recipes
 

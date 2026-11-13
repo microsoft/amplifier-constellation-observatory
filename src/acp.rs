@@ -8,6 +8,20 @@ use serde_json::{Value, json};
 use std::{process::Stdio, time::Duration};
 use tokio::process::{Child, Command};
 
+// Session cwd belongs to the remote agent's OS, unlike the local stdio cwd.
+fn absolute_session_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    !path.is_empty()
+        && path.len() <= 8192
+        && !path.chars().any(char::is_control)
+        && (path.starts_with('/')
+            || path.starts_with("\\\\")
+            || (bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && [b'/', b'\\'].contains(&bytes[2])))
+}
+
 pub fn validate(v: &Value) -> ApiResult<()> {
     if v["transport"].as_str().unwrap_or("stdio") != "stdio" {
         return Err(ApiError::bad(
@@ -25,10 +39,9 @@ pub fn validate(v: &Value) -> ApiResult<()> {
             "Supply an ACP executable and absolute working folder",
         ));
     }
-    if v.get("session_cwd").is_some_and(|p| {
-        p.as_str()
-            .is_none_or(|p| !std::path::Path::new(p).is_absolute())
-    }) {
+    if v.get("session_cwd")
+        .is_some_and(|p| p.as_str().is_none_or(|p| !absolute_session_path(p)))
+    {
         return Err(ApiError::bad("The agent session folder must be absolute"));
     }
     if v.get("args").is_some_and(|a| {
@@ -1008,6 +1021,20 @@ fn reply_media(updates: &[Value], sid: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_session_paths_are_not_interpreted_as_local_process_paths() {
+        for folder in [
+            "/home/agent/workspace",
+            r"C:\Users\Agent\workspace",
+            r"\\server\agent\workspace",
+        ] {
+            assert!(absolute_session_path(folder), "{folder}");
+        }
+        for folder in ["relative", "C:relative", "", "folder\nother"] {
+            assert!(!absolute_session_path(folder), "{folder}");
+        }
+    }
+
     #[test]
     fn streamed_tokens_remain_contiguous_but_post_tool_answers_start_a_paragraph() {
         let chunk = |kind: &str, text: &str| json!({"sessionId":"one","update":{"sessionUpdate":kind,"content":{"type":"text","text":text}}});

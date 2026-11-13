@@ -1,4 +1,4 @@
-//! Optional, observation-only machine pairing. Agent access and execution stay separate.
+//! Optional machine pairing. Fixed installation access is granted locally once; legacy presence grants stay unchanged.
 use crate::{
     auth,
     error::{ApiError, ApiResult},
@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     io::{Cursor, Write},
+    net::SocketAddr,
     path::PathBuf,
     sync::Arc,
 };
@@ -37,6 +38,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/v1/machine-pairings/{id}/cancel", post(cancel))
         .route("/api/v1/machine-pairings/{id}/redeem", post(redeem))
         .route("/api/v1/machines/{id}/heartbeat", post(heartbeat))
+        .route(
+            "/api/v1/machines/{id}/installation-access",
+            post(installation_access),
+        )
+        .route(
+            "/api/v1/machines/{id}/installation-result",
+            post(installation_result),
+        )
         .route("/api/v1/machines/{id}/revoke", post(revoke))
         .route(
             "/api/v1/machine-pairings/{id}/setup/{platform}",
@@ -48,6 +57,14 @@ pub(crate) fn helper_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/machine-pairings/{id}/redeem", post(redeem))
         .route("/api/v1/machines/{id}/heartbeat", post(heartbeat))
+        .route(
+            "/api/v1/machines/{id}/installation-access",
+            post(installation_access),
+        )
+        .route(
+            "/api/v1/machines/{id}/installation-result",
+            post(installation_result),
+        )
         .route("/api/v1/machines/{id}/revoke", post(revoke_self))
 }
 fn conflict(message: &str) -> ApiError {
@@ -111,6 +128,8 @@ fn envelope(s: &AppState, p: Value) -> ApiResult<Value> {
 #[serde(deny_unknown_fields)]
 struct Create {
     request_id: String,
+    #[serde(default)]
+    install_agents: bool,
 }
 async fn create(
     State(s): State<Arc<AppState>>,
@@ -143,7 +162,7 @@ async fn create(
             let raw: String = (0..8)
                 .map(|_| alphabet[rng.gen_range(0..alphabet.len())] as char)
                 .collect();
-            let p = json!({"id":body.request_id,"request_id":body.request_id,"code":format!("{}-{}",&raw[..4],&raw[4..]),"state":"waiting","expires_at":now_ms()+TTL,"created_at":now_ms(),"host_id":null,"failures":0});
+            let p = json!({"id":body.request_id,"request_id":body.request_id,"code":format!("{}-{}",&raw[..4],&raw[4..]),"state":"waiting","expires_at":now_ms()+TTL,"created_at":now_ms(),"host_id":null,"failures":0,"install_agents":body.install_agents});
             tx.execute(
                 "INSERT INTO machine_pairings VALUES(?1,?2,?3)",
                 params![body.request_id, actor, p.to_string()],
@@ -214,6 +233,8 @@ struct Claim {
     os: String,
     arch: String,
     helper_version: String,
+    #[serde(default)]
+    install_agents: bool,
 }
 fn metadata(name: &str, os: &str, arch: &str, version: &str) -> ApiResult<()> {
     if name.trim().is_empty()
@@ -242,8 +263,13 @@ fn normalize_code(code: &str) -> String {
 fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |d, (a, b)| d | (a ^ b)) == 0
 }
-fn claim_response(s: &AppState, id: &str, host: &str, machine: &str) -> Value {
-    json!({"schema":1,"pairing_id":id,"observatory_id":s.config.id,"host_id":host,"machine_id":machine,"access":["observe"],"heartbeat_seconds":15})
+fn claim_response(s: &AppState, id: &str, host: &str, machine: &str, installed: bool) -> Value {
+    let access = if installed {
+        json!(["observe", crate::paired_protocol::INSTALL_ACCESS])
+    } else {
+        json!(["observe"])
+    };
+    json!({"schema":1,"pairing_id":id,"observatory_id":s.config.id,"host_id":host,"machine_id":machine,"access":access,"heartbeat_seconds":15})
 }
 async fn redeem(
     State(s): State<Arc<AppState>>,
@@ -287,7 +313,13 @@ async fn redeem(
         {
             return Err(conflict("This code has already paired a different request"));
         }
-        return Ok(Json(claim_response(&s, &id, host, &b.machine_id)));
+        return Ok(Json(claim_response(
+            &s,
+            &id,
+            host,
+            &b.machine_id,
+            p["installation_granted"] == true,
+        )));
     }
     if p["state"] == "locked" {
         return Err(ApiError(
@@ -372,6 +404,7 @@ async fn redeem(
     p["machine_id"] = json!(b.machine_id);
     p["claim_hash"] = json!(hash);
     p["claim_request_id"] = json!(b.request_id);
+    p["installation_granted"] = json!(b.install_agents && p["install_agents"] == true);
     save_pairing(&tx, &id, &p)?;
     tx.execute(
         "INSERT INTO audit(at,kind,resource_id,data) VALUES(?1,'machine.paired',?2,?3)",
@@ -382,7 +415,13 @@ async fn redeem(
         ],
     )?;
     tx.commit()?;
-    Ok(Json(claim_response(&s, &id, &host_id, &b.machine_id)))
+    Ok(Json(claim_response(
+        &s,
+        &id,
+        &host_id,
+        &b.machine_id,
+        p["installation_granted"] == true,
+    )))
 }
 fn bearer(h: &HeaderMap) -> ApiResult<String> {
     let t = h
@@ -415,6 +454,8 @@ fn grant(db: &Connection, id: &str, hash: &str, allow_revoked: bool) -> ApiResul
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Beat {
+    #[serde(default)]
+    installation_protocol: Option<u8>,
     schema: u8,
     machine_id: String,
     name: String,
@@ -424,6 +465,7 @@ struct Beat {
 }
 async fn heartbeat(
     State(s): State<Arc<AppState>>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     h: HeaderMap,
     Path(id): Path<String>,
     Json(b): Json<Beat>,
@@ -435,11 +477,67 @@ async fn heartbeat(
     if b.schema != 1 || b.machine_id != machine {
         return Err(ApiError::forbidden());
     }
-    let value = json!({"id":machine,"os":b.os,"arch":b.arch,"helper_version":b.helper_version,"reported_name":b.name,"last_seen_at":now_ms()});
+    let value = json!({"id":machine,"os":b.os,"arch":b.arch,"helper_version":b.helper_version,"reported_name":b.name,"last_seen_at":now_ms(),"installation_protocol":b.installation_protocol,"peer_address":peer.map(|p|p.0.0.ip().to_string())});
     db.execute("INSERT INTO machine_observations VALUES(?1,?2) ON CONFLICT(host_id) DO UPDATE SET value=excluded.value",params![id,value.to_string()])?;
+    let access = crate::paired_install::access(&db, &id)?;
+    drop(db);
+    let installation = if b.installation_protocol == Some(1) {
+        crate::paired_install::offer(&s, &id)?
+    } else {
+        None
+    };
     Ok(Json(
-        json!({"schema":1,"observatory_id":s.config.id,"host_id":id,"state":"connected","access":["observe"],"heartbeat_seconds":15}),
+        json!({"schema":1,"observatory_id":s.config.id,"host_id":id,"state":"connected","access":access,"heartbeat_seconds":15,"installation":installation}),
     ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallationAccess {
+    install_agents: bool,
+}
+async fn installation_access(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(b): Json<InstallationAccess>,
+) -> ApiResult<Json<Value>> {
+    if !b.install_agents {
+        return Err(ApiError::bad(
+            "Disconnect this computer to revoke its pairing",
+        ));
+    }
+    let hash = bearer(&h)?;
+    let mut db = s.db.lock().unwrap();
+    let tx = db.transaction()?;
+    let machine = grant(&tx, &id, &hash, false)?;
+    let pairing_id: String = tx.query_row(
+        "SELECT pairing_id FROM machine_grants WHERE host_id=?1",
+        [&id],
+        |r| r.get(0),
+    )?;
+    let (_, mut p) = pairing(&tx, &pairing_id)?;
+    p["installation_granted"] = json!(true);
+    save_pairing(&tx, &pairing_id, &p)?;
+    tx.commit()?;
+    Ok(Json(claim_response(&s, &pairing_id, &id, &machine, true)))
+}
+async fn installation_result(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(result): Json<crate::paired_protocol::InstallResult>,
+) -> ApiResult<Json<Value>> {
+    let hash = bearer(&h)?;
+    {
+        let db = s.db.lock().unwrap();
+        let machine = grant(&db, &id, &hash, false)?;
+        if machine != result.request.machine_id.to_string() {
+            return Err(ApiError::forbidden());
+        }
+    }
+    crate::paired_install::complete(s, &id, result)
+        .await
+        .map(Json)
 }
 async fn revoke(
     State(s): State<Arc<AppState>>,
@@ -515,7 +613,13 @@ pub fn project_hosts(s: &AppState, mut hosts: Vec<Value>) -> ApiResult<Vec<Value
             .optional()?;
         let mut m = raw.map(decode).transpose()?.unwrap_or(json!({}));
         m["id"] = json!(machine);
-        m["access"] = json!(["observe"]);
+        m["access"] = crate::paired_install::access(&db, id).unwrap_or(json!(["observe"]));
+        if revoked.is_none()
+            && m["installation_protocol"] == 1
+            && crate::paired_install::enabled(&db, id).unwrap_or(false)
+        {
+            host["recipes"] = json!([{"id":crate::paired_protocol::RECIPE,"version":crate::paired_protocol::package_lock()["version"]}]);
+        }
         m["paired_at"] = json!(paired);
         m["revoked_at"] = json!(revoked);
         m["state"] = json!(if revoked.is_some() {
@@ -582,10 +686,12 @@ struct Artifact {
     filename: String,
     sha256: String,
     version: String,
+    #[serde(default)]
+    installation_protocol: Option<u8>,
 }
 impl Artifact {
     fn descriptor(&self, id: Option<&str>) -> Value {
-        json!({"platform":self.platform,"label":self.label,"architecture":self.architecture,"url":id.map(|id|format!("/api/v1/machine-pairings/{id}/setup/{}",self.platform)),"filename":format!("Constellation-Computer-{}.zip",self.platform),"version":self.version})
+        json!({"platform":self.platform,"label":self.label,"architecture":self.architecture,"url":id.map(|id|format!("/api/v1/machine-pairings/{id}/setup/{}",self.platform)),"filename":format!("Constellation-Computer-{}.zip",self.platform),"version":self.version,"installation_protocol":self.installation_protocol})
     }
 }
 fn artifact_path(s: &AppState, a: &Artifact) -> PathBuf {
@@ -652,7 +758,10 @@ async fn download(
         .find(|a| a.platform == platform)
         .ok_or_else(ApiError::missing)?;
     let (endpoint, ca) = crate::machine_network::endpoint(&s).await?;
-    let bootstrap = json!({"schema":1,"observatory_url":endpoint,"observatory_id":s.config.id,"observatory_name":format!("{}'s constellation",s.config.owner),"pairing_id":id,"expires_at":p["expires_at"],"ca_pem":ca});
+    let mut bootstrap = json!({"schema":1,"observatory_url":endpoint,"observatory_id":s.config.id,"observatory_name":format!("{}'s constellation",s.config.owner),"pairing_id":id,"expires_at":p["expires_at"],"ca_pem":ca});
+    if a.installation_protocol == Some(1) {
+        bootstrap["install_agents"] = json!(p["install_agents"] == true);
+    }
     let file = artifact_path(&s, &a);
     let filename = format!("attachment; filename=\"Constellation-Computer-{platform}.zip\"");
     let data = tokio::task::spawn_blocking(move || {

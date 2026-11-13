@@ -114,6 +114,9 @@ pub fn validate_host(host: &Value) -> ApiResult<()> {
 }
 pub fn plan(state: &AppState, body: &Value) -> ApiResult<Value> {
     let host = state.read("hosts", body["host_id"].as_str().unwrap_or(""))?;
+    if host["transport"] == "paired" {
+        return crate::paired_install::plan(state, &host, body);
+    }
     validate_host(&host)?;
     let recipe = host["recipes"]
         .as_array()
@@ -430,7 +433,9 @@ pub fn start(state: Arc<AppState>, body: &Value, actor: &str) -> ApiResult<Value
         json!({"host_id":p["host_id"],"name":p["name"],"actor":actor}),
     )?;
     drop(gate);
-    tokio::spawn(execute(state, request.into(), p));
+    if p["transport"] != "paired" {
+        tokio::spawn(execute(state, request.into(), p));
+    }
     Ok(job)
 }
 

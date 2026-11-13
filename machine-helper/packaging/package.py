@@ -24,7 +24,7 @@ def package(binary,platform,version,output):
         put(z,'NUNITO-LICENSE.txt',(Path(__file__).resolve().parents[1]/'ui/NUNITO-LICENSE.txt').read_bytes())
     digest=hashlib.sha256(archive.read_bytes()).hexdigest()
     (output/(filename+'.sha256')).write_text(digest+'  '+filename+'\n')
-    record={'platform':platform,'version':version,'filename':filename,'sha256':digest,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'bootstrap_path':'observatory-pairing.json','bootstrap_included':False,'signed_or_notarized':False}
+    record={'platform':platform,'version':version,'filename':filename,'sha256':digest,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'bootstrap_path':'observatory-pairing.json','bootstrap_included':False,'signed_or_notarized':False,'installation_protocol':1}
     (output/(filename+'.json')).write_text(json.dumps(record,indent=2)+'\n')
     return record
 if __name__=='__main__':
