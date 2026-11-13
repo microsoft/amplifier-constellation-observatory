@@ -79,7 +79,14 @@ pub async fn install(
         &json!({"request":request,"state":"started","delivered":false}),
     )?;
     store.save("pending-installation.json", request)?;
-    let outcome = install_once(store, bootstrap, request).await;
+    // Preparation can create/cache verified package files, but cannot run the
+    // agent installer. Only the explicit dispatch boundary can be uncertain.
+    let outcome = match prepare_install(store, bootstrap, request).await {
+        Ok(prepared) => run_installer(prepared, request)
+            .await
+            .map_err(|error| ("unknown", error)),
+        Err(error) => Err(("failed", error)),
+    };
     let result = match outcome {
         Ok(attachment) => InstallResult {
             request: request.clone(),
@@ -87,18 +94,18 @@ pub async fn install(
             message: "Agent installed. Connecting its verified identity to Observatory.".into(),
             attachment: Some(attachment),
         },
-        Err(error) => InstallResult {
+        Err((state, error)) => InstallResult {
             request: request.clone(),
-            state: "unknown".into(),
-            message: format!(
-                "Setup needs attention; its original request and files are preserved: {error}"
-            )
-            .chars()
-            .scan(0usize, |bytes, c| {
-                *bytes += c.len_utf8();
-                (*bytes <= 1000).then_some(c)
-            })
-            .collect(),
+            state: state.into(),
+            message: bounded_message(if state == "failed" {
+                format!(
+                    "No agent installer started. The request and prepared files are preserved: {error}"
+                )
+            } else {
+                format!(
+                    "Setup needs attention; its original request and files are preserved: {error}"
+                )
+            }),
             attachment: None,
         },
     };
@@ -126,11 +133,27 @@ async fn route_address(bootstrap: &Bootstrap) -> Result<IpAddr> {
     socket.connect(destination)?;
     Ok(socket.local_addr()?.ip())
 }
-async fn install_once(
+fn bounded_message(message: String) -> String {
+    message
+        .chars()
+        .scan(0usize, |bytes, c| {
+            *bytes += c.len_utf8();
+            (*bytes <= 1000).then_some(c)
+        })
+        .collect()
+}
+struct PreparedInstall {
+    home: PathBuf,
+    binary: PathBuf,
+    stdout_path: PathBuf,
+    stdout: std::fs::File,
+    stderr: std::fs::File,
+}
+async fn prepare_install(
     store: &Store,
     bootstrap: &Bootstrap,
     request: &InstallRequest,
-) -> Result<Attachment> {
+) -> Result<PreparedInstall> {
     ensure!(
         route_address(bootstrap).await? == request.bind_address,
         "This computer and Observatory need a shared LAN or private-network route for agent access"
@@ -154,6 +177,22 @@ async fn install_once(
     platform::private_create(&stderr_path, b"")?;
     let stdout = std::fs::OpenOptions::new().write(true).open(&stdout_path)?;
     let stderr = std::fs::OpenOptions::new().write(true).open(&stderr_path)?;
+    Ok(PreparedInstall {
+        home,
+        binary,
+        stdout_path,
+        stdout,
+        stderr,
+    })
+}
+async fn run_installer(prepared: PreparedInstall, request: &InstallRequest) -> Result<Attachment> {
+    let PreparedInstall {
+        home,
+        binary,
+        stdout_path,
+        stdout,
+        stderr,
+    } = prepared;
     let mut command = tokio::process::Command::new(&binary);
     command
         .args(["setup", "install", "--home"])
@@ -425,6 +464,34 @@ mod tests {
             ca_pem: None,
             install_agents: true,
         }
+    }
+    #[tokio::test]
+    async fn preparation_failure_records_definite_no_dispatch_without_repeating_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("helper")).unwrap();
+        let mut request = request();
+        request.bind_address = "127.0.0.2".parse().unwrap();
+        let result = install(&store, &bootstrap(&request), &request)
+            .await
+            .unwrap();
+        assert_eq!(result.state, "failed");
+        assert!(result.message.starts_with("No agent installer started."));
+        assert!(result.attachment.is_none());
+        assert!(!store.home.join("packages").exists());
+        assert!(!store.home.join("agents").exists());
+        assert!(
+            !store
+                .home
+                .join(format!("install-{}.stdout", request.id))
+                .exists()
+        );
+        assert_eq!(pending(&store).unwrap().unwrap(), result);
+        assert_eq!(
+            install(&store, &bootstrap(&request), &request)
+                .await
+                .unwrap(),
+            result
+        );
     }
     #[tokio::test]
     async fn interrupted_dispatch_and_lost_result_keep_one_intent_without_network_or_rerun() {
