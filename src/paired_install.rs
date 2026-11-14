@@ -294,7 +294,7 @@ pub async fn attach(s: &AppState, job: &Value) -> Result<Value> {
         "acp":{"transport":"stdio","command":bridge.join(manifest["binary"].as_str().unwrap()),"cwd":client_home,"session_cwd":a.session_cwd,
             "args":["--home",client_home,"acp","--url",acp_url.as_str(),"--token-file",s.home.join("secrets").join(&credential)]}});
     provider::validate(&endpoint).map_err(|e| anyhow::anyhow!(e.1))?;
-    let observed = provider::inspect(s, &endpoint)
+    let mut observed = provider::inspect(s, &endpoint)
         .await
         .map_err(|e| anyhow::anyhow!(e.1))?;
     ensure!(
@@ -319,6 +319,7 @@ pub async fn attach(s: &AppState, job: &Value) -> Result<Value> {
             .map_err(|e| anyhow::anyhow!(e.1))?,
         Err(error) => return Err(anyhow::anyhow!(error.1)),
     };
+    observed["endpoint_revision"] = saved["revision"].clone();
     s.save("observations", observed, None)
         .map_err(|e| anyhow::anyhow!(e.1))?;
     Ok(saved)

@@ -647,7 +647,15 @@ pub async fn prompt_input(
     actor: &str,
     input_id: Option<&str>,
 ) -> ApiResult<Value> {
-    run_input(state, context, config, prior, Some(text), actor, input_id).await
+    run_input(
+        state,
+        context,
+        config,
+        prior,
+        actor,
+        InputMode::Prompt { text, input_id },
+    )
+    .await
 }
 pub async fn recover_inputs(
     state: &AppState,
@@ -656,18 +664,51 @@ pub async fn recover_inputs(
     prior: Option<&str>,
     actor: &str,
 ) -> ApiResult<Value> {
-    run_input(state, context, config, prior, None, actor, None).await
+    run_input(state, context, config, prior, actor, InputMode::Recover).await
+}
+enum InputMode<'a> {
+    Prompt {
+        text: &'a str,
+        input_id: Option<&'a str>,
+    },
+    Recover,
+    Inspect {
+        input_id: &'a str,
+    },
+}
+pub async fn inspect_source(
+    state: &AppState,
+    context: &str,
+    config: &Value,
+    prior: &str,
+    actor: &str,
+    input_id: &str,
+) -> ApiResult<Value> {
+    run_input(
+        state,
+        context,
+        config,
+        Some(prior),
+        actor,
+        InputMode::Inspect { input_id },
+    )
+    .await
 }
 async fn run_input(
     state: &AppState,
     context: &str,
     config: &Value,
     prior: Option<&str>,
-    text: Option<&str>,
     actor: &str,
-    input_id: Option<&str>,
+    mode: InputMode<'_>,
 ) -> ApiResult<Value> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    let (text, input_id, inspection) = match mode {
+        InputMode::Prompt { text, input_id } => (Some(text), input_id, false),
+        InputMode::Recover => (None, None, false),
+        InputMode::Inspect { input_id } => (None, Some(input_id), true),
+    };
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(if inspection { 30 } else { 600 });
     let work = async {
         let cached = state.acp_clients.lock().unwrap().get(context).cloned();
         ensure!(
@@ -695,8 +736,11 @@ async fn run_input(
             };
             let init = tokio::select! {
                 _=cancel_signal(&mut setup_cancel)=>anyhow::bail!("Turn cancelled"),
-                result=client.initialize(Some(&setup))=>result?,
+                result=client.initialize(if inspection { None } else { Some(&setup) })=>result?,
             };
+            if inspection && !crate::source_input::supported(&init) {
+                anyhow::bail!("Source receipt capability unavailable");
+            }
             let mut updates = vec![];
             let sid = if let Some(prior) = prior {
                 let restore = if init["agentCapabilities"]["sessionCapabilities"]["resume"]
@@ -712,12 +756,16 @@ async fn run_input(
                 };
                 tokio::select! {
                   _=cancel_signal(&mut setup_cancel)=>anyhow::bail!("Turn cancelled"),
-                  result=client.session_request(
-                        restore,
-                        json!({"sessionId":prior,"cwd":config.get("session_cwd").unwrap_or(&config["cwd"]),"mcpServers":[]}),
-                        &mut updates,
-                        &setup,
-                    )=>result?,
+                  result=async {
+                    let params = json!({"sessionId":prior,"cwd":config.get("session_cwd").unwrap_or(&config["cwd"]),"mcpServers":[]});
+                    if inspection {
+                        // Inspection cannot authenticate, grant permissions or
+                        // retry a load through interactive session setup.
+                        client.request(restore, params, &mut updates, None).await
+                    } else {
+                        client.session_request(restore, params, &mut updates, &setup).await
+                    }
+                  }=>result?,
                 };
                 resumed = true;
                 prior.to_owned()
@@ -751,11 +799,51 @@ async fn run_input(
                 clients.len() < 32,
                 "Close an idle ACP conversation before opening another"
             );
-            clients.insert(context.to_owned(), live.clone());
+            // Do not reuse an inspection-only connection (which advertises no
+            // interactive capabilities) for a later ordinary prompt.
+            if !inspection {
+                clients.insert(context.to_owned(), live.clone());
+            }
             live
         };
         let mut live = live.lock().await;
         let sid = live.sid.clone();
+        if inspection {
+            ensure!(
+                crate::source_input::supported(&live.init),
+                "Source receipt capability unavailable"
+            );
+            ensure!(
+                prior == Some(sid.as_str()),
+                "Source inspection session changed"
+            );
+            let input = input_id.unwrap();
+            let record = state.read("sessions", context)?;
+            let message = record["messages"]
+                .as_array()
+                .and_then(|ms| {
+                    ms.iter()
+                        .find(|m| m["role"] == "user" && m["request_id"] == input)
+                })
+                .context("Missing original source input")?;
+            ensure!(
+                message["actor"] == actor && message["source_delivery"]["session_id"] == sid,
+                "Source inspection binding changed"
+            );
+            let source = &message["source_delivery"]["source"];
+            let result = live
+                .client
+                .request(
+                    crate::source_input::METHOD,
+                    json!({"sessionId":sid,"sources":[source]}),
+                    &mut vec![],
+                    None,
+                )
+                .await?;
+            let receipt = crate::source_input::checked_receipt(result, source, input)?;
+            live.used_at = crate::state::now_ms();
+            return Ok(json!({"receipt":receipt}));
+        }
         if input_id.is_some() || text.is_none() {
             // Save the binding before any prompt bytes are sent, including failure paths.
             crate::intake::mutate(state, context, |s| {
@@ -820,10 +908,16 @@ async fn run_input(
         if text.is_none() {
             return Ok(json!({"session_id":sid,"recovered":true}));
         }
+        let mut params = json!({"sessionId":sid,"prompt":[{"type":"text","text":text.unwrap()}]});
         if let Some(input_id) = input_id {
             if !crate::intake::authorized(state, context, input_id) {
                 crate::intake::mark(state, context, input_id, "notAccepted")?;
                 anyhow::bail!("Input authorization changed");
+            }
+            if let Some(metadata) =
+                crate::source_input::prepare(state, context, input_id, &sid, &live.init)?
+            {
+                params["_meta"] = json!({crate::source_input::META:metadata});
             }
             crate::intake::mark(state, context, input_id, "submitted")?;
         }
@@ -832,7 +926,7 @@ async fn run_input(
             .client
             .request(
                 "session/prompt",
-                json!({"sessionId":sid,"prompt":[{"type":"text","text":text.unwrap()}]}),
+                params,
                 &mut updates,
                 Some(&Interaction {
                     state,
@@ -850,8 +944,10 @@ async fn run_input(
             json!({"session_id":sid,"resumed":resumed,"resumable":live.init["agentCapabilities"]["loadSession"]==true || live.init["agentCapabilities"]["sessionCapabilities"]["resume"].is_object(),"reply":reply,"media":reply_media(&updates,&sid),"stop_reason":result["stopReason"],"capabilities":live.init["agentCapabilities"],"updates":updates}),
         )
     };
-    let result = match tokio::time::timeout(Duration::from_secs(605), work).await {
+    let result = match tokio::time::timeout(Duration::from_secs(if inspection {30} else {605}), work).await {
         Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) if inspection && e.to_string() == "Source receipt capability unavailable" => Err(ApiError(axum::http::StatusCode::NOT_IMPLEMENTED,"This agent does not advertise the ordinary source/work receipt profile".into())),
+        Ok(Err(_)) | Err(_) if inspection => Err(ApiError(axum::http::StatusCode::BAD_GATEWAY,"Source inspection was not confirmed; original delivery and work outcomes remain unchanged".into())),
         Ok(Err(e)) if crate::acp_auth::authentication_required(&e) => {
             Err(ApiError::bad(e.to_string()))
         }

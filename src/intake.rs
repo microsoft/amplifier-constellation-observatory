@@ -78,6 +78,11 @@ pub fn submit(
         }
         return Ok(session);
     }
+    // Receipt inspection owns the connection temporarily but has no queue worker.
+    // Refuse a new input instead of accepting it into a queue nobody will drain.
+    if state.inspection_sessions.lock().unwrap().contains(room) {
+        return Err(ApiError::busy());
+    }
     let e = endpoint(&state, &session)?;
     if session["status"] == "disconnecting" {
         return Err(ApiError::busy());

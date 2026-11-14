@@ -139,6 +139,7 @@ jobs:
           node tests/desktop-browser.mjs
           node tests/desktop-update-browser.mjs
           node tests/browser.mjs
+          node tests/delayed-view-browser.mjs
           node tests/management-browser.mjs
           node tests/intake-browser.mjs
           node tests/markdown.mjs

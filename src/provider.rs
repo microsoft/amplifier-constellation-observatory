@@ -263,14 +263,14 @@ async fn request(
         req = req.json(v);
     }
     let mut response = req.send().await.map_err(|_| {
-        ApiError(
-            axum::http::StatusCode::BAD_GATEWAY,
-            if path == "service-connections" {
-                "The installation did not confirm delivery; inspect its saved request status before submitting another connection action"
-            } else {
-                "The management endpoint could not be reached with its configured trust and credentials"
-            }.into(),
-        )
+        if path == "service-connections" {
+            ApiError(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "The installation did not confirm delivery; inspect its saved request status before submitting another connection action".into(),
+            )
+        } else {
+            unconfirmed_management_response(method)
+        }
     })?;
     let status = response.status();
     let mut bytes = Vec::new();
@@ -278,14 +278,14 @@ async fn request(
         if path == "service-connections" {
             unconfirmed_connection_response()
         } else {
-            ApiError::bad("Management response interrupted")
+            unconfirmed_management_response(method)
         }
     })? {
         if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
             return Err(if path == "service-connections" {
                 unconfirmed_connection_response()
             } else {
-                ApiError::bad("Management response too large")
+                unconfirmed_management_response(method)
             });
         }
         bytes.extend_from_slice(&chunk);
@@ -322,24 +322,55 @@ async fn request(
             };
             return Err(ApiError(code, message.into()));
         }
-        return Err(ApiError(
-            if status.as_u16() == 404 {
-                axum::http::StatusCode::NOT_IMPLEMENTED
-            } else {
-                axum::http::StatusCode::BAD_GATEWAY
-            },
-            format!(
-                "Management provider returned {status}; inspect its permissions and supported features"
-            ),
-        ));
+        return Err(management_status_error(status, method));
     }
     serde_json::from_slice(&bytes).map_err(|_| {
         if path == "service-connections" {
             unconfirmed_connection_response()
         } else {
-            ApiError::bad("Management provider did not return JSON")
+            unconfirmed_management_response(method)
         }
     })
+}
+fn unconfirmed_management_response(method: &str) -> ApiError {
+    ApiError(
+        axum::http::StatusCode::BAD_GATEWAY,
+        if method == "GET" {
+            "The management response could not be confirmed; check the connection and its supported interface"
+        } else {
+            "The management operation outcome is unknown; inspect its existing status before submitting another action"
+        }
+        .into(),
+    )
+}
+fn management_status_error(status: reqwest::StatusCode, method: &str) -> ApiError {
+    use axum::http::StatusCode;
+    // Preserve a provider's explicit response without leaking its private body.
+    // A server or transport failure cannot establish whether a mutation committed.
+    let (code, message) = match status.as_u16() {
+        400 | 422 => (
+            status,
+            "The management provider declined this request; check its supported input fields",
+        ),
+        401 | 403 => (
+            StatusCode::FORBIDDEN,
+            "The installation credential does not allow this management operation",
+        ),
+        404 | 405 | 501 => (
+            StatusCode::NOT_IMPLEMENTED,
+            "This installation does not support the requested management operation",
+        ),
+        409 => (
+            StatusCode::CONFLICT,
+            "The managed resource or operation changed; read its current status before continuing",
+        ),
+        429 => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "The installation is busy; inspect its existing operation before submitting another",
+        ),
+        _ => return unconfirmed_management_response(method),
+    };
+    ApiError(code, message.into())
 }
 fn unconfirmed_connection_response() -> ApiError {
     ApiError(
@@ -579,7 +610,7 @@ pub async fn call(
 pub async fn inspect(state: &AppState, endpoint: &Value) -> ApiResult<Value> {
     if endpoint["management"].is_null() {
         return Ok(
-            json!({"endpoint_id":endpoint["id"],"observed_at":now_ms(),"management":"unsupported","health":"unknown","note":"ACP connectivity can be checked independently. This agent does not need a management provider."}),
+            json!({"endpoint_id":endpoint["id"],"endpoint_revision":endpoint["revision"],"observed_at":now_ms(),"management":"unsupported","health":"unknown","note":"ACP connectivity can be checked independently. This agent does not need a management provider."}),
         );
     }
     let descriptor = call(state, endpoint, "descriptor", None).await?;
@@ -595,6 +626,6 @@ pub async fn inspect(state: &AppState, endpoint: &Value) -> ApiResult<Value> {
         return Err(ApiError::bad("The remote installation identity changed"));
     }
     Ok(
-        json!({"id":endpoint["id"],"endpoint_id":endpoint["id"],"instance_id":actual_id,"observed_at":now_ms(),"management":"available","descriptor":descriptor,"status":status,"operations":available_operations(endpoint,&descriptor),"health":"reachable"}),
+        json!({"id":endpoint["id"],"endpoint_id":endpoint["id"],"endpoint_revision":endpoint["revision"],"instance_id":actual_id,"observed_at":now_ms(),"management":"available","descriptor":descriptor,"status":status,"operations":available_operations(endpoint,&descriptor),"health":"reachable"}),
     )
 }

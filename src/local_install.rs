@@ -163,7 +163,7 @@ pub async fn attach(state: &AppState, job: &Value) -> Result<Value> {
     let workspace = crate::instance_package::session_directory(&home)?;
     let endpoint = json!({"id":id,"label":plan["name"],"kind":"agent","host_id":host["id"],"ui_url":origin,"acp":{"transport":"stdio","command":instance_binary,"args":["acp","--home",home],"cwd":home,"session_cwd":workspace},"management":{"provider":"agent-instance","base_url":origin,"expected_id":instance_id,"ca_file":ca,"credential_ref":reference,"access":"manage"}});
     provider::validate(&endpoint)?;
-    let observed = provider::inspect(state, &endpoint).await?;
+    let mut observed = provider::inspect(state, &endpoint).await?;
     ensure!(
         observed["instance_id"] == instance_id,
         "A different agent answered"
@@ -183,6 +183,7 @@ pub async fn attach(state: &AppState, job: &Value) -> Result<Value> {
     } else {
         state.save("endpoints", endpoint, Some(0))?
     };
+    observed["endpoint_revision"] = endpoint["revision"].clone();
     state.save("observations", observed, None)?;
     state.audit(
         "installation.connected",
