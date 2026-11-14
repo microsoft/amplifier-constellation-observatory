@@ -30,7 +30,7 @@ validation. This local proof does not authorize remote clients.
 
 | Scope | Operations |
 | --- | --- |
-| `observe` | descriptor, status, endpoint/host/place inventory, inspections, relationships, experiment reports, activity |
+| `observe` | descriptor, status, endpoint/host/place inventory, management inspections, relationships, experiment reports, activity |
 | `work` | read responsibility and organization data through optional providers |
 | `work:execute` | explicitly authorize background work and change scheduler settings through optional providers |
 | `memory:read` | read attributed memory through optional providers |
@@ -84,18 +84,43 @@ from adapter to agent. An adapter entry does not automatically register its agen
 its management credentials do not confer access to the agent's ACP endpoint.
 
 Both inventory GET routes return `observation` for management and
-`acp_observation` for ACP. ACP observations persist successful handshakes or failed
-checks, their timestamp, negotiated implementation/capabilities, and the checked
-endpoint revision. After an endpoint edit, a prior ACP observation is omitted
-until that revision is checked. A failed ACP check still returns an HTTP error
-and leaves a durable failure observation. Neither check replaces the other's
-data. The dashboard checks every attached interface, includes ACP-only agents,
-and continues checking the other endpoints when one fails. Running an ACP check
-still requires `interact`; reading its recorded result requires `observe`.
+`acp_observation` for ACP. Both persist successful or failed checks with their
+timestamp and checked `endpoint_revision`. Inventory returns an observation only
+when that revision matches the saved endpoint; an older or unbound observation
+remains stored but is projected as null. An in-flight check cannot make its old
+revision current after an edit. A direct inspect response still describes the
+revision it checked, so clients must compare that field before attaching it to
+a newer local endpoint. ACP observations also retain the negotiated
+implementation/capabilities. A failed check still returns an HTTP error and
+leaves a durable failure observation. Neither check replaces the other's data.
+The dashboard checks every attached interface, includes ACP-only agents, and
+continues checking the other endpoints when one fails. Running an ACP check
+requires `interact`; reading its recorded result requires `observe`.
 
 `POST endpoints/{id}/operations/{operation}` sends a body to an explicit management mapping. The provider's registry chooses the HTTP method/path and required Observatory scope; callers cannot select an arbitrary URL. Built-in operations include `config`, `validate-config`, `apply-config`, `lifecycle`, `work`, `organization`, `profile-use`, `sessions`, `activity` and `permissions` where the particular provider implements them. Unsupported remote features return an explicit failure; they do not fall back to private files.
 
 For `generic-json`, `management.operations` contains `{id,method,path,access}`. Paths are bounded relative API paths; observe and work operations must be GET; descriptor/status always require observe access and GET. Any write also requires a management connection explicitly set to `manage`. The operator can map a different implementation's explicit interfaces while leaving ACP unchanged.
+
+Generic management responses preserve explicit outcome classes without exposing
+the provider's private error body:
+
+| Provider response | Observatory response |
+| --- | --- |
+| `400` or `422` | Same status: request refused |
+| `401` or `403` | `403`: remote credential denied |
+| `404`, `405` or `501` | `501`: operation unsupported |
+| `409` | `409`: resource or operation conflict |
+| `429` | `429`: provider busy |
+| Other failure status, transport loss, interrupted/oversized body or a successful reply with invalid JSON | `502`: response unconfirmed |
+
+For a write, an unconfirmed response means the operation outcome is unknown,
+including when the provider may already have committed it. Inspect the existing
+remote request/resource through its supported interface before deciding what to
+do next. Observatory does not resend, allocate a replacement request or turn a
+response failure into a caller-input error. A failed GET is a read-response
+failure and does not imply a mutation. Local validation failures before dispatch
+remain separate. Saved service connections retain their specialized contract
+below.
 
 ### Saved service connections
 
@@ -258,6 +283,79 @@ The client supports text, live tool/plan progress, explicit permission decisions
 `POST /api/v1/sessions/{id}/permissions/{request_id}` with `{"option_id":"offered-option-id"}` returns that exact agent-offered choice. Use `{"option_id":null}` to cancel the request. Requests expire within three minutes, are bound to this conversation and the user/credential that started the turn, and are single use. Other actors cannot see or answer them. Expiry, disconnection, cancellation and restart never grant permission. Audit entries omit tool arguments and option text. An `allow_always` choice is explicitly labelled in the UI and delegates that remembered policy to the agent; the client does not silently choose it.
 
 `POST /api/v1/sessions/{id}/cancel` stops a turn started by the same actor. Both decision and cancellation require `interact` and the normal CSRF protection for browser sessions. API automation uses its own credential identity; a different credential does not inherit a human's pending decisions. View commands can set `permission_details` to a pending request UUID (or null) to show/hide action details, and `focus` can target `permission-<UUID>-details`, `permission-<UUID>-option-<index>`, or `permission-<UUID>-cancel` to focus the displayed controls. Generic ACP negotiation is unchanged.
+
+### Optional ordinary-input source and work inspection
+
+`POST /api/v1/sessions/{id}/inputs/{request}/inspect` inspects the original saved
+user input, where `{request}` is its `request_id`. It requires `interact`, the
+original input actor and normal browser CSRF protection. This is an explicit
+read-only query; it does not submit a prompt, acknowledge uncertain input,
+resume the queue, create work or settle an external effect.
+
+The agent must have negotiated this optional profile under initialize result
+`_meta["io.github.bkrabach.agent-instance"].inputContinuity.sourceDelivery`:
+
+```json
+{
+  "version": 1,
+  "metadata": "com.microsoft.amplifier.source-delivery",
+  "receiptsMethod": "_amplifier/source_receipts",
+  "ordinaryPrompts": true,
+  "promptRetry": "inspectOnly",
+  "workReferences": true
+}
+```
+
+When all these fields match, Observatory saves one source binding before sending
+the ordinary prompt. Metadata carries the original stable input ID and source
+`{id,revision,occurredAt}`; source ID is the saved conversation/message position,
+revision is `"1"` for that immutable input, and `occurredAt` is its original
+millisecond timestamp. Agents without this profile receive no added metadata or
+receipt calls. Inputs saved without this negotiated binding cannot acquire one through
+inspection. The agent-owned [source-delivery profile](https://github.com/microsoft/amplifier-constellation-instance/blob/main/docs/harness.md#source-delivery-facts)
+defines remote retention and work-reference coverage.
+
+Inspection requires the same saved endpoint revision and remote ACP session.
+It reuses that live connection or restores only that session through advertised
+resume/load support. Read-only restoration does not run interactive
+authentication, grant permission, send `session/cancel` or create a replacement
+session. If access or restoration cannot be confirmed, the query fails without
+changing the original input outcome. The query is bounded to 30 seconds and
+never resends the original prompt. A changed endpoint/session or an active
+conversation returns `409`; a different actor is denied. While inspection owns
+the connection, a new input is refused with `409` before local acceptance. An
+exact duplicate input still returns its original record. Normal acceptance can
+continue after inspection releases the connection.
+
+A successful response is also saved on that message as `source_observation`.
+It binds `request_id`, local `session_id`, remote `acp_session_id` and the exact
+`source`, with these evidence fields:
+
+| Field | Meaning |
+| --- | --- |
+| `observed_at` | Observatory's local query-observation time in milliseconds |
+| `receipt.observedAt` | Agent-reported delivery observation time, or null when unavailable; never replaced by the local time |
+| `receipt` | The checked remote receipt, or null when the response has no matching retained row |
+| `receipt.work` | Up to 64 reported work references: ID, owner agent, revision, state and input ID |
+| `receipt.workCoverage` | `partial` or `retained_session_records` |
+| `coverage` | `delivery:"recent_session_records"`, `work:"retained_session_records"`, `missing:"unknown"` |
+| `transport_outcome` | `"unchanged"`: inspection does not rewrite the original prompt's transport outcome |
+| `work_authority` | `"remote_owner"`: work remains owned and controlled by the agent |
+
+Null receipt, absent delivery evidence, an empty work list and partial coverage
+do not establish that no work or effect exists. A receipt can retain work
+references after delivery evidence expires. `incorporated:true` concerns model
+context only, and `completion:"not_established"` remains explicit. A referenced
+work state is a saved observation; use the owner's existing authorized work
+controls for current status or changes. Malformed, unavailable or timed-out
+inspection leaves the original delivery and any prior observation unchanged.
+No observation authorizes replay or automatically runs input recovery.
+
+Saved source observations remain visible only to the original input actor in
+session responses. The [conversation context interface](conversation-context.md)
+omits these private observations and work references; its endpoint-scoped grant
+does not inherit the input actor's receipt access. It exposes the documented
+transcript and intake facts without performing a fresh receipt query.
 
 ## Machines and installers
 
@@ -484,6 +582,13 @@ explicit connection workflow.
 ```
 
 Other fields are `session_id`, `filter`, `modal`, `draft`, `focus`, and `scroll:{x,y}`. The browser acknowledges the rendered revision with `{revision}`. Stale mutations return 409. A selected conversation must belong to the selected endpoint; contradictory commands fail atomically. Selecting another endpoint clears the previous conversation unless a matching conversation is explicitly supplied. Installation results can be opened with `modal: "job"` and `draft: {job_id}`. View acknowledgments and ordinary navigation are not activity events. Passwords and credential values are never form draft fields.
+
+The reference browser binds delayed draft, filter, focus and scroll saves to the
+view revision and selection where the edit occurred. A changed view discards
+that delayed save; a server conflict refreshes the view without replaying the
+old edit against its new revision. A later deliberate edit uses the current
+view. This protects a newer selection or another controller's changes from a
+timer belonging to a previous screen.
 
 Set `screen: "world"` for the systems map. Its top-level `world` field stores the
 layout and navigation; the selected agent still uses `selected_id`:

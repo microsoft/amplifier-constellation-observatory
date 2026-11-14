@@ -592,7 +592,7 @@ async fn acp_health_persists_failure_without_overwriting_management_or_trusting_
     let management = s
         .save(
             "observations",
-            json!({"id":id,"health":"reachable","status":{"private_provider_field":"preserved"}}),
+            json!({"id":id,"endpoint_revision":e["revision"],"health":"reachable","status":{"private_provider_field":"preserved"}}),
             None,
         )
         .unwrap();
@@ -655,10 +655,12 @@ async fn acp_health_persists_failure_without_overwriting_management_or_trusting_
             .unwrap()
             .contains("ACP connection failed")
     );
-    assert_eq!(failed["observation"], management);
+    assert!(failed["observation"].is_null());
+    assert_eq!(s.read("observations", id).unwrap(), management);
     assert!(failed["acp_observation"]["capabilities"].is_null());
     // Persisted observations remain useful after the web process exits.
     let reopened = AppState::open(d.path().to_owned()).unwrap();
+    assert_eq!(reopened.read("observations", id).unwrap(), management);
     assert_eq!(
         reopened.read("acp_observations", id).unwrap(),
         failed["acp_observation"]

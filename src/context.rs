@@ -87,7 +87,7 @@ pub async fn query(
             let complete = rows.len() <= limit;
             let items: Vec<_> = rows.into_iter().take(limit).map(|s| {
                 let id = s["id"].as_str().unwrap_or_default();
-                json!({"id":id,"conversation_id":id,"label":s["title"],"surface":"observatory","updated_at":s["updated_at"],"url":source_url(&state,&endpoint_id,id),"coverage":"Messages exchanged with this agent through Observatory Talk"})
+                json!({"id":id,"conversation_id":id,"endpoint_id":endpoint_id,"revision":s["revision"],"label":s["title"],"surface":"observatory","updated_at":s["updated_at"],"url":source_url(&state,&endpoint_id,id),"coverage":"Messages exchanged with this agent through Observatory Talk"})
             }).collect();
             json!({"items":items,"complete":complete})
         }
@@ -124,10 +124,30 @@ pub async fn query(
                 let truncated = bytes < text.len();
                 complete &= !truncated;
                 budget -= bytes;
-                messages.push(json!({"id":format!("{id}:{index}"),"actor":if m["role"]=="user"{json!(state.config.owner)}else{endpoint["label"].clone()},"role":m["role"],"text":&text[..bytes],"truncated":truncated,"at":m["at"],"url":source_url(&state,&endpoint_id,&id)}));
+                // A role or display name cannot recover an unrecorded author.
+                // Keep legacy attribution unknown and the endpoint label separate.
+                let actor = m["actor"].as_str().filter(|actor| !actor.is_empty());
+                let mut message = json!({"id":format!("{id}:{index}"),"actor":actor,"role":m["role"],"text":&text[..bytes],"truncated":truncated,"at":m["at"],"url":source_url(&state,&endpoint_id,&id)});
+                if m["role"] == "assistant" {
+                    message["actor_label"] = endpoint["label"].clone();
+                }
+                // These are source intake facts, not accepted-work identities or
+                // proof of external effects. Do not project private record fields.
+                for key in ["request_id", "delivery"] {
+                    if let Some(value) = m[key].as_str() {
+                        message[key] = json!(value);
+                    }
+                }
+                if let Some(sequence) = m["sequence"].as_u64() {
+                    message["sequence"] = json!(sequence);
+                }
+                if let Some(acknowledged) = m["acknowledged"].as_bool() {
+                    message["acknowledged"] = json!(acknowledged);
+                }
+                messages.push(message);
             }
             messages.reverse();
-            json!({"conversation_id":id,"label":session["title"],"surface":"observatory","messages":messages,"complete":complete,"url":source_url(&state,&endpoint_id,&id),"coverage":"Saved messages in this fleet conversation; backend-only working history is not included"})
+            json!({"conversation_id":id,"endpoint_id":endpoint_id,"revision":session["revision"],"label":session["title"],"surface":"observatory","messages":messages,"complete":complete,"url":source_url(&state,&endpoint_id,&id),"coverage":"Saved messages in this fleet conversation; backend-only working history is not included"})
         }
         _ => {
             return Err(ApiError::bad(

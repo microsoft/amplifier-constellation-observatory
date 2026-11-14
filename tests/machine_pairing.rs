@@ -1092,6 +1092,11 @@ async fn paired_install_verifies_tls_identity_then_attaches_once_and_preserves_s
     assert_eq!(state.list("endpoints").unwrap().len(), 1);
     let endpoint = state.read("endpoints", job_id).unwrap();
     assert_eq!(
+        state.read("observations", job_id).unwrap()["endpoint_revision"],
+        endpoint["revision"],
+        "the verified attachment must record its saved endpoint revision"
+    );
+    assert_eq!(
         endpoint["management"]["expected_id"],
         instance_id.to_string()
     );
@@ -1111,6 +1116,7 @@ async fn paired_install_verifies_tls_identity_then_attaches_once_and_preserves_s
         .await
         .unwrap();
     assert_eq!(observed["health"], "reachable");
+    assert_eq!(observed["endpoint_revision"], endpoint["revision"]);
     assert_eq!(observed["status"]["model_access"], "not_configured");
     assert_eq!(
         request(

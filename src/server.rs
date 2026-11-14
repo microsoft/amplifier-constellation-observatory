@@ -88,6 +88,10 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/endpoints/{id}/acp-sessions", post(agent_sessions))
         .route("/api/v1/sessions/{id}/prompt", post(prompt))
         .route("/api/v1/sessions/{id}/inputs/resume", post(resume_inputs))
+        .route(
+            "/api/v1/sessions/{id}/inputs/{request}/inspect",
+            post(crate::source_input::inspect),
+        )
         .route("/api/v1/sessions/{id}/close", post(close_session))
         .route(
             "/api/v1/sessions/{id}/elicitations/{request}",
@@ -370,7 +374,11 @@ fn with_observations(s: &AppState, mut e: Value) -> Value {
     } else {
         Value::Null
     };
-    e["observation"] = management;
+    e["observation"] = if management["endpoint_revision"] == e["revision"] {
+        management
+    } else {
+        Value::Null
+    };
     e
 }
 async fn endpoint(
@@ -443,7 +451,7 @@ async fn inspect(
             value
         }
         Err(err) => {
-            json!({"id":id,"endpoint_id":id,"observed_at":now_ms(),"health":"unavailable","error":err.1})
+            json!({"id":id,"endpoint_id":id,"endpoint_revision":e["revision"],"observed_at":now_ms(),"health":"unavailable","error":err.1})
         }
     };
     s.save("observations", value.clone(), None)?;
@@ -769,8 +777,13 @@ async fn agent_sessions(
     Ok(Json(result))
 }
 async fn sessions(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
-    auth::check(&s, &h, "interact", false)?;
-    Ok(Json(json!({"sessions":s.list("sessions")?})))
+    let p = auth::check(&s, &h, "interact", false)?;
+    let records: Vec<_> = s
+        .list("sessions")?
+        .into_iter()
+        .map(|record| crate::source_input::project(record, &p.actor))
+        .collect();
+    Ok(Json(json!({"sessions":records})))
 }
 async fn session(
     State(s): State<Arc<AppState>>,
@@ -791,7 +804,7 @@ async fn session(
             .get(&id)
             .is_some_and(|(actor, _)| actor == &p.actor)
     );
-    Ok(Json(record))
+    Ok(Json(crate::source_input::project(record, &p.actor)))
 }
 async fn new_session(
     State(s): State<Arc<AppState>>,
@@ -812,7 +825,7 @@ async fn close_session(
     h: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    auth::check(&s, &h, "interact", true)?;
+    let p = auth::check(&s, &h, "interact", true)?;
     {
         let _gate = s.talk_gate.lock().unwrap();
         if crate::desktop_update::busy(&s) {
@@ -836,7 +849,7 @@ async fn close_session(
     session["status"] = json!("disconnected");
     let v = s.save("sessions", session.clone(), session["revision"].as_u64())?;
     closed?;
-    Ok(Json(v))
+    Ok(Json(crate::source_input::project(v, &p.actor)))
 }
 async fn decide_elicitation(
     State(s): State<Arc<AppState>>,
@@ -902,7 +915,10 @@ async fn prompt(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let p = auth::check(&s, &h, "interact", true)?;
-    Ok(Json(crate::intake::submit(s, &id, &p, &body)?))
+    Ok(Json(crate::source_input::project(
+        crate::intake::submit(s, &id, &p, &body)?,
+        &p.actor,
+    )))
 }
 async fn resume_inputs(
     State(s): State<Arc<AppState>>,
@@ -911,12 +927,10 @@ async fn resume_inputs(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let p = auth::check(&s, &h, "interact", true)?;
-    Ok(Json(crate::intake::resume(
-        s,
-        &id,
+    Ok(Json(crate::source_input::project(
+        crate::intake::resume(s, &id, &p.actor, body["acknowledge_unknown"] == true)?,
         &p.actor,
-        body["acknowledge_unknown"] == true,
-    )?))
+    )))
 }
 
 fn link_body(s: &AppState, b: &Value) -> ApiResult<Value> {

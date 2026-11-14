@@ -24,5 +24,6 @@ mod process_tree;
 pub mod provider;
 pub mod provision;
 pub mod server;
+mod source_input;
 pub mod state;
 pub mod views;

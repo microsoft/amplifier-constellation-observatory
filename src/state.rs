@@ -33,6 +33,7 @@ pub struct AppState {
     pub progress: Mutex<HashMap<String, Value>>,
     pub cancellations: Mutex<HashMap<String, (String, tokio::sync::watch::Sender<bool>)>>,
     pub active_sessions: Mutex<HashSet<String>>,
+    pub inspection_sessions: Mutex<HashSet<String>>,
     /// Serializes durable Talk intake, receipts and finalization; never held across await.
     pub talk_gate: Mutex<()>,
     pub talk_inputs: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
@@ -125,6 +126,7 @@ CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGE
             progress: Mutex::new(HashMap::new()),
             cancellations: Mutex::new(HashMap::new()),
             active_sessions: Mutex::new(HashSet::new()),
+            inspection_sessions: Mutex::new(HashSet::new()),
             talk_gate: Mutex::new(()),
             talk_inputs: Mutex::new(HashMap::new()),
             provision_gate: Mutex::new(()),
