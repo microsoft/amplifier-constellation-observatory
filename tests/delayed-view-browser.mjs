@@ -33,6 +33,10 @@ try {
   await api('credentials',{name:'fixture-management',value:'fixture-only'});
   const endpoint=await api('endpoints',{label:'Fixture agent',kind:'agent',management:{provider:'agent-instance',base_url:'https://fixture.invalid',access:'manage',credential_ref:'fixture-management',expected_id:'fixture-agent'}});
   const other=await api('endpoints',{label:'Other fixture agent',kind:'agent',ui_url:'https://other-fixture.invalid'});
+  // Saved fixture hosts exercise form selection only; no recipe or installation
+  // operation is invoked by this suite.
+  const hostA=await api('hosts',{label:'Fixture host A',transport:'local',install_roots:[path.join(home,'host-a')],recipes:[{id:'fixture',version:'1',argv:[process.execPath,'--version']}]});
+  const hostB=await api('hosts',{label:'Fixture host B',transport:'local',install_roots:[path.join(home,'host-b')],recipes:[{id:'fixture',version:'1',argv:[process.execPath,'--version']}]});
   const commands=patch=>Object.entries(patch).map(([field,value])=>({op:'set',field,value}));
   async function change(id,patch){const current=await api('views/'+id,undefined,'GET');return api(`views/${id}/commands`,{expected_revision:current.revision,controller:'fixture-peer',commands:commands(patch)});}
 
@@ -40,7 +44,7 @@ try {
     const context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1450,height:1000}});
     const created=await api('views',{}),saved=await change(created.id,initial);
     await context.addCookies([{name:'obs_'+config.id.replaceAll('-',''),value:cookie,url:base,secure:true,httpOnly:true,sameSite:'Strict'}]);
-    const page=await context.newPage(),posts=[],effects=[];
+    const page=await context.newPage(),posts=[],effects=[],observations=[];
     page.on('pageerror',e=>errors.push(e.message));
     page.on('request',request=>{
       if(request.method()!=='POST')return;
@@ -68,11 +72,11 @@ try {
         const ack=page.waitForRequest(r=>r.url()===`${base}/api/v1/views/${created.id}/ack`&&r.postDataJSON()?.revision===updated.revision);
         await page.clock.runFor(20);await ack;
       };
-      await exercise({page,posts,read,peer,poll,id:created.id});
+      await exercise({page,posts,read,peer,poll,id:created.id,observations});
       assert.deepEqual(effects,[],'view edits must not dispatch business effects');
-      results.push({name,status:'passed',view_requests:posts.map(body=>({expected_revision:body.expected_revision,fields:body.commands.map(command=>command.field)})),effects});console.log('PASS '+name);
+      results.push({name,status:'passed',view_requests:posts.map(body=>({expected_revision:body.expected_revision,fields:body.commands.map(command=>command.field)})),effects,...(observations.length?{observations}:{})});console.log('PASS '+name);
     } catch(error) {
-      results.push({name,status:'failed',error:error.message,view_requests:posts.map(body=>({expected_revision:body.expected_revision,fields:body.commands.map(command=>command.field)})),effects});console.error('FAIL '+name+': '+error.message);
+      results.push({name,status:'failed',error:error.message,view_requests:posts.map(body=>({expected_revision:body.expected_revision,fields:body.commands.map(command=>command.field)})),effects,...(observations.length?{observations}:{})});console.error('FAIL '+name+': '+error.message);
     } finally {await context.close();}
   }
 
@@ -158,6 +162,125 @@ try {
         else assert.equal(draftPosts.length,1,'one substantive request, never replay');
         if(draftPosts.length)assert.equal(draftPosts[0].expected_revision,heldResponse.revision,'only the exact acknowledged local scroll transition may be crossed');
         if(peerChange)assert.equal(saved.revision,updated.revision);
+      }finally{release();}
+    });
+
+  for(const edit of [
+    {name:'draft',initial:{screen:'agents',modal:'connect',draft:{label:'Initial',command:'keep-this-command'}},selector:'#f-label',field:'draft',delay:250,saved:v=>v.draft.label,value:letter=>`${letter} local draft`},
+    {name:'draft with peer conflict',initial:{screen:'agents',modal:'connect',draft:{label:'Initial',command:'keep-this-command'}},selector:'#f-label',field:'draft',delay:250,saved:v=>v.draft.label,value:letter=>`${letter} local draft`,peerChange:true},
+    {name:'configuration',initial:{screen:'agents',selected_id:endpoint.id,tab:'configuration',draft:{command:'keep-this-command'}},selector:'#f-configuration',field:'draft',delay:300,saved:v=>v.draft.configuration,value:letter=>`{"label":"${letter} local configuration"}`,prepare:async page=>{await page.getByRole('button',{name:'Load configuration',exact:true}).click();await page.getByLabel('Configuration JSON',{exact:true}).waitFor();}},
+    {name:'filter',initial:{screen:'agents',filter:'',focus:null,draft:{command:'keep-this-command'}},selector:'#search',field:'filter',delay:350,saved:v=>v.filter,value:letter=>letter==='A'?'Fixture agent':'Other fixture agent'},
+    {name:'latest draft after two queued edits',initial:{screen:'agents',modal:'connect',draft:{label:'Initial',command:'keep-this-command'}},selector:'#f-label',field:'draft',delay:250,saved:v=>v.draft.label,value:letter=>`${letter} local draft`,third:true},
+  ])await scenario(`A later ${edit.name} survives an earlier in-flight save without crossing remote changes`,edit.initial,
+    async({page,posts,read,peer,id,observations})=>{
+      if(edit.prepare)await edit.prepare(page);
+      let heldResponse=null,holding=false,release;
+      const released=new Promise(resolve=>{release=resolve;});
+      const matching=()=>posts.filter(body=>body.commands.some(command=>command.field===edit.field));
+      await page.route(`**/api/v1/views/${id}/commands`,async route=>{
+        const body=route.request().postDataJSON();
+        if(!holding&&body.commands.some(command=>command.field===edit.field)){
+          holding=true;
+          const response=await route.fetch();
+          heldResponse=await response.json();
+          observations.push({phase:'A committed; response held',revision:heldResponse.revision,value:edit.saved(heldResponse),response_status:response.status()});
+          await released;
+          await route.fulfill({response});
+        }else await route.continue();
+      });
+      const input=async letter=>page.evaluate(({selector,value})=>{const element=document.querySelector(selector);element.value=value;element.dispatchEvent(new Event('input',{bubbles:true}));},{selector:edit.selector,value:edit.value(letter)});
+      try{
+        await input('A');
+        await page.clock.runFor(edit.delay+50);
+        await until(async()=>heldResponse!==null,'first substantive save committed before reply');
+        assert.equal(edit.saved(await read()),edit.value('A'));
+        await input('B');
+        await page.clock.runFor(edit.delay+50);
+        assert.equal(matching().length,1,'later draft is queued behind the response-held action');
+        observations.push({phase:'B timer elapsed while A response held',request_count:matching().length,dom:await page.locator(edit.selector).inputValue()});
+        if(edit.third){
+          await input('C');
+          await page.clock.runFor(edit.delay+50);
+          assert.equal(matching().length,1,'newest draft also waits behind the same held action');
+          observations.push({phase:'C newer while B queued and A response held',request_count:matching().length,dom:await page.locator(edit.selector).inputValue()});
+        }
+        const updated=edit.peerChange?await peer({draft:{label:'Newer peer draft',command:'keep-this-command'}}):null;
+        if(updated)observations.push({phase:'peer advanced after A commit',revision:updated.revision,value:edit.saved(updated)});
+        release();
+        const expected=edit.peerChange?'Newer peer draft':edit.value(edit.third?'C':'B');
+        await until(async()=>edit.saved(await read())===expected||(await page.locator('#toast').textContent()).includes('changed'),'substantive save disposition');
+        await page.clock.runFor(500);
+        const saved=await read(),requests=matching();
+        observations.push({phase:'final disposition',revision:saved.revision,value:edit.saved(saved),dom:await page.locator(edit.selector).inputValue(),toast:await page.locator('#toast').textContent(),requests});
+        assert.equal(edit.saved(saved),expected,'latest local intent must survive its own prior successful save, while remote intent remains protected');
+        assert.equal(saved.draft.command,'keep-this-command');
+        if(edit.peerChange){
+          assert.equal(saved.revision,updated.revision);
+          assert(requests.length<=2,'one original save plus at most one refused successor, never replay');
+          if(requests.length===2)assert.equal(requests[1].expected_revision,heldResponse.revision);
+        }else{
+          const values=requests.map(body=>{const command=body.commands.find(c=>c.field===edit.field);return edit.field==='filter'?command.value:edit.selector==='#f-configuration'?command.value.configuration:command.value.label;});
+          assert.equal(values.filter(v=>v===edit.value('A')).length,1);
+          assert.equal(values.filter(v=>v===expected).length,1);
+          assert.equal(new Set(values).size,values.length,'never replay an already submitted local value');
+          assert(requests.length<=(edit.third?3:2));
+          assert.equal(await page.locator(edit.selector).inputValue(),expected);
+          if(edit.name==='filter'){
+            await until(async()=>page.evaluate(()=>document.activeElement?.id==='search'),'latest filter redraw restores focus');
+            assert.equal(saved.focus,'search');
+            assert.equal(await page.getByRole('heading',{name:'Other fixture agent',exact:true}).count(),1);
+            assert.equal(await page.getByRole('heading',{name:'Fixture agent',exact:true}).count(),0);
+          }
+        }
+      }finally{release();}
+    });
+
+  await scenario('The default installation host permits later edits on the same form',
+    {screen:'hosts',modal:'install',draft:{}},
+    async({page,posts,read})=>{
+      const host=await page.getByLabel('Machine',{exact:true}).inputValue();
+      assert([hostA.id,hostB.id].includes(host));
+      for(const name of ['First local name','Later local name']){
+        await page.getByLabel('Agent name',{exact:true}).fill(name);
+        await page.clock.runFor(300);
+        await until(async()=>(await read()).draft.name===name||(await page.locator('#toast').textContent()).includes('changed'),'same effective host draft save');
+        const saved=await read();
+        assert.equal(saved.draft.name,name);
+        assert.equal(saved.draft.host_id,host);
+      }
+      assert.equal(posts.filter(body=>body.commands.some(command=>command.field==='draft')).length,2);
+    });
+
+  await scenario('A changed installation host acknowledgment refuses queued old-form input',
+    {screen:'hosts',modal:'install',draft:{host_id:hostA.id,name:'Original name'}},
+    async({page,posts,read,id,observations})=>{
+      let heldResponse=null,release;
+      const released=new Promise(resolve=>{release=resolve;});
+      await page.route(`**/api/v1/views/${id}/commands`,async route=>{
+        const body=route.request().postDataJSON();
+        if(!heldResponse&&body.commands.some(command=>command.field==='draft'&&command.value.host_id===hostB.id)){
+          const response=await route.fetch();heldResponse=await response.json();
+          observations.push({phase:'changed host committed; reply held',revision:heldResponse.revision,host:heldResponse.draft.host_id,name:heldResponse.draft.name});
+          await released;await route.fulfill({response});
+        }else await route.continue();
+      });
+      try{
+        await page.getByLabel('Machine',{exact:true}).selectOption(hostB.id);
+        await page.clock.runFor(20);
+        await until(async()=>heldResponse!==null,'changed host response held');
+        await page.evaluate(()=>{const input=document.querySelector('#f-name');input.value='Old host form edit';input.dispatchEvent(new Event('input',{bubbles:true}));});
+        await page.clock.runFor(300);
+        assert.equal(posts.length,1,'old form edit waits behind host change acknowledgment');
+        release();
+        await until(async()=>(await page.locator('#toast').textContent()).includes('changed'),'old host form refusal');
+        const saved=await read();
+        observations.push({phase:'final host disposition',revision:saved.revision,host:saved.draft.host_id,name:saved.draft.name,request_count:posts.length});
+        assert.equal(saved.draft.host_id,hostB.id);
+        assert.equal(saved.draft.name,'Original name');
+        assert.equal(saved.revision,heldResponse.revision);
+        assert.equal(await page.getByLabel('Machine',{exact:true}).inputValue(),hostB.id);
+        assert.equal(await page.getByLabel('Agent name',{exact:true}).inputValue(),'Original name');
+        assert.equal(posts.length,1,'never write old-form contents across a changed installation target');
       }finally{release();}
     });
 
