@@ -590,6 +590,11 @@ old edit against its new revision. A later deliberate edit uses the current
 view. This protects a newer selection or another controller's changes from a
 timer belonging to a previous screen.
 
+An automatic scroll save yields to a later draft or filter edit. If that scroll
+write was already sent, only its exact successful revision transition may
+advance the same rendered edit binding; the captured edit values stay unchanged.
+This does not adopt another controller's revision or retry a conflicted write.
+
 Set `screen: "world"` for the systems map. Its top-level `world` field stores the
 layout and navigation; the selected agent still uses `selected_id`:
 

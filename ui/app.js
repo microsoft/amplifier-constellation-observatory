@@ -138,19 +138,31 @@ function modal(){if(!view.modal)return '';const d=view.draft||{};let name='',bod
  return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${esc(name)}</h2><button class="quiet" data-action="close" aria-label="Close">✕</button></div><form id="modal-form">${body}<div class="actions">${submit?`<button class="primary">${submit}</button>`:''}<button type="button" data-action="close">${submit?'Cancel':'Close'}</button></div></form></section></div>`;}
 async function render(){document.title="Agent Observatory";if(!auth.authenticated)return login();if(view.selected_id&&!endpoint())await load();await syncSession();await loadOptionalView();await loadAgentHistory();await loadExperimentTranscript();if(view.modal==='job'&&remote?.job?.id!==view.draft.job_id)await loadJob(view.draft.job_id);const selected=endpoint();document.title=selected&&['agents','work'].includes(view.screen)?`${selected.label}: Agent Observatory`:'Agent Observatory';const content=({agents,connections,hosts,work,experiments,activity,settings}[view.screen]||agents)();renderedView=viewOrigin();$('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand"><span class="mark">a·</span><span>Agent Observatory<br><small>INDEPENDENT BY DESIGN</small></span></div><nav class="nav">${Object.entries(screens).map(([id,label])=>`<button class="${view.screen===id?'active':''}" data-nav="${id}">${label}</button>`).join('')}</nav><footer><small>Connected as ${esc(auth.owner)}</small><small id="view-label">View ${esc(view.id.slice(0,8))} · ${view.revision}</small><button class="quiet" data-action="logout">Sign out</button></footer></aside><div class="content"><header class="topbar"><span>${esc(title())}</span><small>View ${view.id.slice(0,8)} · ${esc(view.controller)}</small></header><main class="main">${content}</main></div></div>${modal()}`;bind();if(view.focus){const el=document.getElementById(view.focus);el?.focus({preventScroll:true});}if(view.scroll)window.scrollTo(view.scroll.x,view.scroll.y);await api(`views/${view.id}/ack`,'POST',{revision:view.revision});}
 function login(){ $('#app').innerHTML=`<main class="login panel"><div class="brand"><span class="mark">a·</span><span>Agent Observatory</span></div><h1>Your agents, together.</h1><p class="muted">Sign in with the account on this machine.</p><form id="login-form">${field('Username','username',auth.owner||'')}${field('Password','password','','password')}<button class="primary">Sign in</button><p id="login-error" class="error" hidden></p></form></main>`;$('#login-form').onsubmit=async e=>{e.preventDefault();try{auth=await api('/auth/login','POST',Object.fromEntries(new FormData(e.target)));await ready();}catch(err){$('#login-error').hidden=false;$('#login-error').textContent=err.message;}};}
-let draftTimer,filterTimer,scrollTimer,renderedView=null;
+let draftTimer,filterTimer,scrollTimer,scrollGeneration=0,renderedView=null;
+const localScrollTransitions=new WeakMap();
 function viewOrigin(){return Object.fromEntries(['id','revision','screen','selected_id','session_id','tab','modal'].map(key=>[key,view[key]]));}
 function deferViewCommand(patch,delay,redraw=false,binding=renderedView){
+ const scrollOnly=Object.keys(patch).every(field=>field==='scroll');
+ const generation=++scrollGeneration;
+ // A later edit supersedes an older automatic scroll save, including one
+ // already queued behind an action. It must not invalidate the user's draft.
+ if(!scrollOnly)clearTimeout(scrollTimer);
  const origin={...binding};
  const captured=structuredClone(patch);
  return setTimeout(()=>act(async()=>{
+  if(scrollOnly&&generation!==scrollGeneration)return;
   // A poll or another control may replace the DOM before this edit is saved.
-  // Keep its original revision instead of treating old input as a new intent.
-  if(!view||!binding||binding!==renderedView||Object.entries(origin).some(([key,value])=>view[key]!==value)){
+  // Only our acknowledged scroll-only write can advance this same rendered
+  // binding without changing the edit's fields. Never adopt another revision.
+  const scroll=localScrollTransitions.get(binding);
+  const ownScroll=!scrollOnly&&scroll?.from===origin.revision&&scroll.to===view?.revision;
+  if(!view||!binding||binding!==renderedView||Object.entries(origin).some(([key,value])=>view[key]!==value&&!(key==='revision'&&ownScroll))){
    if(view)await render();
    throw Error('This view changed before your edit was saved. Review the current view and try the edit again.');
   }
+  const before=view.revision;
   await cmd(captured,redraw);
+  if(scrollOnly&&binding===renderedView&&view.revision===before+1)localScrollTransitions.set(binding,{from:before,to:view.revision});
   if(binding===renderedView)binding.revision=view.revision;
  }),delay);
 }

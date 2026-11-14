@@ -68,7 +68,7 @@ try {
         const ack=page.waitForRequest(r=>r.url()===`${base}/api/v1/views/${created.id}/ack`&&r.postDataJSON()?.revision===updated.revision);
         await page.clock.runFor(20);await ack;
       };
-      await exercise({page,posts,read,peer,poll});
+      await exercise({page,posts,read,peer,poll,id:created.id});
       assert.deepEqual(effects,[],'view edits must not dispatch business effects');
       results.push({name,status:'passed',view_requests:posts.map(body=>({expected_revision:body.expected_revision,fields:body.commands.map(command=>command.field)})),effects});console.log('PASS '+name);
     } catch(error) {
@@ -87,6 +87,78 @@ try {
       await page.clock.runFor(300);
       await until(async()=>(await read()).draft.label==='Second local edit','same form after its own saved edit');
       assert.equal((await read()).draft.command,'keep-this-command');
+    });
+
+  for(const edit of [
+    {name:'draft',initial:{screen:'agents',modal:'connect',draft:{label:'Initial',command:'keep-this-command'}},selector:'#f-label',value:'Local edit after scroll',field:'draft',saved:v=>v.draft.label},
+    {name:'configuration',initial:{screen:'agents',selected_id:endpoint.id,tab:'configuration',draft:{}},selector:'#f-configuration',value:'{"label":"local after scroll"}',field:'draft',saved:v=>v.draft.configuration,prepare:async page=>{await page.getByRole('button',{name:'Load configuration',exact:true}).click();await page.getByLabel('Configuration JSON',{exact:true}).waitFor();}},
+    {name:'filter',initial:{screen:'agents',filter:'',focus:null},selector:'#search',value:'Local search after scroll',field:'filter',saved:v=>v.filter},
+  ])await scenario(`An older automatic scroll does not discard a later ${edit.name} edit`,edit.initial,
+    async({page,posts,read})=>{
+      if(edit.prepare)await edit.prepare(page);
+      // Real scrolling schedules its normal 400ms save. A later substantive
+      // edit must not lose its 250/300/350ms save to that earlier timer.
+      await page.evaluate(()=>{window.fixtureScrollObserved=false;window.addEventListener('scroll',()=>{window.fixtureScrollObserved=true;},{once:true});document.body.style.minHeight='3000px';window.scrollTo(0,100);});
+      await page.clock.runFor(20);
+      await until(async()=>page.evaluate(()=>window.fixtureScrollObserved),'real scroll event before later input');
+      assert.equal(await page.evaluate(()=>window.scrollY),100);
+      await page.clock.runFor(200);
+      assert.equal(posts.filter(body=>body.commands.some(command=>command.field==='scroll')).length,0,'scroll save must still be pending when the later edit begins');
+      // Avoid Playwright's automatic scrolling changing the chosen ordering;
+      // dispatch through the real element's ordinary input handler instead.
+      await page.evaluate(({selector,value})=>{const input=document.querySelector(selector);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));},{selector:edit.selector,value:edit.value});
+      await page.clock.runFor(200);
+      if(posts.some(body=>body.commands.some(command=>command.field==='scroll'))){
+        await until(async()=>(await read()).scroll?.y===100,'earlier scroll completion');
+      }
+      await page.clock.runFor(200);
+      await until(async()=>edit.saved(await read())===edit.value||(await page.locator('#toast').textContent()).includes('changed'),`${edit.name} disposition`);
+      const saved=await read();
+      assert.equal(edit.saved(saved),edit.value,'automatic same-view scrolling must not invalidate a later substantive edit');
+      assert.equal(posts.filter(body=>body.commands.some(command=>command.field==='scroll')).length,0,'the superseded automatic scroll must not write after the later edit');
+      assert.equal(posts.filter(body=>body.commands.some(command=>command.field===edit.field)).length,1);
+      if(edit.name==='draft')assert.equal(saved.draft.command,'keep-this-command');
+      if(edit.name==='filter')assert.equal(saved.focus,'search');
+    });
+
+  for(const peerChange of [false,true])await scenario(
+    peerChange?'An in-flight local scroll never upgrades a later draft past a peer edit':'A later draft survives its own in-flight scroll acknowledgment',
+    {screen:'agents',modal:'connect',draft:{label:'Initial',command:'keep-this-command'}},
+    async({page,posts,read,peer,id})=>{
+      let heldResponse=null,release;
+      const released=new Promise(resolve=>{release=resolve;});
+      await page.route(`**/api/v1/views/${id}/commands`,async route=>{
+        const body=route.request().postDataJSON();
+        if(!heldResponse&&body.commands.length===1&&body.commands[0].field==='scroll'){
+          const response=await route.fetch();
+          heldResponse=await response.json();
+          await released;
+          await route.fulfill({response});
+        }else await route.continue();
+      });
+      try{
+        await page.evaluate(()=>{window.fixtureScrollObserved=false;window.addEventListener('scroll',()=>{window.fixtureScrollObserved=true;},{once:true});document.body.style.minHeight='3000px';window.scrollTo(0,100);});
+        await page.clock.runFor(20);
+        await until(async()=>page.evaluate(()=>window.fixtureScrollObserved),'in-flight scroll event');
+        await page.clock.runFor(420);
+        await until(async()=>heldResponse!==null,'committed scroll response held before delivery');
+        assert.equal((await read()).revision,heldResponse.revision);
+        const local='Local edit while scroll reply is held';
+        await page.evaluate(value=>{const input=document.querySelector('#f-label');input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));},local);
+        await page.clock.runFor(300);
+        assert.equal(posts.filter(body=>body.commands.some(command=>command.field==='draft')).length,0,'draft waits behind the actual in-flight action');
+        const updated=peerChange?await peer({draft:{label:'Newer peer draft',command:'keep-this-command'}}):null;
+        release();
+        await until(async()=>{const current=await read(),refused=(await page.locator('#toast').textContent()).includes('changed');return peerChange?(await page.getByLabel('Name',{exact:true}).inputValue())==='Newer peer draft'||refused:current.draft.label===local||refused;},'in-flight draft disposition');
+        await page.clock.runFor(500);
+        const saved=await read(),draftPosts=posts.filter(body=>body.commands.some(command=>command.field==='draft'));
+        assert.equal(saved.draft.label,peerChange?'Newer peer draft':local);
+        assert.equal(saved.draft.command,'keep-this-command');
+        if(peerChange)assert(draftPosts.length<=1,'local refusal or one conflicting request, never replay');
+        else assert.equal(draftPosts.length,1,'one substantive request, never replay');
+        if(draftPosts.length)assert.equal(draftPosts[0].expected_revision,heldResponse.revision,'only the exact acknowledged local scroll transition may be crossed');
+        if(peerChange)assert.equal(saved.revision,updated.revision);
+      }finally{release();}
     });
 
   await scenario('A newer same-field draft observed by polling wins over an older delayed form',
