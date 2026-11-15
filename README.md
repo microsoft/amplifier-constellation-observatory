@@ -60,6 +60,27 @@ and [validation guide](docs/validation.md). The [vision](docs/VISION.md) explain
 Observatory's direction. [Existing-service adoption](docs/existing-service-adoption.md)
 covers older Linux installations.
 
+
+<!-- ecosystem-map:start -->
+## Where this fits
+
+An optional management experience over independently owned agents, computers and connections.
+
+Roles: Experience. Supports: Agent Instance, Connection.
+
+![Ecosystem roles and component relationships](docs/ecosystem-map.svg)
+
+[Open the map](docs/ecosystem-map.svg) · [Product overview](https://microsoft.github.io/amplifier-constellation/projects/amplifier-constellation-observatory/) · [Map guide](https://github.com/microsoft/amplifier-constellation/blob/main/docs/ecosystem-maps.md)
+
+<details>
+<summary>The five shared building blocks</summary>
+
+[![Experience, Conversation, Agent Instance, Connection and Tool](https://raw.githubusercontent.com/microsoft/amplifier-constellation/main/site/assets/art/building-blocks.png)](https://microsoft.github.io/amplifier-constellation/)
+
+</details>
+
+<!-- ecosystem-map:end -->
+
 ## Contributing
 
 > [!NOTE]
