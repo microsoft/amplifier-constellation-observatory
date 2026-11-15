@@ -348,12 +348,17 @@ fn manager_definition(home: &Path, m: &Manager, s: &Value) -> Result<()> {
             && s["effective_definition"]["sha256"] == m.effective_definition_sha256,
         "Original unit definition changed"
     );
+    // systemctl can omit an empty structured ExecStop array even with --all.
+    // This representation is accepted only with the exact original unit above
+    // and the explicit no-drop-in/effective-definition guards below.
     ensure!(
         s["definition_matches"] == true
             && s["masked"] == false
             && s["loaded"] == true
             && s["native"]["DropInPaths"] == ""
-            && s["native"]["ExecStop"] == ""
+            && s["native"]
+                .get("ExecStop")
+                .is_none_or(|value| value.as_str() == Some(""))
             && s["native"]["KillMode"] == "control-group"
             && s["native"]["Type"] == "simple"
             && s["native"]["Restart"] == "on-failure",
@@ -1561,6 +1566,132 @@ mod tests {
         };
         c.save(home).unwrap();
         c
+    }
+    fn original_unit_fixture(home: &Path) -> (Manager, Value) {
+        let c = fixture_config(home);
+        let name = format!("agent-observatory-{}.service", c.id);
+        let path = home.join(&name);
+        let bytes = unit_text(home);
+        std::fs::write(&path, &bytes).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let effective = format!("# {}\n{bytes}", path.display());
+        let owner_uid = unsafe { libc::geteuid() };
+        let manager = Manager {
+            service: Service {
+                manager: ServiceManager::SystemdUser,
+                name: name.clone(),
+                definition_path: Some(path.clone()),
+            },
+            owner_uid,
+            definition_sha256: sha(bytes.as_bytes()),
+            effective_definition_sha256: sha(effective.as_bytes()),
+            control_group: format!(
+                "/user.slice/user-{owner_uid}.slice/user@{owner_uid}.service/app.slice/{name}"
+            ),
+        };
+        // The retained real systemd snapshot omitted ExecStop despite requesting
+        // it with --all. Keep that structured-array shape, with disposable paths.
+        let snapshot = json!({
+            "definition":{"path":path,"sha256":manager.definition_sha256},
+            "effective_definition":{"text":effective,"sha256":manager.effective_definition_sha256},
+            "definition_matches":true,"loaded":true,"masked":false,
+            "native":{"DropInPaths":"","NeedDaemonReload":"no","KillMode":"control-group","Type":"simple","Restart":"on-failure"}
+        });
+        (manager, snapshot)
+    }
+    fn no_adoption_writes(home: &Path) {
+        for name in [
+            "desktop-update.json",
+            "app-install.json",
+            "app-updates",
+            "state.sqlite3",
+        ] {
+            assert!(!home.join(name).exists(), "Unexpected write: {name}");
+        }
+    }
+    #[test]
+    fn original_unit_accepts_omitted_or_empty_execstop() {
+        let temp = tempfile::tempdir().unwrap();
+        let (manager, mut snapshot) = original_unit_fixture(temp.path());
+        assert!(snapshot["native"].get("ExecStop").is_none());
+        manager_definition(temp.path(), &manager, &snapshot).unwrap();
+        snapshot["native"]["ExecStop"] = json!("");
+        manager_definition(temp.path(), &manager, &snapshot).unwrap();
+        no_adoption_writes(temp.path());
+    }
+    #[test]
+    fn original_unit_refuses_nonempty_or_malformed_execstop() {
+        let temp = tempfile::tempdir().unwrap();
+        let (manager, mut snapshot) = original_unit_fixture(temp.path());
+        for value in [
+            json!("{ path=/bin/true ; argv[]=/bin/true }"),
+            json!(" "),
+            Value::Null,
+            json!(false),
+            json!(0),
+            json!([]),
+            json!({}),
+        ] {
+            snapshot["native"]["ExecStop"] = value;
+            assert!(manager_definition(temp.path(), &manager, &snapshot).is_err());
+        }
+        no_adoption_writes(temp.path());
+    }
+    #[test]
+    fn original_unit_omitted_execstop_does_not_relax_peer_guards() {
+        let temp = tempfile::tempdir().unwrap();
+        let (manager, snapshot) = original_unit_fixture(temp.path());
+        for (key, value) in [
+            ("DropInPaths", json!("/tmp/override.conf")),
+            ("DropInPaths", Value::Null),
+            ("KillMode", json!("process")),
+            ("Type", json!("forking")),
+            ("Restart", json!("no")),
+        ] {
+            let mut changed = snapshot.clone();
+            changed["native"][key] = value;
+            assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+        }
+        for key in ["DropInPaths", "KillMode", "Type", "Restart"] {
+            let mut changed = snapshot.clone();
+            changed["native"].as_object_mut().unwrap().remove(key);
+            assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+        }
+        for (key, value) in [
+            ("definition_matches", false),
+            ("loaded", false),
+            ("masked", true),
+        ] {
+            let mut changed = snapshot.clone();
+            changed[key] = json!(value);
+            assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+        }
+        no_adoption_writes(temp.path());
+    }
+    #[test]
+    fn original_unit_omitted_execstop_still_requires_exact_definition() {
+        let temp = tempfile::tempdir().unwrap();
+        let (manager, snapshot) = original_unit_fixture(temp.path());
+        for key in ["definition", "effective_definition"] {
+            let mut changed = snapshot.clone();
+            changed[key]["sha256"] = json!("0".repeat(64));
+            assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+        }
+        let path = manager.service.definition_path.as_ref().unwrap();
+        let changed =
+            unit_text(temp.path()).replace("Type=simple\n", "Type=simple\nExecStop=/bin/true\n");
+        std::fs::write(path, &changed).unwrap();
+        let mut rebound = manager.clone();
+        rebound.definition_sha256 = sha(changed.as_bytes());
+        let effective = format!("# {}\n{changed}", path.display());
+        rebound.effective_definition_sha256 = sha(effective.as_bytes());
+        let mut rebound_snapshot = snapshot;
+        rebound_snapshot["definition"]["sha256"] = json!(rebound.definition_sha256);
+        rebound_snapshot["effective_definition"] =
+            json!({"text":effective,"sha256":rebound.effective_definition_sha256});
+        assert!(manager_definition(temp.path(), &rebound, &rebound_snapshot).is_err());
+        no_adoption_writes(temp.path());
     }
     #[test]
     fn owner_review_rejects_unrecognized_fields_and_invalid_hashes() {
