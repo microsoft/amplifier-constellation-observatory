@@ -1,4 +1,5 @@
 //! One local, installation-owned replacement. No scheduler or agent operation.
+pub mod managed;
 use crate::{
     auth, config, desktop,
     error::{ApiError, ApiResult},
@@ -125,7 +126,7 @@ fn phase(home: &Path, value: &mut Value, next: &str) -> Result<()> {
     write_journal(home, value)
 }
 fn complete(value: &Value) -> bool {
-    matches!(value["phase"].as_str(), Some("applied" | "rolled_back"))
+    managed::known_kind(value) && matches!(value["phase"].as_str(), Some("applied" | "rolled_back"))
 }
 
 pub fn package(executable: &Path) -> Result<Value> {
@@ -220,14 +221,26 @@ pub fn pending(home: &Path) -> bool {
         Err(_) => true,
     }
 }
-pub fn direct_start_allowed(home: &Path) -> Result<()> {
+pub fn direct_start_allowed(home: &Path) -> Result<Option<File>> {
     if let Some(j) = optional_journal(home)? {
+        ensure!(
+            managed::known_kind(&j),
+            "Unknown application transition kind"
+        );
+        if managed::journal(&j) {
+            return managed::guard(home, Some(&j)).map(Some);
+        }
         ensure!(
             complete(&j) || matches!(j["phase"].as_str(), Some("prepared" | "deferred")),
             "An application update needs recovery. Open Observatory to continue the same operation."
         );
     }
-    Ok(())
+    if home.join("app-install.json").exists()
+        && read(&home.join("app-install.json"))?["manager"].is_object()
+    {
+        return managed::guard(home, None).map(Some);
+    }
+    Ok(None)
 }
 fn version_numbers(value: &Value) -> Result<Vec<u64>> {
     let parts = value
@@ -242,7 +255,8 @@ fn version_numbers(value: &Value) -> Result<Vec<u64>> {
 pub fn pending_verification(home: &Path) -> bool {
     match optional_journal(home) {
         Ok(Some(j)) => {
-            !complete(&j) && !matches!(j["phase"].as_str(), Some("prepared" | "deferred"))
+            !managed::known_kind(&j)
+                || (!complete(&j) && !matches!(j["phase"].as_str(), Some("prepared" | "deferred")))
         }
         Ok(None) => false,
         Err(_) => true,
@@ -254,11 +268,26 @@ pub fn busy(state: &AppState) -> bool {
 
 /// Only an installation-bound, staged local transaction can request shutdown.
 pub fn stop(state: &AppState, body: &Value) -> ApiResult<Value> {
+    let result = stop_response(state, body)?;
+    if result["accepted"] != true {
+        return Err(ApiError::bad(
+            result["error"]
+                .as_str()
+                .unwrap_or("Update admission refused"),
+        ));
+    }
+    Ok(result)
+}
+
+/// The two Busy branches are proven before admission closes or shutdown is sent.
+/// A complete correlated reply permits a later explicit apply, never an automatic retry.
+pub(crate) fn stop_response(state: &AppState, body: &Value) -> ApiResult<Value> {
     let _talk = state.talk_gate.lock().unwrap();
     let _provision = state.provision_gate.lock().unwrap();
     let j =
         journal(&state.home).map_err(|_| ApiError::bad("No local application update is staged"))?;
-    if body["request_id"] != j["request_id"]
+    if !managed::known_kind(&j)
+        || body["request_id"] != j["request_id"]
         || j["installation_id"] != state.config.id
         || body["version"] != env!("CARGO_PKG_VERSION")
         || complete(&j)
@@ -275,29 +304,24 @@ pub fn stop(state: &AppState, body: &Value) -> ApiResult<Value> {
             .iter()
             .any(|j| matches!(j["status"].as_str(), Some("queued" | "running")))
     {
-        return Err(ApiError::bad(
-            "Observatory is still working. Let the current conversation or installation finish, then try again.",
-        ));
+        return Ok(stop_busy(state, &j, &digest));
     }
     let _permit = if state.update_hold.lock().unwrap().is_some() {
         None
     } else {
-        Some(
-            state
-                .operation_gate
-                .clone()
-                .try_acquire_many_owned(4)
-                .map_err(|_| {
-                    ApiError::bad(
-                        "Observatory is still completing an operation. Try again shortly.",
-                    )
-                })?,
-        )
+        match state.operation_gate.clone().try_acquire_many_owned(4) {
+            Ok(permit) => Some(permit),
+            Err(_) => return Ok(stop_busy(state, &j, &digest)),
+        }
     };
     state.operation_gate.close();
     state.shutdown.send_replace(true);
     Ok(json!({"accepted":true,"request_id":j["request_id"],"id":state.config.id}))
 }
+fn stop_busy(state: &AppState, j: &Value, digest: &str) -> Value {
+    json!({"accepted":false,"code":"update_busy_before_shutdown","error":"Observatory is still working. Let current work finish, then try again.","request_id":j["request_id"],"id":state.config.id,"version":env!("CARGO_PKG_VERSION"),"binary_sha256":digest,"pid":std::process::id()})
+}
+
 pub fn finish(state: &AppState, body: &Value) -> ApiResult<Value> {
     let j = journal(&state.home).map_err(|_| ApiError::bad("No local update receipt"))?;
     if body["request_id"] != j["request_id"]
@@ -305,6 +329,9 @@ pub fn finish(state: &AppState, body: &Value) -> ApiResult<Value> {
         || !complete(&j)
     {
         return Err(ApiError::bad("Update has not been verified"));
+    }
+    if managed::journal(&j) {
+        managed::finish(state, &j).map_err(ApiError::from)?;
     }
     let selected = if j["phase"] == "applied" {
         &j["candidate"]
@@ -446,7 +473,10 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
             &folder.join("candidate-helpers")
         )?);
     }
-    let j = json!({"schema":1,"request_id":id,"installation_id":c.id,"phase":"prepared","previous":installed,"candidate":candidate,"replace_support":replace_support,"replace_helpers":replace_helpers});
+    let mut j = json!({"schema":1,"request_id":id,"installation_id":c.id,"phase":"prepared","previous":installed,"candidate":candidate,"replace_support":replace_support,"replace_helpers":replace_helpers});
+    if j["previous"]["manager"].is_object() {
+        managed::prepare_update(home, &mut j)?;
+    }
     write_journal(home, &j)?;
     Ok(j)
 }
@@ -503,6 +533,10 @@ pub fn validate_start(home: &Path, id: &str, nonce: &str) -> Result<()> {
     // intent afterwards, so recovery during that read cannot authorize it.
     let digest = desktop::binary_digest()?;
     let j = journal(home)?;
+    ensure!(
+        managed::known_kind(&j) && !managed::journal(&j),
+        "A managed installation must be launched by its original unit"
+    );
     ensure!(
         j["request_id"] == id
             && j["launch_nonce"] == nonce
@@ -679,6 +713,13 @@ pub async fn apply(home: &Path, id: &str) -> Result<()> {
         "Update installation identity changed"
     );
     ensure!(j["request_id"] == id, "Update request changed");
+    ensure!(
+        managed::known_kind(&j),
+        "Unknown application transition kind"
+    );
+    if managed::journal(&j) {
+        return managed::apply(home, &mut j).await;
+    }
     let folder = operation(home, id)?;
     if complete(&j) {
         if settle(home, &j).await.is_ok() {

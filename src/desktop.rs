@@ -70,6 +70,42 @@ fn service_lock(home: &Path) -> Result<File> {
     Ok(file)
 }
 
+/// A complete authenticated HTTP error response, distinct from an unobserved
+/// transport result. Callers must still classify whether its status is a refusal.
+#[derive(Debug)]
+pub(crate) struct LocalApiResponseError {
+    // Only the Linux managed updater currently classifies this retained evidence.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub status: u16,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub body: serde_json::Value,
+    message: String,
+}
+impl std::fmt::Display for LocalApiResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for LocalApiResponseError {}
+
+pub(crate) fn local_api_response(
+    status: StatusCode,
+    result: serde_json::Value,
+) -> Result<serde_json::Value> {
+    if !status.is_success() {
+        return Err(LocalApiResponseError {
+            status: status.as_u16(),
+            message: result["error"]
+                .as_str()
+                .unwrap_or("Request failed")
+                .to_owned(),
+            body: result,
+        }
+        .into());
+    }
+    Ok(result)
+}
+
 pub async fn local_api(
     home: &Path,
     method: &str,
@@ -106,12 +142,7 @@ pub async fn local_api(
     let response = request.send().await?;
     let status = response.status();
     let result: serde_json::Value = response.json().await?;
-    ensure!(
-        status.is_success(),
-        "{}",
-        result["error"].as_str().unwrap_or("Request failed")
-    );
-    Ok(result)
+    local_api_response(status, result)
 }
 
 // Keep proof and authenticated request on one connection. A client pool could
@@ -185,12 +216,7 @@ async fn proved_local_api(
         .map_err(|_| anyhow::anyhow!("Invalid or excessive local API response"))?
         .to_bytes();
     let result: serde_json::Value = serde_json::from_slice(&bytes)?;
-    ensure!(
-        status.is_success(),
-        "{}",
-        result["error"].as_str().unwrap_or("Request failed")
-    );
-    Ok(result)
+    local_api_response(status, result)
 }
 
 fn open_installed(url: &str) -> Result<()> {
@@ -210,12 +236,14 @@ pub async fn serve_guarded(
     update: Option<(String, String)>,
 ) -> Result<()> {
     let _lock = service_lock(&home)?;
-    if let Some((id, nonce)) = update.as_ref() {
+    let launch_guard = if let Some((id, nonce)) = update.as_ref() {
         crate::desktop_update::validate_start(&home, id, nonce)?;
+        None
     } else {
-        crate::desktop_update::direct_start_allowed(&home)?;
-    }
+        crate::desktop_update::direct_start_allowed(&home)?
+    };
     let state = AppState::open(home.clone())?;
+    drop(launch_guard);
     let mut shutdown = state.shutdown.subscribe();
     let url = if state.config.public_url.is_empty() {
         format!("https://localhost:{}", state.config.port)

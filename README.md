@@ -81,6 +81,11 @@ cd amplifier-constellation-observatory
 
 This developer/administrator installer builds a pinned checkout, creates one private installation, installs a user service, and prints its address. Rust, a C toolchain, libclang, and PAM development headers are required for this source build; on Ubuntu the script can install missing system packages. They are not prerequisites for the native packages above. Existing installations are never overwritten by this command.
 
+An older original Linux user-service installation can use the explicit
+[existing-service adoption path](docs/existing-service-adoption.md) after an owner
+maintenance stop and effects review. It preserves the original service and data;
+read-only inspection is not a stop or effects-settlement proof.
+
 Sign in using the configured machine account. A generated local certificate must be trusted by your browser; alternatively, put the HTTPS listener behind your existing trusted Tailscale HTTPS endpoint and use its DNS name. The server binds to all interfaces by default; choose `--bind 127.0.0.1` for a host-only listener. The generated port is stable after installation.
 
 Desktop packages already include computer-helper downloads. For a server
