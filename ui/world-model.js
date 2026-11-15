@@ -8,6 +8,22 @@ export function appearance(endpoint){
   return 'robot-'+(hash%9);
 }
 export function safeUrl(raw){try{const u=new URL(raw);return u.protocol==='https:'&&!u.username&&!u.password?u.href:null}catch{return null}}
+// Friendlier names for engines already known here. No entry is needed for an engine to appear:
+// any other engine is named by what it reports, then by its configured command.
+const ENGINE_NAMES={'agent-runtime':'Constellation Native','amplifier-agent-acp':'Amplifier Agent','claude-agent-acp':'Claude ACP','codex-acp':'Codex ACP','copilot':'GitHub Copilot'};
+const knownEngine=key=>typeof key==='string'&&Object.hasOwn(ENGINE_NAMES,key)?ENGINE_NAMES[key]:null;
+// Reported names are untrusted display text: plain strings, bounded, without control or
+// direction-changing characters. The view escapes them like any other text; they choose only a label.
+const displayText=(value,max=80)=>{if(typeof value!=='string')return '';const chars=[...value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,'').trim()];return chars.length>max?chars.slice(0,max).join('')+'…':chars.join('')};
+export function engineLabel(endpoint){
+  const status=endpoint?.observation?.status,hosted=endpoint?.acp_observation?.backend_agent_info;
+  const declared=displayText(status?.engine?.name)||displayText(status?.backend?.kind);if(declared)return declared;
+  // A hosted engine may put its agent's own name in `title`; a known engine keeps its known name.
+  const reported=knownEngine(hosted?.name)||displayText(hosted?.title)||displayText(hosted?.name);
+  if(reported){const version=displayText(hosted?.version,24);return version?`${reported} ${version}`:reported}
+  const command=status?.backend?.command,binary=displayText(typeof command==='string'?command.split(/[\\/]/).pop().replace(/\.exe$/i,''):null);
+  return knownEngine(binary)||(binary?`Configured runtime: ${binary}`:null);
+}
 export function connectionStatus(catalog,connection,error){
   if(error)return {label:'Unavailable',connected:false,uncertain:true};
   if(!connection||connection.enrolled===false)return {label:'Not available',connected:false,uncertain:true};
@@ -21,8 +37,7 @@ export function connectionStatus(catalog,connection,error){
 }
 export function project({endpoints=[],hosts=[],places=[],catalogs={}}){
   const hostIds=new Set(hosts.map(h=>h.id));
-  const agents=endpoints.filter(e=>e.kind==='agent'||!e.kind).map(e=>({id:e.id,name:e.label,machineId:hostIds.has(e.host_id)?e.host_id:UNASSIGNED,portrait:appearance(e),endpoint:e,engine:e.observation?.status?.engine?.name||e.observation?.status?.backend?.kind||null}));
-  for(const a of agents){if(!a.engine){const command=a.endpoint.observation?.status?.backend?.command;const binary=typeof command==='string'?command.split('/').pop():null;a.engine=({'agent-runtime':'Constellation Native','amplifier-agent-acp':'Amplifier Agent','claude-agent-acp':'Claude ACP','codex-acp':'Codex ACP','copilot':'GitHub Copilot'})[binary]||(binary?`Configured runtime: ${binary}`:null)}}
+  const agents=endpoints.filter(e=>e.kind==='agent'||!e.kind).map(e=>({id:e.id,name:e.label,machineId:hostIds.has(e.host_id)?e.host_id:UNASSIGNED,portrait:appearance(e),endpoint:e,engine:engineLabel(e)}));
   const known=new Set(agents.map(a=>a.id));
   const machines=hosts.map(h=>({id:h.id,name:h.label,platform:h.transport==='paired'?({windows:'Windows',macos:'Mac',linux:'Linux'}[h.machine?.os]||'Paired computer'):h.transport==='local'?'Observatory computer':'Configured SSH access',host:h}));
   if(agents.some(a=>a.machineId===UNASSIGNED))machines.push({id:UNASSIGNED,name:'Other agents',platform:'Computer not assigned',unassigned:true});

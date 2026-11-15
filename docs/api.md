@@ -91,11 +91,27 @@ remains stored but is projected as null. An in-flight check cannot make its old
 revision current after an edit. A direct inspect response still describes the
 revision it checked, so clients must compare that field before attaching it to
 a newer local endpoint. ACP observations also retain the negotiated
-implementation/capabilities. A failed check still returns an HTTP error and
-leaves a durable failure observation. Neither check replaces the other's data.
+implementation/capabilities as `agent_info` and `capabilities`. An Agent
+Instance answers as itself and reports the
+[engine it hosts](https://github.com/microsoft/amplifier-constellation-instance/blob/main/docs/acp-boundary.md#backend-behavior-remains-authoritative)
+separately; that identity is retained as
+`backend_agent_info: {name?, title?, version?}`, or null when none is reported.
+Each member is plain text of at most 200 characters without control characters.
+No other initialization `_meta` is stored. A failed check still returns an HTTP
+error and leaves a durable failure observation. Neither check replaces the
+other's data.
 The dashboard checks every attached interface, includes ACP-only agents, and
 continues checking the other endpoints when one fails. Running an ACP check
 requires `interact`; reading its recorded result requires `observe`.
+
+The systems map names an agent's engine from what that agent reports, in this
+order: management status `engine.name`, then `backend.kind`; the recorded
+`backend_agent_info` (`title`, else `name`, followed by `version`); the file
+name of status `backend.command`. A small set of friendlier names replaces a
+recognized reported `name` or command file name as a display convenience only:
+an engine needs no entry in Observatory to be named. Reported names are
+unverified, bounded display text. They do not select operations, access or
+appearance, and an agent that reports none remains usable.
 
 `POST endpoints/{id}/operations/{operation}` sends a body to an explicit management mapping. The provider's registry chooses the HTTP method/path and required Observatory scope; callers cannot select an arbitrary URL. Built-in operations include `config`, `validate-config`, `apply-config`, `lifecycle`, `work`, `organization`, `profile-use`, `sessions`, `activity` and `permissions` where the particular provider implements them. Unsupported remote features return an explicit failure; they do not fall back to private files.
 

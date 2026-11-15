@@ -44,7 +44,7 @@ try{
   let body='';for await(const chunk of req)body+=chunk;
   let value;
   if(req.url==='/api/v1/descriptor')value={instance_id:instance.id,implementation:{name:'agent-instance',version:'fixture'},capabilities:['constellation.service-connections/1'],operations:[{path:'service-connections',methods:['GET','POST'],scope:'admin'}]};
-  else if(req.url==='/api/v1/status')value={instance_id:instance.id,name:instance.name,version:'fixture',enabled:true,setup_complete:true,platform:'linux',backend:{kind:'Constellation'},counts:{sessions:0,connections:0}};
+  else if(req.url==='/api/v1/status')value={instance_id:instance.id,name:instance.name,version:'fixture',enabled:true,setup_complete:true,platform:'linux',backend:instance.backend||{kind:'Constellation'},counts:{sessions:0,connections:0}};
   else if(req.url==='/api/v1/service-connections'&&req.method==='GET'){instance.gets++;value=catalogFor(instance);}
   else if(req.url==='/api/v1/service-connections'&&req.method==='POST'){
    const command=JSON.parse(body);instance.posts.push(command);
@@ -72,13 +72,17 @@ try{
  const hostC=await api('hosts',{label:'Studio',transport:'ssh',address:'fixture-studio',install_roots:[home],recipes:[]});
  const names=['Maker','Coach','Rook','Scribe','Probe','Atlas','Nova','Pip','Echo','Scout','Bolt','Mica','Lumi'];
  const endpoints=[];
+ // One installation hosts an engine that no Observatory list names; its reported title is hostile display text.
+ const engineTitle='<img src=x onerror=alert(1)>Example Engine',engine=path.join(home,'hosted-engine.py');
+ await fs.writeFile(engine,`import sys,json\nfor line in sys.stdin:\n r=json.loads(line);result={}\n if r.get('method')=='initialize':result={'protocolVersion':1,'agentInfo':{'name':'agent-instance','title':'Maker','version':'fixture'},'agentCapabilities':{},'_meta':{'io.github.bkrabach.agent-instance':{'instanceId':'fixture','backendAgentInfo':{'name':'example-engine','title':${JSON.stringify(engineTitle)},'version':'1.2.3'}}}}\n print(json.dumps({'jsonrpc':'2.0','id':r.get('id'),'result':result}),flush=True)\n`);
  for(const [index,name]of names.entries()){
   const id=randomUUID(),credential='fixture-installation-'+index;
   const connections=[{id:'minecraft-workshop',service:'minecraft',label:'Workshop',revision:'fixture-minecraft-v1',enrolled:true,settings_url:null,context_provider_ids:['minecraft:'+id],state:'connected',desired_state:'connected',context_active:true,settled:true,failed:false,context_ready:false,context_quiesced:false,request_id:null,message:''},{id:'slack-studio',service:'slack',label:'Studio workspace',revision:'fixture-slack-v1',enrolled:true,settings_url:null,context_provider_ids:['slack:'+id],state:index===12?'disconnected':'connected',desired_state:index===12?'disconnected':'connected',context_active:index!==12,settled:true,failed:false,context_ready:false,context_quiesced:false,request_id:null,message:''}];
-  const instance={id,name,connections,pending:null,last:null,gets:0,posts:[],helperConnected:true,loseNextAck:false};instances.set('Bearer '+credential,instance);
+  const instance={id,name,connections,pending:null,last:null,gets:0,posts:[],helperConnected:true,loseNextAck:false,...(index===0?{backend:{configured:true,command:'/opt/engines/example-engine-acp'}}:{})};instances.set('Bearer '+credential,instance);
   await api('credentials',{name:credential,value:credential});
-  const endpoint=await api('endpoints',{label:name,kind:'agent',host_id:index===12?hostB.id:hostA.id,ui_url:origin,management:{provider:'agent-instance',access:'manage',base_url:origin,credential_ref:credential,ca_file:config.tls_ca,expected_id:id}});
+  const endpoint=await api('endpoints',{label:name,kind:'agent',host_id:index===12?hostB.id:hostA.id,ui_url:origin,...(index===0?{acp:{transport:'stdio',command:'python3',args:[engine],cwd:home}}:{}),management:{provider:'agent-instance',access:'manage',base_url:origin,credential_ref:credential,ca_file:config.tls_ca,expected_id:id}});
   endpoints.push({...endpoint,fixture:instance});await api(`endpoints/${endpoint.id}/inspect`,{});
+  if(index===0)await api(`endpoints/${endpoint.id}/probe`,{});
  }
  const maker=endpoints[0],lumi=endpoints.at(-1);
  const workspace=await api('places',{label:'Studio workspace',service:'slack',kind:'workspace',external_id:'T-FIXTURE-STUDIO',rooms:[],bindings:endpoints.map(e=>({endpoint_id:e.id,connection_id:'slack-studio'}))});
@@ -122,7 +126,8 @@ try{
  const actualLumi=await api('endpoints/'+lumi.id,undefined,'GET');assert.equal(actualLumi.host_id,hostB.id);assert.equal(actualLumi.management.expected_id,lumi.fixture.id);assert.deepEqual(lumi.fixture.connections.find(c=>c.service==='minecraft'),otherLink);assert.equal(lumi.fixture.posts.length,1);
  await screenshot('inside-workspace.png');pass('Inside workspace Connect queues the exact saved route and waits for owner settlement without moving or copying the agent');
  await back();assert.deepEqual((await visual()).positions,arranged);
- await openAgent(maker);const makerBinding=`${maker.id}:minecraft-workshop`,makerControl=verb=>`[data-action="connection"][data-binding="${makerBinding}"][data-verb="${verb}"]`;
+ await openAgent(maker);assert.equal(await dialog.locator('.ow-profile-hero p').first().innerText(),engineTitle+' 1.2.3');assert.equal(await dialog.locator('img[src="x"]').count(),0);pass('An engine named in no Observatory list is labelled from its recorded ACP check, and its reported name renders as text');
+ const makerBinding=`${maker.id}:minecraft-workshop`,makerControl=verb=>`[data-action="connection"][data-binding="${makerBinding}"][data-verb="${verb}"]`;
  const makerOther=clone(maker.fixture.connections.find(c=>c.service==='slack'));
  await dialog.locator(makerControl('disconnect')).click();await until(()=>maker.fixture.posts.length===1,'queued Disconnect');assert.equal(maker.fixture.connections.find(c=>c.service==='minecraft').state,'connected');finish(maker.fixture);await refreshAgent();await dialog.locator(makerControl('connect')).waitFor();
  peer=await context.newPage();await peer.goto(base);await peer.locator('.ow-machine').first().waitFor();
