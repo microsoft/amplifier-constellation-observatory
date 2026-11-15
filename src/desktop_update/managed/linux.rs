@@ -305,7 +305,21 @@ fn quote(path: &Path) -> String {
             .replace('%', "%%")
     )
 }
+/// The unit the source installer writes. `Restart=on-failure` alone counts a
+/// termination signal as a clean exit, so a service ended by another program
+/// stayed down. `RestartForceExitStatus=SIGTERM` restarts it after that signal;
+/// an exit with status 0 (the update's own admission stop) and a manager Stop
+/// still leave the unit inactive, which every managed transition relies on.
 fn unit_text(home: &Path) -> String {
+    format!(
+        "[Unit]\nDescription=Agent Observatory\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={} --home {} serve\nRestart=on-failure\nRestartForceExitStatus=SIGTERM\nRestartSec=5\nUMask=0077\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n",
+        quote(&platform::installed_binary(&platform::OBSERVATORY, home)),
+        quote(home)
+    )
+}
+/// The unit the source installer wrote through 0.12.2. Nothing here rewrites an
+/// installed unit, so existing installations keep this exact text.
+fn earlier_unit_text(home: &Path) -> String {
     format!(
         "[Unit]\nDescription=Agent Observatory\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={} --home {} serve\nRestart=on-failure\nRestartSec=5\nUMask=0077\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n",
         quote(&platform::installed_binary(&platform::OBSERVATORY, home)),
@@ -338,8 +352,9 @@ fn manager_definition(home: &Path, m: &Manager, s: &Value) -> Result<()> {
         "Original unit owner/policy changed"
     );
     let bytes = std::fs::read(p)?;
+    // Exactly the two texts the source installer has written, byte for byte.
     ensure!(
-        bytes == unit_text(home).as_bytes(),
+        bytes == unit_text(home).as_bytes() || bytes == earlier_unit_text(home).as_bytes(),
         "Only the unchanged original Observatory unit shape is supported"
     );
     ensure!(
@@ -351,6 +366,8 @@ fn manager_definition(home: &Path, m: &Manager, s: &Value) -> Result<()> {
     // systemctl can omit an empty structured ExecStop array even with --all.
     // This representation is accepted only with the exact original unit above
     // and the explicit no-drop-in/effective-definition guards below.
+    // Both accepted texts keep Restart=on-failure. The shared snapshot does not
+    // report RestartForceExitStatus; the exact bytes and those same guards bind it.
     ensure!(
         s["definition_matches"] == true
             && s["masked"] == false
@@ -1567,12 +1584,18 @@ mod tests {
         c.save(home).unwrap();
         c
     }
-    fn original_unit_fixture(home: &Path) -> (Manager, Value) {
+    /// Every unit text the source installer has written, current first.
+    const INSTALLER_UNIT_TEXTS: [fn(&Path) -> String; 2] = [unit_text, earlier_unit_text];
+    fn original_unit_fixture(home: &Path, text: fn(&Path) -> String) -> (Manager, Value) {
+        unit_fixture(home, &text(home))
+    }
+    /// A unit file with these bytes, and a manager binding and snapshot that
+    /// agree with it, so only the accepted-text check can tell texts apart.
+    fn unit_fixture(home: &Path, bytes: &str) -> (Manager, Value) {
         let c = fixture_config(home);
         let name = format!("agent-observatory-{}.service", c.id);
         let path = home.join(&name);
-        let bytes = unit_text(home);
-        std::fs::write(&path, &bytes).unwrap();
+        std::fs::write(&path, bytes).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let effective = format!("# {}\n{bytes}", path.display());
@@ -1612,86 +1635,219 @@ mod tests {
     }
     #[test]
     fn original_unit_accepts_omitted_or_empty_execstop() {
-        let temp = tempfile::tempdir().unwrap();
-        let (manager, mut snapshot) = original_unit_fixture(temp.path());
-        assert!(snapshot["native"].get("ExecStop").is_none());
-        manager_definition(temp.path(), &manager, &snapshot).unwrap();
-        snapshot["native"]["ExecStop"] = json!("");
-        manager_definition(temp.path(), &manager, &snapshot).unwrap();
-        no_adoption_writes(temp.path());
+        for text in INSTALLER_UNIT_TEXTS {
+            let temp = tempfile::tempdir().unwrap();
+            let (manager, mut snapshot) = original_unit_fixture(temp.path(), text);
+            assert!(snapshot["native"].get("ExecStop").is_none());
+            manager_definition(temp.path(), &manager, &snapshot).unwrap();
+            snapshot["native"]["ExecStop"] = json!("");
+            manager_definition(temp.path(), &manager, &snapshot).unwrap();
+            no_adoption_writes(temp.path());
+        }
     }
     #[test]
     fn original_unit_refuses_nonempty_or_malformed_execstop() {
-        let temp = tempfile::tempdir().unwrap();
-        let (manager, mut snapshot) = original_unit_fixture(temp.path());
-        for value in [
-            json!("{ path=/bin/true ; argv[]=/bin/true }"),
-            json!(" "),
-            Value::Null,
-            json!(false),
-            json!(0),
-            json!([]),
-            json!({}),
-        ] {
-            snapshot["native"]["ExecStop"] = value;
-            assert!(manager_definition(temp.path(), &manager, &snapshot).is_err());
+        for text in INSTALLER_UNIT_TEXTS {
+            let temp = tempfile::tempdir().unwrap();
+            let (manager, mut snapshot) = original_unit_fixture(temp.path(), text);
+            for value in [
+                json!("{ path=/bin/true ; argv[]=/bin/true }"),
+                json!(" "),
+                Value::Null,
+                json!(false),
+                json!(0),
+                json!([]),
+                json!({}),
+            ] {
+                snapshot["native"]["ExecStop"] = value;
+                assert!(manager_definition(temp.path(), &manager, &snapshot).is_err());
+            }
+            no_adoption_writes(temp.path());
         }
-        no_adoption_writes(temp.path());
     }
     #[test]
     fn original_unit_omitted_execstop_does_not_relax_peer_guards() {
-        let temp = tempfile::tempdir().unwrap();
-        let (manager, snapshot) = original_unit_fixture(temp.path());
-        for (key, value) in [
-            ("DropInPaths", json!("/tmp/override.conf")),
-            ("DropInPaths", Value::Null),
-            ("KillMode", json!("process")),
-            ("Type", json!("forking")),
-            ("Restart", json!("no")),
-        ] {
-            let mut changed = snapshot.clone();
-            changed["native"][key] = value;
-            assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+        for text in INSTALLER_UNIT_TEXTS {
+            let temp = tempfile::tempdir().unwrap();
+            let (manager, snapshot) = original_unit_fixture(temp.path(), text);
+            for (key, value) in [
+                ("DropInPaths", json!("/tmp/override.conf")),
+                ("DropInPaths", Value::Null),
+                ("KillMode", json!("process")),
+                ("Type", json!("forking")),
+                ("Restart", json!("no")),
+                ("Restart", json!("always")),
+            ] {
+                let mut changed = snapshot.clone();
+                changed["native"][key] = value;
+                assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+            }
+            for key in ["DropInPaths", "KillMode", "Type", "Restart"] {
+                let mut changed = snapshot.clone();
+                changed["native"].as_object_mut().unwrap().remove(key);
+                assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+            }
+            for (key, value) in [
+                ("definition_matches", false),
+                ("loaded", false),
+                ("masked", true),
+            ] {
+                let mut changed = snapshot.clone();
+                changed[key] = json!(value);
+                assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+            }
+            no_adoption_writes(temp.path());
         }
-        for key in ["DropInPaths", "KillMode", "Type", "Restart"] {
-            let mut changed = snapshot.clone();
-            changed["native"].as_object_mut().unwrap().remove(key);
-            assert!(manager_definition(temp.path(), &manager, &changed).is_err());
-        }
-        for (key, value) in [
-            ("definition_matches", false),
-            ("loaded", false),
-            ("masked", true),
-        ] {
-            let mut changed = snapshot.clone();
-            changed[key] = json!(value);
-            assert!(manager_definition(temp.path(), &manager, &changed).is_err());
-        }
-        no_adoption_writes(temp.path());
     }
     #[test]
     fn original_unit_omitted_execstop_still_requires_exact_definition() {
-        let temp = tempfile::tempdir().unwrap();
-        let (manager, snapshot) = original_unit_fixture(temp.path());
-        for key in ["definition", "effective_definition"] {
-            let mut changed = snapshot.clone();
-            changed[key]["sha256"] = json!("0".repeat(64));
-            assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+        for text in INSTALLER_UNIT_TEXTS {
+            let temp = tempfile::tempdir().unwrap();
+            let (manager, snapshot) = original_unit_fixture(temp.path(), text);
+            for key in ["definition", "effective_definition"] {
+                let mut changed = snapshot.clone();
+                changed[key]["sha256"] = json!("0".repeat(64));
+                assert!(manager_definition(temp.path(), &manager, &changed).is_err());
+            }
+            let path = manager.service.definition_path.as_ref().unwrap();
+            let changed =
+                text(temp.path()).replace("Type=simple\n", "Type=simple\nExecStop=/bin/true\n");
+            std::fs::write(path, &changed).unwrap();
+            let mut rebound = manager.clone();
+            rebound.definition_sha256 = sha(changed.as_bytes());
+            let effective = format!("# {}\n{changed}", path.display());
+            rebound.effective_definition_sha256 = sha(effective.as_bytes());
+            let mut rebound_snapshot = snapshot;
+            rebound_snapshot["definition"]["sha256"] = json!(rebound.definition_sha256);
+            rebound_snapshot["effective_definition"] =
+                json!({"text":effective,"sha256":rebound.effective_definition_sha256});
+            assert!(manager_definition(temp.path(), &rebound, &rebound_snapshot).is_err());
+            no_adoption_writes(temp.path());
         }
-        let path = manager.service.definition_path.as_ref().unwrap();
-        let changed =
-            unit_text(temp.path()).replace("Type=simple\n", "Type=simple\nExecStop=/bin/true\n");
-        std::fs::write(path, &changed).unwrap();
-        let mut rebound = manager.clone();
-        rebound.definition_sha256 = sha(changed.as_bytes());
-        let effective = format!("# {}\n{changed}", path.display());
-        rebound.effective_definition_sha256 = sha(effective.as_bytes());
-        let mut rebound_snapshot = snapshot;
-        rebound_snapshot["definition"]["sha256"] = json!(rebound.definition_sha256);
-        rebound_snapshot["effective_definition"] =
-            json!({"text":effective,"sha256":rebound.effective_definition_sha256});
-        assert!(manager_definition(temp.path(), &rebound, &rebound_snapshot).is_err());
-        no_adoption_writes(temp.path());
+    }
+    #[test]
+    fn earlier_installer_unit_text_is_frozen_one_line_from_the_current_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        // Installations made through 0.12.2 carry exactly this text. It is written
+        // out here so that a later edit to either function cannot move it.
+        let written_through_0_12_2 = format!(
+            "[Unit]\nDescription=Agent Observatory\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={} --home {} serve\nRestart=on-failure\nRestartSec=5\nUMask=0077\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n",
+            quote(&home.join("bin/agent-observatory")),
+            quote(home)
+        );
+        assert_eq!(earlier_unit_text(home), written_through_0_12_2);
+        assert_eq!(
+            unit_text(home),
+            written_through_0_12_2.replace(
+                "Restart=on-failure\n",
+                "Restart=on-failure\nRestartForceExitStatus=SIGTERM\n"
+            )
+        );
+        assert_ne!(unit_text(home), earlier_unit_text(home));
+    }
+    #[test]
+    fn any_other_unit_text_is_refused_even_with_matching_hashes() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let current = unit_text(home);
+        let earlier = earlier_unit_text(home);
+        // The fixture binds whatever bytes it is given, so both accepted texts pass.
+        for accepted in [&current, &earlier] {
+            let (manager, snapshot) = unit_fixture(home, accepted);
+            manager_definition(home, &manager, &snapshot).unwrap();
+        }
+        let forced = "RestartForceExitStatus=SIGTERM\n";
+        let changed = [
+            // A different forced-restart rule, or the same rule anywhere else.
+            current.replace(forced, "RestartForceExitStatus=SIGTERM SIGKILL\n"),
+            current.replace(forced, "RestartForceExitStatus=SIGTERM 143\n"),
+            current.replace(forced, "RestartForceExitStatus=143\n"),
+            current.replace(forced, "RestartForceExitStatus=TERM\n"),
+            current.replace(forced, "RestartForceExitStatus=0\n"),
+            current.replace(forced, "RestartForceExitStatus=\n"),
+            current.replace(forced, &forced.repeat(2)),
+            earlier.replace("RestartSec=5\n", &format!("RestartSec=5\n{forced}")),
+            earlier.replace("Type=simple\n", &format!("Type=simple\n{forced}")),
+            format!("{earlier}{forced}"),
+            // Another restart rule, with or without the accepted line.
+            current.replace("Restart=on-failure\n", "Restart=always\n"),
+            earlier.replace("Restart=on-failure\n", "Restart=always\n"),
+            current.replace("Restart=on-failure\n", "Restart=on-abnormal\n"),
+            earlier.replace(
+                "Restart=on-failure\n",
+                "Restart=on-failure\nRestartPreventExitStatus=SIGTERM\n",
+            ),
+            earlier.replace(
+                "Restart=on-failure\n",
+                "Restart=on-failure\nSuccessExitStatus=SIGTERM\n",
+            ),
+            current.replace("RestartSec=5\n", "RestartSec=1\n"),
+            current.replace("RestartSec=5\n", ""),
+            // Anything else, however small.
+            current.replace("KillMode=control-group\n", "KillMode=process\n"),
+            current.replace(" serve\n", " serve --verbose\n"),
+            current.replace("UMask=0077\n", "UMask=0077\nEnvironment=A=B\n"),
+            current.replace(forced, "RestartForceExitStatus=SIGTERM \n"),
+            current.replace(forced, "RestartForceExitStatus=SIGTERM\r\n"),
+            current.replace(forced, "# RestartForceExitStatus=SIGTERM\n"),
+            format!("{current}\n"),
+            format!("{earlier}\n"),
+            current.trim_end().to_owned(),
+            earlier.trim_end().to_owned(),
+            String::new(),
+        ];
+        for text in &changed {
+            assert!(text != &current && text != &earlier, "{text:?}");
+            let (manager, snapshot) = unit_fixture(home, text);
+            let error = manager_definition(home, &manager, &snapshot).unwrap_err();
+            assert!(
+                error.to_string().contains("unchanged original"),
+                "{text:?}: {error}"
+            );
+        }
+        no_adoption_writes(home);
+    }
+    /// The installer and this module must agree byte for byte, or a fresh source
+    /// installation could not be adopted later.
+    #[test]
+    fn source_installer_writes_the_current_unit_text() {
+        let script = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.py"));
+        let lines = script
+            .lines()
+            .find_map(|line| {
+                line.trim_start()
+                    .strip_prefix("unit_text='\\n'.join([")?
+                    .strip_suffix("])")
+            })
+            .expect("scripts/install.py no longer joins one list into unit_text");
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let rendered = lines
+            .split(',')
+            .map(|line| {
+                let line = line
+                    .strip_prefix("f'")
+                    .or_else(|| line.strip_prefix('\''))
+                    .and_then(|line| line.strip_suffix('\''))
+                    .expect("Unexpected installer unit line");
+                if line == "ExecStart={quote(binary)} --home {quote(home)} serve" {
+                    return format!(
+                        "ExecStart={} --home {} serve",
+                        quote(&platform::installed_binary(&platform::OBSERVATORY, home)),
+                        quote(home)
+                    );
+                }
+                assert!(
+                    !line.contains(['{', '}', '\\', '\'']),
+                    "Unexpected installer unit line: {line}"
+                );
+                line.to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(rendered, unit_text(home));
+        assert!(rendered.contains("\nRestart=on-failure\nRestartForceExitStatus=SIGTERM\n"));
     }
     #[test]
     fn owner_review_rejects_unrecognized_fields_and_invalid_hashes() {
