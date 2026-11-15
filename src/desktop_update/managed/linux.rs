@@ -16,6 +16,9 @@ use std::{
     thread,
 };
 
+#[path = "user_bus.rs"]
+mod user_bus;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileIdentity {
@@ -428,6 +431,9 @@ impl Drop for ManagerProbe {
     }
 }
 fn manager_output(child: std::process::Child) -> Result<Vec<u8>> {
+    manager_output_until(child, std::time::Instant::now() + Duration::from_secs(3))
+}
+fn manager_output_until(child: std::process::Child, limit: std::time::Instant) -> Result<Vec<u8>> {
     let mut probe = ManagerProbe {
         child,
         reaped: false,
@@ -443,11 +449,14 @@ fn manager_output(child: std::process::Child) -> Result<Vec<u8>> {
         flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0,
         "Cannot bound manager output read"
     );
-    let limit = std::time::Instant::now() + Duration::from_secs(3);
     let mut bytes = Vec::new();
     let mut ended = false;
     let mut status = None;
     loop {
+        ensure!(
+            std::time::Instant::now() < limit,
+            "Manager observation deadline expired; no service action dispatched"
+        );
         let mut chunk = [0u8; 4096];
         match stdout.read(&mut chunk) {
             Ok(0) => ended = true,
@@ -566,16 +575,12 @@ fn manager_parent(identity: &Value) -> Result<()> {
     let pid = identity["pid"]
         .as_u64()
         .context("Missing user manager PID")?;
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))?;
-    ensure!(
-        exe.file_name().is_some_and(|x| x == "systemd"),
-        "Reviewed parent is not systemd"
-    );
     let cmd = std::fs::read(format!("/proc/{pid}/cmdline"))?;
     ensure!(
         cmd.split(|b| *b == 0).any(|s| s == b"--user"),
         "Reviewed manager is not a user manager"
     );
+    user_bus::prove(identity)?;
     Ok(())
 }
 fn running_proof(home: &Path, j: &Value, selected: &Value) -> Result<Value> {
