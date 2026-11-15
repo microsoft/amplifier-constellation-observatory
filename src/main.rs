@@ -39,6 +39,17 @@ enum Command {
         local_only: bool,
     },
     Serve,
+    /// Enroll an already stopped original Linux user service after owner review.
+    AdoptExisting {
+        #[arg(long, conflicts_with = "request_id")]
+        review: Option<PathBuf>,
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long, conflicts_with = "inspect")]
+        recover: bool,
+        #[arg(long)]
+        inspect: bool,
+    },
     #[command(hide = true)]
     ApplyUpdate {
         request_id: String,
@@ -163,6 +174,22 @@ async fn main() -> Result<()> {
             );
         }
         Command::Serve => desktop::serve(home.clone(), false).await?,
+        Command::AdoptExisting {
+            review,
+            request_id,
+            recover,
+            inspect,
+        } => {
+            let result = agent_observatory::desktop_update::managed::adopt(
+                &home,
+                review.as_deref(),
+                request_id.as_deref(),
+                recover,
+                inspect,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         Command::ServeUpdate { request_id, nonce } => {
             desktop::serve_guarded(home.clone(), false, Some((request_id, nonce))).await?
         }

@@ -285,9 +285,15 @@ async fn update_stop(
     State(s): State<Arc<AppState>>,
     h: HeaderMap,
     Json(body): Json<Value>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Response> {
     auth::check(&s, &h, "admin", true)?;
-    Ok(Json(crate::desktop_update::stop(&s, &body)?))
+    let result = crate::desktop_update::stop_response(&s, &body)?;
+    let status = if result["accepted"] == true {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::CONFLICT
+    };
+    Ok((status, Json(result)).into_response())
 }
 async fn update_finish(
     State(s): State<Arc<AppState>>,
