@@ -558,6 +558,8 @@ async fn registration_is_generic_revisioned_and_does_not_imply_agent_management(
         observed["acp_observation"]["capabilities"]["loadSession"],
         true
     );
+    // A direct ACP agent reports itself; it has no separately hosted engine.
+    assert!(observed["acp_observation"]["backend_agent_info"].is_null());
     assert_eq!(observed["observation"]["management"], "unsupported");
     assert!(observed["management"].is_null());
     assert!(provider::operations(&observed).is_empty());
@@ -571,6 +573,61 @@ async fn registration_is_generic_revisioned_and_does_not_imply_agent_management(
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert!(s.read("endpoints", id).is_ok());
+}
+#[tokio::test]
+async fn acp_check_keeps_the_hosted_engine_identity_without_other_extension_metadata() {
+    let (d, s, t) = state();
+    let app = server::router(s.clone());
+    let path = d.path().join("instance-fixture.py");
+    std::fs::write(&path,r#"import sys,json
+for line in sys.stdin:
+ r=json.loads(line);result={}
+ if r.get('method')=='initialize': result={'protocolVersion':1,'agentInfo':{'name':'agent-instance','title':'Example agent','version':'1'},'agentCapabilities':{},'_meta':{'io.github.bkrabach.agent-instance':{'instanceId':'fixture-installation','configRevision':'fixture-revision','backendAgentInfo':{'name':'example-engine','title':'Example\u0007 Engine','version':'1.2.3','homepage':'https://engine.example','nested':{'private':True}}}}}
+ print(json.dumps({'jsonrpc':'2.0','id':r.get('id'),'result':result}),flush=True)
+"#).unwrap();
+    let (_, e) = request(
+        &app,
+        &t,
+        "POST",
+        "/api/v1/endpoints",
+        json!({"label":"Hosted","kind":"agent","acp":{"command":PYTHON,"args":[path],"cwd":d.path(),"transport":"stdio"}}),
+    )
+    .await;
+    let id = e["id"].as_str().unwrap();
+    let (status, negotiated) = request(
+        &app,
+        &t,
+        "POST",
+        &format!("/api/v1/endpoints/{id}/probe"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(negotiated["agentInfo"]["name"], "agent-instance");
+    let (_, observed) = request(
+        &app,
+        &t,
+        "GET",
+        &format!("/api/v1/endpoints/{id}"),
+        Value::Null,
+    )
+    .await;
+    let observation = &observed["acp_observation"];
+    assert_eq!(observation["agent_info"]["name"], "agent-instance");
+    assert_eq!(
+        observation["backend_agent_info"],
+        json!({"name":"example-engine","title":"Example Engine","version":"1.2.3"})
+    );
+    let stored = s.read("acp_observations", id).unwrap().to_string();
+    for discarded in [
+        "_meta",
+        "fixture-installation",
+        "fixture-revision",
+        "engine.example",
+        "nested",
+    ] {
+        assert!(!stored.contains(discarded), "{discarded}");
+    }
 }
 #[tokio::test]
 async fn acp_health_persists_failure_without_overwriting_management_or_trusting_edited_connections()

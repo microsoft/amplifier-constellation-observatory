@@ -486,6 +486,7 @@ async fn probe(
             observation["protocol_version"] = value["protocolVersion"].clone();
             observation["agent_info"] = value["agentInfo"].clone();
             observation["capabilities"] = value["agentCapabilities"].clone();
+            observation["backend_agent_info"] = acp::backend_agent_info(value);
         }
         Err(err) => {
             observation["health"] = json!("unavailable");

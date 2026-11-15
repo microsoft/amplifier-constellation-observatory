@@ -536,6 +536,30 @@ pub async fn probe(state: &AppState, config: &Value) -> ApiResult<Value> {
             )
         })
 }
+/// An Agent Instance answers `initialize` as itself and reports the engine it
+/// hosts in its own metadata namespace. Keep only that identity, as bounded
+/// plain text for display; no other extension metadata is retained.
+pub fn backend_agent_info(init: &Value) -> Value {
+    let reported = &init["_meta"]["io.github.bkrabach.agent-instance"]["backendAgentInfo"];
+    let mut info = serde_json::Map::new();
+    for key in ["name", "title", "version"] {
+        let text = reported[key]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(200)
+            .collect::<String>();
+        if !text.trim().is_empty() {
+            info.insert(key.into(), json!(text.trim()));
+        }
+    }
+    if info.contains_key("name") || info.contains_key("title") {
+        Value::Object(info)
+    } else {
+        Value::Null
+    }
+}
 /// Operator-only discovery. No transcript or credentials are copied between
 /// clients; this lists only the configured working directory.
 pub async fn catalog(
@@ -1128,6 +1152,30 @@ mod tests {
         }
         for folder in ["relative", "C:relative", "", "folder\nother"] {
             assert!(!absolute_session_path(folder), "{folder}");
+        }
+    }
+
+    #[test]
+    fn hosted_engine_identity_is_kept_only_as_bounded_plain_text() {
+        let init = |info: Value| json!({"agentInfo":{"name":"agent-instance"},"_meta":{"io.github.bkrabach.agent-instance":{"instanceId":"private","backendAgentInfo":info}}});
+        assert_eq!(
+            backend_agent_info(&init(
+                json!({"name":"example-engine","title":" Example\u{0} Engine\n","version":"1.2.3","extra":{"nested":true}})
+            )),
+            json!({"name":"example-engine","title":"Example Engine","version":"1.2.3"})
+        );
+        let long = backend_agent_info(&init(json!({"name":"e".repeat(5000),"version":7})));
+        assert_eq!(long["name"].as_str().unwrap().chars().count(), 200);
+        assert!(long.get("version").is_none());
+        // A direct ACP agent has no hosted engine, and a name must be reported text.
+        for absent in [
+            json!({"agentInfo":{"name":"example-engine"}}),
+            init(Value::Null),
+            init(json!("example-engine")),
+            init(json!({"name":{"text":"example-engine"},"version":"1"})),
+            init(json!({"name":"\n","title":"  "})),
+        ] {
+            assert!(backend_agent_info(&absent).is_null(), "{absent}");
         }
     }
 
