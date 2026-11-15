@@ -13,6 +13,16 @@ are refused. Configured HTTPS certificate, key and optional CA files must be
 regular canonical files inside the existing private home's `tls` directory.
 External or linked TLS files are not repaired or adopted by this path.
 
+The source installer has written two exact texts for that unit. Installers
+through 0.12.2 wrote it without, and later installers write it with, the line
+`RestartForceExitStatus=SIGTERM` directly after `Restart=on-failure`. That line
+restarts the service after another program ends it with a termination signal; a
+stop through the service manager and the application's own clean exit still
+leave it stopped. Each text is accepted only byte for byte, and a unit with any
+other difference is refused. Adoption and later application updates never
+rewrite the unit, and an adopted installation stays bound to the exact text it
+was adopted with.
+
 This path requires the existing `/usr/bin/systemctl` and `/usr/bin/busctl`
 tools and the current user's private runtime directory at `/run/user/<uid>`.
 The manager is identified through the canonical local user bus, with its process
@@ -24,7 +34,9 @@ access is required; the application executable checks remain separate.
 ## Before adoption
 
 The owner first reviews unsettled effects and performs the original service's
-maintenance stop. An idle count or a successful stop acknowledgement alone is
+maintenance stop through the service manager (`systemctl --user stop`). With the
+newer unit text, a main process ended directly by a termination signal is
+started again. An idle count or a successful stop acknowledgement alone is
 insufficient: previously accepted management work may have effects outside the
 process, and a child can outlive a directly terminated parent. Account for those
 effects and preserve historical unknown results; do not replay them or mark them

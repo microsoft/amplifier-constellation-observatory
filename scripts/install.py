@@ -16,7 +16,7 @@ if not a.no_service:
   profile=home/'pam-profile';profile.write_text('@include common-auth\n@include common-account\n')
   run(['sudo','install','-m','0644',profile,pam]);profile.unlink()
  def quote(v):return '"'+str(v).replace('\\','\\\\').replace('"','\\"').replace('%','%%')+'"'
- unit_text='\n'.join(['[Unit]','Description=Agent Observatory','After=network-online.target','','[Service]','Type=simple',f'ExecStart={quote(binary)} --home {quote(home)} serve','Restart=on-failure','RestartSec=5','UMask=0077','KillMode=control-group','','[Install]','WantedBy=default.target',''])
+ unit_text='\n'.join(['[Unit]','Description=Agent Observatory','After=network-online.target','','[Service]','Type=simple',f'ExecStart={quote(binary)} --home {quote(home)} serve','Restart=on-failure','RestartForceExitStatus=SIGTERM','RestartSec=5','UMask=0077','KillMode=control-group','','[Install]','WantedBy=default.target',''])
  unit_path=Path.home()/'.config/systemd/user'/unit;unit_path.parent.mkdir(parents=True,exist_ok=True);unit_path.write_text(unit_text)
  (home/'agent-observatory.service').write_text(unit_text)
  run(['systemctl','--user','daemon-reload']);run(['systemctl','--user','enable','--now',unit])
