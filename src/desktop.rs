@@ -74,7 +74,10 @@ fn service_lock(home: &Path) -> Result<File> {
 /// transport result. Callers must still classify whether its status is a refusal.
 #[derive(Debug)]
 pub(crate) struct LocalApiResponseError {
+    // Only the Linux managed updater currently classifies this retained evidence.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub status: u16,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub body: serde_json::Value,
     message: String,
 }
