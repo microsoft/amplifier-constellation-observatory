@@ -1,0 +1,101 @@
+{
+  "audience": "People managing agents on one or several computers",
+  "citations": [
+    {
+      "path": "README.md",
+      "ref": "56dfdbe715aab2b0340fb91437103ed884156b9f",
+      "sha256": "cb06daf8f74ada6c53e7cc49f779cac327c57d43e4a06832a8ec94b5d03c1edc",
+      "url": "https://github.com/microsoft/amplifier-constellation-observatory/blob/56dfdbe715aab2b0340fb91437103ed884156b9f/README.md"
+    },
+    {
+      "path": "docs/contracts.md",
+      "ref": "56dfdbe715aab2b0340fb91437103ed884156b9f",
+      "sha256": "0086da61c450009bee0564a9e62a54545f41d70f9b31c23b81ba4c6f35f9fb37",
+      "url": "https://github.com/microsoft/amplifier-constellation-observatory/blob/56dfdbe715aab2b0340fb91437103ed884156b9f/docs/contracts.md"
+    }
+  ],
+  "display_name": "Agent Observatory",
+  "edges": [
+    {
+      "from": "self",
+      "relation": "contains",
+      "to": "view"
+    },
+    {
+      "from": "self",
+      "relation": "contains",
+      "to": "providers"
+    },
+    {
+      "from": "self",
+      "relation": "contains",
+      "to": "helper"
+    },
+    {
+      "from": "providers",
+      "relation": "uses",
+      "to": "agents"
+    },
+    {
+      "from": "providers",
+      "relation": "uses",
+      "to": "connectors"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "self",
+      "kind": "self",
+      "label": "Agent Observatory",
+      "repository": "microsoft/amplifier-constellation-observatory"
+    },
+    {
+      "id": "view",
+      "kind": "internal",
+      "label": "Browser systems view"
+    },
+    {
+      "id": "providers",
+      "kind": "internal",
+      "label": "Management provider mappings"
+    },
+    {
+      "id": "helper",
+      "kind": "internal",
+      "label": "Computer helper"
+    },
+    {
+      "id": "agents",
+      "kind": "external",
+      "label": "Managed or ACP-only agents"
+    },
+    {
+      "id": "connectors",
+      "kind": "external",
+      "label": "Independent connectors"
+    }
+  ],
+  "notes": [
+    "Computer helper is part of this product; it is optional for connecting an existing agent.",
+    "Observatory is not a required fleet supervisor, identity service or agent owner.",
+    "Management access, ACP access, machine placement and conversation participation are distinct."
+  ],
+  "page_kind": "user-facing app",
+  "purpose": "See your computers, create or connect agents, and manage their connections in one place.",
+  "ref": "56dfdbe715aab2b0340fb91437103ed884156b9f",
+  "repository": "microsoft/amplifier-constellation-observatory",
+  "roles": [
+    "Experience"
+  ],
+  "start_cta": {
+    "basis": "Existing approved README route; target release assets/availability not freshly audited in this plan.",
+    "label": "Download Observatory",
+    "url": "https://github.com/microsoft/amplifier-constellation-observatory/releases"
+  },
+  "summary": "An optional management experience over independently owned agents, computers and connections.",
+  "supports_roles": [
+    "Agent Instance",
+    "Connection"
+  ],
+  "visibility": "public"
+}
