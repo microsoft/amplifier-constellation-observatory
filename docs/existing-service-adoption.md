@@ -13,6 +13,14 @@ are refused. Configured HTTPS certificate, key and optional CA files must be
 regular canonical files inside the existing private home's `tls` directory.
 External or linked TLS files are not repaired or adopted by this path.
 
+This path requires the existing `/usr/bin/systemctl` and `/usr/bin/busctl`
+tools and the current user's private runtime directory at `/run/user/<uid>`.
+The manager is identified through the canonical local user bus, with its process
+generation, bus identity and connection credentials checked together. Conflicting
+`XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS` settings refuse adoption rather
+than selecting another manager. No permission repair or manager executable-link
+access is required; the application executable checks remain separate.
+
 ## Before adoption
 
 The owner first reviews unsettled effects and performs the original service's
