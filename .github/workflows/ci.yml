@@ -18,11 +18,11 @@ jobs:
       version: ${{ steps.closure.outputs.version }}
       source: ${{ steps.closure.outputs.source }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.13'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-helper-*
           merge-multiple: true
@@ -38,7 +38,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "sha256=$digest" >> "$GITHUB_OUTPUT"
           echo "source=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qualified-machine-helpers
           path: helper-closure/constellation-machine-helpers-*.zip*
@@ -83,8 +83,8 @@ jobs:
       CARGO_BUILD_TARGET: ${{ matrix.target }}
       OBSERVATORY_RELEASE_BINARY: target/${{ matrix.target }}/release/${{ matrix.executable }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.13'
       - name: Check release retries preserve published assets
@@ -125,7 +125,7 @@ jobs:
         run: |
           cargo +1.93.0 build --manifest-path machine-helper/Cargo.toml --locked
           python machine-helper/tests/actual-server.py
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         with:
           node-version: '22'
@@ -168,7 +168,7 @@ jobs:
           done
       - name: Verify native application replacement and recovery
         run: python tests/desktop_update_live.py --binary "$OBSERVATORY_RELEASE_BINARY"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: qualified-machine-helpers
           path: ${{ runner.temp }}/observatory-helper-closure
@@ -201,7 +201,7 @@ jobs:
           for metadata in dist/agent-observatory-*-"$TARGET"-desktop.*.json; do
             python scripts/check-one-computer.py --metadata "$metadata"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.target }}
           path: dist/*
@@ -244,8 +244,8 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.13'
       - name: Keep the Windows helper independent of a VC++ runtime install
@@ -298,7 +298,7 @@ jobs:
           version=$(python -c 'import tomllib; print(tomllib.load(open("machine-helper/Cargo.toml", "rb"))["package"]["version"])')
           if [[ "$GITHUB_REF_NAME" == machine-helper-v* ]]; then test "$GITHUB_REF_NAME" = "machine-helper-v$version"; fi
           python machine-helper/packaging/package.py --binary "$HELPER_RELEASE_BINARY" --platform "${{ matrix.platform }}" --version "$version" --source "$GITHUB_SHA" --output dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-helper-${{ matrix.platform }}
           path: dist/*
@@ -315,16 +315,16 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.13'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           merge-multiple: true
           path: artifacts
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: qualified-machine-helpers
           path: helper-closure
@@ -344,11 +344,11 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.13'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-helper-*
           merge-multiple: true
