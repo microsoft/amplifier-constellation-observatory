@@ -12,3 +12,5 @@
 .generated-media{display:grid;gap:8px;margin:12px 0}.generated-media img{max-width:100%;max-height:36rem;object-fit:contain;border-radius:12px}.generated-media audio{max-width:100%}
 
 .elicitation-form {display:grid;gap:1rem}.elicitation-form label{display:grid;gap:.4rem}.external-url{overflow-wrap:anywhere}.elicitation-form select[multiple]{min-height:6rem}
+
+.nav>a{display:block;text-align:left;border-radius:9px;color:#c7d9d3;padding:14px;font-weight:600;text-decoration:none}.nav>a:hover{background:#234b49;color:#eef6ec}.nav>a:focus-visible{outline:2px solid #b8d8cf;outline-offset:2px}@media(max-width:720px){.nav>a{white-space:nowrap;padding:9px 12px}}

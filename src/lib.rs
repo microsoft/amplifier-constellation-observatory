@@ -9,6 +9,7 @@ pub mod desktop_update;
 pub mod elicitation;
 pub mod error;
 pub mod experiments;
+pub mod fleet_policy;
 pub(crate) mod helper_support;
 pub mod instance_package;
 pub mod intake;

@@ -87,6 +87,17 @@ commitment does not advertise an unimplemented interface.
 
 ## Shared promises and exact interfaces
 
+Fleet approval mode is an explicit, optional batch operation over the registered
+agents' own policy APIs. Each agent remains authoritative across its chats; losing
+Observatory does not remove or change its policy. Report the full cohort and
+partial, unsupported, inaccessible, and uncertain outcomes. Preserve each agent's
+selected delegated clients and remembered rules when changing Ask/Automatic.
+Changing to Ask does not revoke Always rules. Neither new registrations nor local
+policy changes trigger background enforcement. Record dispatch intent before a
+write, preserve uncertain receipts after restart, and reconcile through reads
+without replaying an uncertain write. The exact routes and revision bindings are
+in [Fleet approval mode](api.md#fleet-approval-mode).
+
 [Composition](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md),
 [interaction](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md),
 [work continuity](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/work-continuity.md),

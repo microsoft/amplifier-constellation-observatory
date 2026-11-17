@@ -41,6 +41,7 @@ pub struct AppState {
     /// Serializes display-place binding validation with registry writes.
     pub places_registry_lock: Mutex<()>,
     pub inventory_registry_lock: Mutex<()>,
+    pub fleet_policy_lock: Mutex<()>,
     pub acp_clients: Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::acp::LiveSession>>>>,
 }
 impl AppState {
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS login_attempts(key TEXT PRIMARY KEY,failures INTEGER 
 CREATE TABLE IF NOT EXISTS views(id TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,kind TEXT NOT NULL,resource_id TEXT,data TEXT NOT NULL);")?;
         crate::machines::schema(&db)?;
+        crate::fleet_policy::recover(&db)?;
         db.execute("UPDATE records SET value=json_set(value,'$.status','interrupted','$.note','The service restarted. Inspect the remote result before retrying.') WHERE kind='jobs' AND json_extract(value,'$.status') IN ('queued','running')", [])?;
         db.execute("UPDATE records SET value=json_set(value,'$.status','interrupted','$.error','The service restarted during this turn; inspect the agent before retrying.') WHERE kind='sessions' AND json_extract(value,'$.status')='running'", [])?;
         // A service restart cannot establish whether a submitted input reached the engine.
@@ -132,6 +134,7 @@ CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGE
             provision_gate: Mutex::new(()),
             places_registry_lock: Mutex::new(()),
             inventory_registry_lock: Mutex::new(()),
+            fleet_policy_lock: Mutex::new(()),
             acp_clients: Mutex::new(HashMap::new()),
         }))
     }
