@@ -568,3 +568,288 @@ async fn connection_downgrade_during_final_identity_read_prevents_dispatch() {
     assert_eq!(op["targets"][0]["status"], "conflict");
     assert!(f.data.lock().unwrap().puts.is_empty());
 }
+
+#[tokio::test]
+async fn new_agents_inherit_once_and_keep_rules_delegates_and_later_choices() {
+    let (_dir, s, token) = state();
+    s.inheritance_started
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let app = server::router(s.clone());
+    let f = fixture().await;
+    let (code, default) = req(
+        &app,
+        &token,
+        "PUT",
+        &format!("{BASE}/default"),
+        json!({"expected_revision":0,"mode":"automatic"}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(default["revision"], 1);
+    save(&s, f.endpoint.clone(), "new-agent");
+    agent_observatory::fleet_policy::inherit_pending(&s)
+        .await
+        .unwrap();
+    {
+        let r = f.data.lock().unwrap();
+        assert_eq!(r.puts.len(), 1);
+        assert_eq!(r.policy["mode"], "automatic");
+        assert_eq!(r.policy["rules"][0]["id"], "remembered-rule");
+        assert_eq!(r.policy["delegated_clients"], json!(["chosen-client"]));
+    }
+    f.data.lock().unwrap().policy["mode"] = json!("ask");
+    save(&s, f.endpoint.clone(), "new-alias");
+    agent_observatory::fleet_policy::inherit_pending(&s)
+        .await
+        .unwrap();
+    assert_eq!(f.data.lock().unwrap().puts.len(), 1);
+    assert_eq!(f.data.lock().unwrap().policy["mode"], "ask");
+    assert_eq!(
+        s.list("approval_policy_inheritance").unwrap()[0]["status"],
+        "succeeded"
+    );
+}
+
+#[tokio::test]
+async fn default_does_not_change_existing_agents_and_requires_admin_cas() {
+    let (_dir, s, token) = state();
+    let f = fixture().await;
+    save(&s, f.endpoint.clone(), "existing");
+    let app = server::router(s.clone());
+    let (code, _) = req(
+        &app,
+        "invalid",
+        "PUT",
+        &format!("{BASE}/default"),
+        json!({"expected_revision":0,"mode":"automatic"}),
+    )
+    .await;
+    assert!(matches!(
+        code,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+    assert_eq!(
+        req(
+            &app,
+            &token,
+            "PUT",
+            &format!("{BASE}/default"),
+            json!({"expected_revision":0,"mode":"automatic"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        req(
+            &app,
+            &token,
+            "PUT",
+            &format!("{BASE}/default"),
+            json!({"expected_revision":0,"mode":"ask"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    save(&s, f.endpoint.clone(), "existing-alias");
+    agent_observatory::fleet_policy::inherit_pending(&s)
+        .await
+        .unwrap();
+    assert!(f.data.lock().unwrap().puts.is_empty());
+    assert_eq!(f.data.lock().unwrap().policy["mode"], "ask");
+}
+
+#[tokio::test]
+async fn disabling_default_cancels_queued_registration_without_put() {
+    let (_dir, s, token) = state();
+    s.inheritance_started
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let app = server::router(s.clone());
+    let f = fixture().await;
+    req(
+        &app,
+        &token,
+        "PUT",
+        &format!("{BASE}/default"),
+        json!({"expected_revision":0,"mode":"automatic"}),
+    )
+    .await;
+    save(&s, f.endpoint.clone(), "queued");
+    req(
+        &app,
+        &token,
+        "PUT",
+        &format!("{BASE}/default"),
+        json!({"expected_revision":1,"mode":null}),
+    )
+    .await;
+    agent_observatory::fleet_policy::inherit_pending(&s)
+        .await
+        .unwrap();
+    assert!(f.data.lock().unwrap().puts.is_empty());
+    assert_eq!(
+        s.list("approval_policy_inheritance").unwrap()[0]["status"],
+        "not-sent"
+    );
+}
+
+#[tokio::test]
+async fn uncertain_inherited_write_survives_restart_without_replay() {
+    let (dir, s, token) = state();
+    s.inheritance_started
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let app = server::router(s.clone());
+    let f = fixture().await;
+    f.data.lock().unwrap().malformed_reply = true;
+    req(
+        &app,
+        &token,
+        "PUT",
+        &format!("{BASE}/default"),
+        json!({"expected_revision":0,"mode":"automatic"}),
+    )
+    .await;
+    save(&s, f.endpoint.clone(), "new");
+    agent_observatory::fleet_policy::inherit_pending(&s)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.list("approval_policy_inheritance").unwrap()[0]["status"],
+        "unknown"
+    );
+    let reopened = AppState::open(dir.path().into()).unwrap();
+    agent_observatory::fleet_policy::inherit_pending(&reopened)
+        .await
+        .unwrap();
+    assert_eq!(f.data.lock().unwrap().puts.len(), 1);
+    assert_eq!(
+        reopened.list("approval_policy_inheritance").unwrap()[0]["status"],
+        "unknown"
+    );
+}
+
+#[tokio::test]
+async fn inheritance_refuses_changed_connection_and_missing_management_access() {
+    for drift in [true, false] {
+        let (_dir, s, token) = state();
+        s.inheritance_started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let app = server::router(s.clone());
+        let f = fixture().await;
+        req(
+            &app,
+            &token,
+            "PUT",
+            &format!("{BASE}/default"),
+            json!({"expected_revision":0,"mode":"automatic"}),
+        )
+        .await;
+        let mut e = f.endpoint.clone();
+        if !drift {
+            e["management"]["access"] = json!("observe");
+        }
+        let mut e = save(&s, e, "new");
+        if drift {
+            e["label"] = json!("Changed");
+            s.save("endpoints", e, Some(1)).unwrap();
+        }
+        agent_observatory::fleet_policy::inherit_pending(&s)
+            .await
+            .unwrap();
+        assert!(f.data.lock().unwrap().puts.is_empty());
+        assert_eq!(
+            s.list("approval_policy_inheritance").unwrap()[0]["status"],
+            if drift { "conflict" } else { "access-required" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn registration_worker_applies_saved_default_without_a_browser() {
+    let (_dir, s, token) = state();
+    let app = server::router(s.clone());
+    let f = fixture().await;
+    req(
+        &app,
+        &token,
+        "PUT",
+        &format!("{BASE}/default"),
+        json!({"expected_revision":0,"mode":"automatic"}),
+    )
+    .await;
+    let (code, _) = req(
+        &app,
+        &token,
+        "POST",
+        "/api/v1/endpoints",
+        f.endpoint.clone(),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if s.list("approval_policy_inheritance")
+                .unwrap()
+                .iter()
+                .any(|r| r["status"] == "succeeded")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(f.data.lock().unwrap().puts.len(), 1);
+}
+
+#[tokio::test]
+async fn changing_default_during_policy_read_prevents_dispatch() {
+    let (_dir, s, token) = state();
+    s.inheritance_started
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let app = server::router(s.clone());
+    let f = fixture().await;
+    req(
+        &app,
+        &token,
+        "PUT",
+        &format!("{BASE}/default"),
+        json!({"expected_revision":0,"mode":"automatic"}),
+    )
+    .await;
+    save(&s, f.endpoint.clone(), "new");
+    let (started, release) = {
+        let mut r = f.data.lock().unwrap();
+        r.pause_descriptor_at = Some(2);
+        (r.descriptor_started.clone(), r.descriptor_release.clone())
+    };
+    let worker = s.clone();
+    let task =
+        tokio::spawn(
+            async move { agent_observatory::fleet_policy::inherit_pending(&worker).await },
+        );
+    tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        req(
+            &app,
+            &token,
+            "PUT",
+            &format!("{BASE}/default"),
+            json!({"expected_revision":1,"mode":null})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    release.notify_one();
+    task.await.unwrap().unwrap();
+    assert!(f.data.lock().unwrap().puts.is_empty());
+    assert_eq!(
+        s.list("approval_policy_inheritance").unwrap()[0]["status"],
+        "not-sent"
+    );
+}

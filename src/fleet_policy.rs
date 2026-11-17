@@ -12,7 +12,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -172,6 +172,7 @@ fn public(mut op: Value) -> Value {
 fn latest(s: &AppState) -> ApiResult<Option<Value>> {
     Ok(s.list(RECORDS)?
         .into_iter()
+        .filter(|op| op["default_revision"].is_null())
         .max_by_key(|op| op["created_at"].as_i64())
         .map(public))
 }
@@ -212,7 +213,8 @@ pub async fn preview(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<
         "endpoint_revision":r["endpoint_revision"],"instance_id":r["instance_id"],"policy_revision":r["policy_revision"]})).collect();
     Ok(Json(
         json!({"mode":mode,"complete":complete,"observed_at":now_ms(),"targets":rows,
-        "preview":{"targets":targets},"last_operation":latest(&s)?}),
+        "preview":{"targets":targets},"last_operation":latest(&s)?,
+        "new_agent_default":default_value(&s)?,"inheritance":s.list(INHERITANCE)?}),
     ))
 }
 fn conflict(detail: &str) -> ApiError {
@@ -325,6 +327,23 @@ fn update(s: &AppState, id: &str, change: impl FnOnce(&mut Value)) -> ApiResult<
 fn save_row(s: &AppState, id: &str, index: usize, row: Value) -> ApiResult<()> {
     update(s, id, |op| op["targets"][index] = row)?;
     Ok(())
+}
+// Serialize cancellation of a saved default with the durable dispatch boundary.
+fn save_dispatch(s: &AppState, id: &str, index: usize, mut result: Value) -> ApiResult<bool> {
+    let _journal = s.fleet_policy_lock.lock().unwrap();
+    let mut op = s.read(RECORDS, id)?;
+    let revision = op["revision"].as_u64();
+    let allowed = match op["default_revision"].as_u64() {
+        None => true,
+        Some(r) => default_value(s)?["revision"].as_u64() == Some(r),
+    };
+    if !allowed {
+        result["status"] = json!("not-sent");
+        result["detail"] = json!("The new-agent default changed before dispatch.");
+    }
+    op["targets"][index] = result;
+    s.save(RECORDS, op, revision)?;
+    Ok(allowed)
 }
 fn finish(op: &mut Value) {
     let rows = op["targets"].as_array().unwrap();
@@ -445,7 +464,9 @@ async fn run(s: &AppState, request: &Apply) -> ApiResult<()> {
         let payload = json!({"expected_revision":p["revision"],"mode":request.mode,"delegated_clients":p["delegated_clients"]});
         result["status"] = json!("sending");
         result["detail"] = json!("Dispatch intent saved; waiting for the agent's result.");
-        save_row(s, id, index, result.clone())?;
+        if !save_dispatch(s, id, index, result.clone())? {
+            continue;
+        }
         match provider::call(s, &endpoint, "apply-approval-policy", Some(&payload)).await {
             Ok(reply)
                 if valid_policy(&reply)
@@ -507,4 +528,207 @@ pub async fn operation(
         }
     }
     Ok(Json(public(s.read(RECORDS, &id)?)))
+}
+
+const DEFAULTS: &str = "approval_policy_defaults";
+const INHERITANCE: &str = "approval_policy_inheritance";
+fn read_default(db: &Connection) -> ApiResult<Value> {
+    let raw: Option<String> = db
+        .query_row(
+            "SELECT value FROM records WHERE kind=?1 AND id='new-agents'",
+            [DEFAULTS],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match raw {
+        Some(raw) => serde_json::from_str(&raw)
+            .map_err(|_| ApiError::bad("Invalid saved approval default"))?,
+        None => json!({"revision":0,"mode":null}),
+    })
+}
+fn default_value(s: &AppState) -> ApiResult<Value> {
+    read_default(&s.db.lock().unwrap())
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultChange {
+    expected_revision: u64,
+    mode: Option<String>,
+}
+/// Owner preference only. Each agent remains authoritative after the one-time write.
+pub async fn set_default(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Json(change): Json<DefaultChange>,
+) -> ApiResult<Json<Value>> {
+    let actor = auth::check(&s, &h, "admin", true)?.actor;
+    if change
+        .mode
+        .as_deref()
+        .is_some_and(|m| !matches!(m, "ask" | "automatic"))
+    {
+        return Err(ApiError::bad("Choose Ask, Automatic, or no default."));
+    }
+    let _inventory = s.inventory_registry_lock.lock().unwrap();
+    let _journal = s.fleet_policy_lock.lock().unwrap();
+    let mut db = s.db.lock().unwrap();
+    let tx = db.transaction()?;
+    let old = read_default(&tx)?;
+    if old["revision"].as_u64() != Some(change.expected_revision) {
+        return Err(conflict(
+            "The new-agent default changed; refresh before saving.",
+        ));
+    }
+    // Existing identities, including aliases, are not newly connected agents.
+    let existing: Vec<String> = {
+        let mut q = tx.prepare("SELECT value FROM records WHERE kind='endpoints'")?;
+        q.query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for raw in existing {
+        let e: Value =
+            serde_json::from_str(&raw).map_err(|_| ApiError::bad("Invalid agent record"))?;
+        if let Some(id) = managed_identity(&e) {
+            let record = json!({"id":id,"endpoint_id":e["id"],"label":e["label"],"status":"existing","detail":"Existing agent; its current setting is preserved."});
+            tx.execute(
+                "INSERT OR IGNORE INTO records VALUES(?1,?2,?3)",
+                params![INHERITANCE, id, record.to_string()],
+            )?;
+        }
+    }
+    let value = json!({"id":"new-agents","revision":change.expected_revision.checked_add(1).ok_or_else(|| ApiError::bad("Revision exhausted"))?,"mode":change.mode,"updated_at":now_ms(),"actor":actor});
+    tx.execute("INSERT INTO records VALUES(?1,'new-agents',?2) ON CONFLICT(kind,id) DO UPDATE SET value=excluded.value", params![DEFAULTS,value.to_string()])?;
+    tx.execute("INSERT INTO audit(at,kind,resource_id,data) VALUES(?1,'approval-policy.default-changed','new-agents',?2)",params![now_ms(),value.to_string()])?;
+    tx.commit()?;
+    Ok(Json(value))
+}
+fn managed_identity(e: &Value) -> Option<&str> {
+    if e["kind"] != "agent" || e["management"]["provider"] != "agent-instance" {
+        return None;
+    }
+    e["management"]["expected_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+}
+/// Called within the endpoint registry transaction, for every registration path.
+/// Identity-keyed records prevent re-adding an alias from resetting an owner's choice.
+pub fn register(db: &Connection, endpoint: &Value) -> ApiResult<()> {
+    let Some(id) = managed_identity(endpoint) else {
+        return Ok(());
+    };
+    let default = read_default(db)?;
+    if default["mode"].is_null() {
+        return Ok(());
+    }
+    let record = json!({"id":id,"endpoint_id":endpoint["id"],"endpoint_revision":endpoint["revision"],"label":endpoint["label"],"status":"queued","mode":default["mode"],"default_revision":default["revision"],"operation_id":uuid::Uuid::new_v4().to_string(),"created_at":now_ms()});
+    db.execute(
+        "INSERT OR IGNORE INTO records VALUES(?1,?2,?3)",
+        params![INHERITANCE, id, record.to_string()],
+    )?;
+    Ok(())
+}
+/// No network writes are retried. Startup reconciles only already saved operation results.
+pub async fn inherit_pending(s: &AppState) -> ApiResult<()> {
+    let Ok(_permit) = s.operation_gate.clone().try_acquire_owned() else {
+        return Ok(());
+    };
+    for mut record in s.list(INHERITANCE)? {
+        let instance_id = record["id"].as_str().unwrap().to_owned();
+        if record["status"] == "applying" {
+            let op = s.read(RECORDS, record["operation_id"].as_str().unwrap());
+            if let Ok(op) = op {
+                if op["status"] != "running" {
+                    record["status"] = op["targets"][0]["status"].clone();
+                    record["detail"] = op["targets"][0]["detail"].clone();
+                    s.save(INHERITANCE, record, None)?;
+                }
+            } else {
+                record["status"] = json!("not-sent");
+                record["detail"] = json!(
+                    "Registration was interrupted before dispatch; use Apply to all to include this agent."
+                );
+                s.save(INHERITANCE, record, None)?;
+            }
+            continue;
+        }
+        if record["status"] != "queued" {
+            continue;
+        }
+        {
+            let _journal = s.fleet_policy_lock.lock().unwrap();
+            if s.read(INHERITANCE, &instance_id)?["status"] != "queued" {
+                continue;
+            }
+            if s.list(RECORDS)?.iter().any(|op| op["status"] == "running") {
+                return Ok(());
+            }
+            record["status"] = json!("applying");
+            s.save(INHERITANCE, record.clone(), None)?;
+        }
+        let endpoint = s.read("endpoints", record["endpoint_id"].as_str().unwrap())?;
+        let mut result = inspect(s, &endpoint).await;
+        if endpoint["revision"] != record["endpoint_revision"]
+            || endpoint["management"]["expected_id"] != instance_id
+        {
+            result["status"] = json!("conflict");
+            result["detail"] =
+                json!("The agent connection changed before its default could be applied.");
+        }
+        if default_value(s)?["revision"] != record["default_revision"] {
+            result["status"] = json!("not-sent");
+            result["detail"] = json!("The new-agent default changed before dispatch.");
+        }
+        if result["status"] != "ready" {
+            record["status"] = result["status"].clone();
+            record["detail"] = result["detail"].clone();
+            s.save(INHERITANCE, record, None)?;
+            continue;
+        }
+        let request = Apply {
+            request_id: record["operation_id"].as_str().unwrap().into(),
+            mode: record["mode"].as_str().unwrap().into(),
+            targets: vec![Target {
+                endpoint_id: endpoint["id"].as_str().unwrap().into(),
+                endpoint_revision: endpoint["revision"].as_u64().unwrap(),
+                instance_id: Some(instance_id),
+                policy_revision: result["policy_revision"].as_u64(),
+            }],
+        };
+        result["status"] = json!("pending");
+        s.save(RECORDS,json!({"id":request.request_id,"mode":request.mode,"status":"running","actor":"new-agent-default","default_revision":record["default_revision"],"request":request,"targets":[result]}),Some(0))?;
+        if run(s, &request).await.is_err() {
+            update(s, &request.request_id, interrupt)?;
+        }
+        let op = s.read(RECORDS, &request.request_id)?;
+        record["status"] = op["targets"][0]["status"].clone();
+        record["detail"] = op["targets"][0]["detail"].clone();
+        s.save(INHERITANCE, record, None)?;
+    }
+    Ok(())
+}
+pub fn start_inheritance(s: &Arc<AppState>) {
+    use std::sync::atomic::Ordering;
+    if s.inheritance_started.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let weak = Arc::downgrade(s);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let Some(s) = weak.upgrade() else {
+                break;
+            };
+            if *s.shutdown.borrow() {
+                break;
+            }
+            if let Err(e) = inherit_pending(&s).await {
+                let _ = s.audit(
+                    "approval-policy.inheritance-error",
+                    None,
+                    json!({"detail":e.1}),
+                );
+            }
+        }
+    });
 }

@@ -92,8 +92,12 @@ agents' own policy APIs. Each agent remains authoritative across its chats; losi
 Observatory does not remove or change its policy. Report the full cohort and
 partial, unsupported, inaccessible, and uncertain outcomes. Preserve each agent's
 selected delegated clients and remembered rules when changing Ask/Automatic.
-Changing to Ask does not revoke Always rules. Neither new registrations nor local
-policy changes trigger background enforcement. Record dispatch intent before a
+Changing to Ask does not revoke Always rules. An administrator may also save a
+new-agent default. Newly connected managed identities inherit it once through the
+same agent-owned API; existing identities and later local choices are preserved.
+Identity aliases never reset that choice. Registration atomically records the
+selected default and connection revision. Unsupported, inaccessible or uncertain
+results remain visible; no failed write is repeated in the background. Record dispatch intent before a
 write, preserve uncertain receipts after restart, and reconcile through reads
 without replaying an uncertain write. The exact routes and revision bindings are
 in [Fleet approval mode](api.md#fleet-approval-mode).

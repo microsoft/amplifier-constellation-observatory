@@ -42,6 +42,7 @@ pub struct AppState {
     pub places_registry_lock: Mutex<()>,
     pub inventory_registry_lock: Mutex<()>,
     pub fleet_policy_lock: Mutex<()>,
+    pub inheritance_started: std::sync::atomic::AtomicBool,
     pub acp_clients: Mutex<HashMap<String, Arc<tokio::sync::Mutex<crate::acp::LiveSession>>>>,
 }
 impl AppState {
@@ -135,6 +136,7 @@ CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGE
             places_registry_lock: Mutex::new(()),
             inventory_registry_lock: Mutex::new(()),
             fleet_policy_lock: Mutex::new(()),
+            inheritance_started: std::sync::atomic::AtomicBool::new(false),
             acp_clients: Mutex::new(HashMap::new()),
         }))
     }
@@ -209,6 +211,9 @@ CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGE
             .unwrap_or(json!(now_ms()));
         value["updated_at"] = json!(now_ms());
         tx.execute("INSERT INTO records VALUES(?1,?2,?3) ON CONFLICT(kind,id) DO UPDATE SET value=excluded.value",params![kind,id,value.to_string()])?;
+        if kind == "endpoints" {
+            crate::fleet_policy::register(&tx, &value)?;
+        }
         tx.commit()?;
         Ok(value)
     }

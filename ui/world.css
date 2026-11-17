@@ -155,3 +155,5 @@
 #observatory-world .ow-approval-settings:focus-visible{outline:3px solid #327d72;outline-offset:4px}
 #observatory-world .ow-approval-loading{height:145px;margin:22px 0;background:linear-gradient(#efdfc6 0 18px,transparent 18px 45px,#efdfc6 45px 65px,transparent 65px 93px,#efdfc6 93px 112px,transparent 112px);opacity:.7}
 @media(max-width:480px){#observatory-world .ow-approval-agents li{align-items:flex-start;gap:12px}#observatory-world .ow-approval-settings{max-width:85px;line-height:1.4}#observatory-world .ow-approval-panel .ow-dialog-actions{display:grid;grid-template-columns:1fr}#observatory-world .ow-top-actions{flex-wrap:wrap}}
+
+.ow-approval-inherit{display:flex;align-items:flex-start;gap:.65rem;margin:1rem 0;line-height:1.5}.ow-approval-inherit input{flex:none;margin-top:.3rem}

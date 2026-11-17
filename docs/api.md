@@ -766,3 +766,23 @@ these controls through the same revisioned view API as other screens.
 ## Installation updates
 
 For installations advertising `constellation.installation-updates/1`, the agent’s **Updates** tab exposes checks and installation requests. Preferences open the installation’s own programmable dashboard; its independent helper performs upgrades and recovery. Other ACP agents remain usable without this capability.
+
+### New-agent approval default
+
+`PUT /api/v1/approval-policy/default` requires administrator access and
+`{ "expected_revision": 0, "mode": "automatic" }`. Mode may be `ask`, `automatic`,
+or `null` (keep each new agent’s own setting). GET approval-policy includes
+`new_agent_default` and identity-keyed `inheritance` results.
+
+This is an optional owner preference, initially unset. Saving it does not change
+existing agents; the batch operation still handles those. Endpoint registration
+(including paired installation) atomically queues one default application per new
+managed Instance identity. It uses fresh identity/capability/revision checks and
+preserves rules and delegated clients. Aliases, reconnects and endpoint edits do
+not enforce the default again. Changing the default cancels queued old-revision
+applications; already recorded dispatch intent may complete. Local choices then
+remain authoritative even while Observatory runs or is unavailable.
+
+Failures stay visible beside the agent. An interrupted or uncertain write is never
+resent. Refresh the full preview and explicitly apply current settings to handle
+an agent that was unavailable or lacked management access when connected.

@@ -6,7 +6,7 @@ const running = operation => operation?.status === 'running';
 const validId = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
 export function createApprovalPolicyController({api, storage, storageKey, onChange = () => {}, uuid = () => crypto.randomUUID()}) {
-    const state = {snapshot: null, operation: null, selected: '', loading: false, applying: false, uncertain: false, forbidden: false, error: '', requestId: null};
+    const state = {snapshot: null, operation: null, selected: '', inherit: null, loading: false, applying: false, uncertain: false, forbidden: false, error: '', requestId: null};
     const changed = () => onChange(state);
     const readSaved = () => {
         try { const id = storage.getItem(storageKey); if (validId(id)) state.requestId = id; } catch {}
@@ -46,7 +46,9 @@ export function createApprovalPolicyController({api, storage, storageKey, onChan
             const snapshot = await api('approval-policy');
             if (!Array.isArray(snapshot.targets) || !Array.isArray(snapshot.preview?.targets)) throw Error('Invalid preview');
             state.snapshot = snapshot;
-            if (!state.selected && modes.has(snapshot.mode)) state.selected = snapshot.mode;
+            if (state.inherit === null) state.inherit = modes.has(snapshot.new_agent_default?.mode);
+            const observedModes = new Set(snapshot.targets.filter(t => t.status === 'ready').map(t => t.mode));
+            if (!state.selected) state.selected = snapshot.new_agent_default?.mode || (observedModes.size === 1 ? [...observedModes][0] : '');
             // The server's current operation wins over an older completed change
             // saved by this browser. Preserve prior tracking when switching IDs.
             const latest = snapshot.last_operation;
@@ -62,10 +64,23 @@ export function createApprovalPolicyController({api, storage, storageKey, onChan
     function canApply() {
         if (state.loading || state.applying || state.forbidden || state.uncertain || running(state.operation) || !modes.has(state.selected)) return false;
         const targets = state.snapshot?.targets || [];
-        return targets.some(t => t.status === 'ready' && t.mode !== state.selected);
+        return targets.some(t => t.status === 'ready' && t.mode !== state.selected) || (state.snapshot && (state.snapshot.new_agent_default?.mode || null) !== (state.inherit ? state.selected : null));
     }
     async function apply() {
         if (!canApply()) return;
+        const needsFleet = state.snapshot.targets.some(t => t.status === 'ready' && t.mode !== state.selected);
+        const desiredDefault = state.inherit ? state.selected : null;
+        if ((state.snapshot.new_agent_default?.mode || null) !== desiredDefault) {
+            state.applying = true; state.error = ''; changed();
+            try {
+                state.snapshot.new_agent_default = await api('approval-policy/default', 'PUT', {expected_revision: state.snapshot.new_agent_default?.revision || 0, mode: desiredDefault});
+            } catch {
+                state.snapshot = null;
+                state.error = 'The new-agent default was not confirmed. Refresh settings to check whether it was saved before making another change.';
+                return;
+            } finally { state.applying = false; changed(); }
+        }
+        if (!needsFleet) { await refresh(); return; }
         const request = {request_id: uuid(), mode: state.selected, targets: structuredClone(state.snapshot.preview.targets)};
         state.applying = true; state.error = ''; state.operation = null;
         try { remember(request.request_id); }
@@ -91,7 +106,7 @@ export function createApprovalPolicyController({api, storage, storageKey, onChan
         try { await readOperation(); } finally { state.loading = false; changed(); }
         if (state.operation && !running(state.operation) && !state.uncertain) await refresh();
     }
-    return {state, refresh, select, apply, poll, canApply, needsPoll: () => running(state.operation) || state.uncertain};
+    return {state, refresh, select, apply, poll, canApply, setInherit: value => { if (!state.applying) { state.inherit = !!value; changed(); } }, needsPoll: () => running(state.operation) || state.uncertain};
 }
 
 function targetStatus(target, operation) {
@@ -108,25 +123,28 @@ export function renderApprovalPolicy(controller, {settingsLink = () => ''} = {})
     const targets = snapshot.targets, unique = targets.filter(t => t.status !== 'duplicate');
     const operation = s.operation, outcomes = new Map((operation?.targets || []).map(t => [t.endpoint_id, t]));
     const rows = targets;
+    const inherited = new Map((snapshot.inheritance || []).map(r => [r.endpoint_id, r]));
     const confirmed = unique.filter(t => ['succeeded', 'unchanged'].includes(outcomes.get(t.endpoint_id)?.status)).length;
     const ready = unique.filter(t => t.status === 'ready').length;
     const blocked = s.loading || s.applying || s.forbidden || s.uncertain || running(operation);
-    const summary = snapshot.mode === 'mixed' ? 'Your agents currently use different settings.'
+    const knownModes = new Set(unique.filter(t => t.status === 'ready').map(t => t.mode));
+    const summary = knownModes.size === 1 && knownModes.has('automatic') ? `Approval prompts are off for ${ready} ${ready === 1 ? 'agent' : 'agents'}.`
+        : snapshot.mode === 'mixed' ? 'Your agents currently use different settings.'
         : modes.has(snapshot.mode) ? `Current setting: ${modeLabel(snapshot.mode)}${snapshot.complete ? ' for all agents.' : ' where confirmed.'}` : 'Some current settings could not be confirmed.';
     let result = '';
     if (operation) {
         const finished = !running(operation);
         result = `<section class="ow-approval-result" aria-live="polite"><h3>${finished ? `${confirmed} of ${unique.length} agents confirmed ${modeLabel(operation.mode)}` : 'Applying your choice…'}</h3><p>${finished ? operation.status === 'complete' ? 'The agents confirmed this change. Refresh to check their latest settings.' : 'Some agents still need attention. Their individual results are below. No failed or uncertain change is retried automatically.' : 'You can close this window. Observatory keeps the change record so you can check it later.'}</p></section>`;
     }
-    return `<div class="ow-approval-panel"><p class="ow-approval-intro">Set how all ${unique.length} ${unique.length === 1 ? 'agent asks' : 'agents ask'} for tool approval across their chats.</p><p class="ow-approval-current">${esc(summary)}</p>
-        ${unique.length ? `<fieldset class="ow-approval-choices" ${blocked ? 'disabled' : ''}><legend>When a tool needs approval</legend>
-            <label><input type="radio" name="fleet-approval-mode" value="ask" data-control="approval-mode" data-key="approval-mode-ask" ${s.selected === 'ask' ? 'checked' : ''}><span><strong>Ask</strong><small>Ask for a decision, unless an “Always allow” rule already matches.</small></span></label>
-            <label><input type="radio" name="fleet-approval-mode" value="automatic" data-control="approval-mode" data-key="approval-mode-automatic" ${s.selected === 'automatic' ? 'checked' : ''}><span><strong>Automatic</strong><small>Don’t ask for tool approvals. Automatically approve requests the agent offers.</small></span></label>
-        </fieldset><p class="ow-approval-limits">Each agent keeps its own policy. Existing limits still apply. Sign-ins and questions are separate.</p>
-        <div class="ow-dialog-actions"><button type="button" class="ow-button ow-primary" data-action="approvals-apply" data-key="approvals-apply" ${controller.canApply() ? '' : 'disabled'}>${s.applying ? 'Submitting…' : `Apply to all ${unique.length} ${unique.length === 1 ? 'agent' : 'agents'}`}</button><button type="button" class="ow-button" data-action="approvals-refresh" data-key="approvals-refresh" ${s.loading || s.applying ? 'disabled' : ''}>${running(operation) || s.uncertain ? 'Check change status' : 'Refresh settings'}</button></div>
-        ${ready < unique.length ? `<p class="ow-approval-note">${unique.length - ready} ${unique.length - ready === 1 ? 'agent needs' : 'agents need'} attention. An unavailable agent keeps its current setting.</p>` : ''}` : '<p>No agents are connected to Observatory yet. Connect an agent to manage its approvals here.</p>'}
+    return `<div class="ow-approval-panel"><p class="ow-approval-intro">Choose how your agents ask for permission across their chats.</p><p class="ow-approval-current">${esc(summary)}</p><p>${ready} of ${unique.length} agents support this control.</p>
+        <fieldset class="ow-approval-choices" ${blocked ? 'disabled' : ''}><legend>When a tool needs approval</legend>
+            <label><input type="radio" name="fleet-approval-mode" value="ask" data-control="approval-mode" data-key="approval-mode-ask" ${s.selected === 'ask' ? 'checked' : ''}><span><strong>Ask before actions</strong><small>Pause for approval when no remembered rule matches.</small></span></label>
+            <label><input type="radio" name="fleet-approval-mode" value="automatic" data-control="approval-mode" data-key="approval-mode-automatic" ${s.selected === 'automatic' ? 'checked' : ''}><span><strong>Allow all actions (Automatic)</strong><small>No individual approval prompts across your agents’ chats, including shell commands and connected tools.</small></span></label>
+        </fieldset><label class="ow-approval-inherit"><input type="checkbox" data-control="approval-inherit" data-key="approval-inherit" ${s.inherit ? 'checked' : ''} ${blocked ? 'disabled' : ''}> Use this setting for new agents I connect</label><p class="ow-approval-limits">Existing access limits still apply. Sign-ins and questions may still need you. You can change any agent’s setting later.</p>
+        <div class="ow-dialog-actions"><button type="button" class="ow-button ow-primary" data-action="approvals-apply" data-key="approvals-apply" ${controller.canApply() ? '' : 'disabled'}>${s.applying ? 'Submitting…' : 'Save approval settings'}</button><button type="button" class="ow-button" data-action="approvals-refresh" data-key="approvals-refresh" ${s.loading || s.applying ? 'disabled' : ''}>${running(operation) || s.uncertain ? 'Check change status' : 'Refresh settings'}</button></div>
+        ${ready < unique.length ? `<p class="ow-approval-note">${unique.length - ready} ${unique.length - ready === 1 ? 'agent needs' : 'agents need'} attention. An unavailable agent keeps its current setting.</p>` : ''}
         ${s.error ? `<p class="ow-approval-error" role="alert">${esc(s.error)}</p>` : ''}${result}
-        ${targets.length ? `<h3>All agents</h3><ul class="ow-approval-agents">${rows.map(t => `<li><div><strong>${esc(t.label || t.endpoint_id)}</strong><span class="ow-approval-state">${esc(targetStatus(t, null))}</span>${outcomes.has(t.endpoint_id) ? `<small>Last change: ${esc(targetStatus(outcomes.get(t.endpoint_id), operation))}</small>` : ''}${['offline','access-required','unsupported','conflict','unknown','not-sent'].includes(t.status) ? `<small>${esc(({offline:'Connect to this agent and refresh its settings.', 'access-required':'This connection needs permission to manage approvals.', unsupported:'This agent does not expose shared approval settings.', conflict:'Refresh to review its current settings.', unknown:'Check its settings before requesting another change.', 'not-sent':'No request was sent to this agent.'})[t.status])}</small>` : ''}</div>${settingsLink(t.endpoint_id)}</li>`).join('')}</ul>` : ''}
+        ${targets.length ? `<h3>All agents</h3><ul class="ow-approval-agents">${rows.map(t => `<li><div><strong>${esc(t.label || t.endpoint_id)}</strong><span class="ow-approval-state">${esc(targetStatus(t, null))}</span>${outcomes.has(t.endpoint_id) ? `<small>Last change: ${esc(targetStatus(outcomes.get(t.endpoint_id), operation))}</small>` : ''}${['offline','access-required','unsupported','conflict','unknown','not-sent'].includes(t.status) ? `<small>${esc(({offline:'Connect to this agent and refresh its settings.', 'access-required':'This connection needs permission to manage approvals.', unsupported:'This agent does not expose shared approval settings.', conflict:'Refresh to review its current settings.', unknown:'Check its settings before requesting another change.', 'not-sent':'No request was sent to this agent.'})[t.status])}</small>` : ''}</div>${inherited.has(t.endpoint_id) && !['existing','succeeded','unchanged'].includes(inherited.get(t.endpoint_id).status) ? `<small>New-agent default: ${esc(inherited.get(t.endpoint_id).detail || inherited.get(t.endpoint_id).status)}</small>` : ''}${settingsLink(t.endpoint_id)}</li>`).join('')}</ul>` : ''}
         <p class="ow-approval-note">“Always allow” rules stay with each agent. Open its settings, then Access &amp; credentials → Approvals, to review or revoke them. Switching to Ask keeps those rules.</p>
-        <p class="ow-approval-note">This applies to the agents connected here now, including any outside the current view. Newly connected agents keep their own settings.</p></div>`;
+        <p class="ow-approval-note">${snapshot.new_agent_default?.mode ? `New agents inherit ${modeLabel(snapshot.new_agent_default.mode)} once when connected. Later per-agent changes are preserved.` : 'New agents keep their own settings unless you enable the new-agent default above.'}</p></div>`;
 }

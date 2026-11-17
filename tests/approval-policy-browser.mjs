@@ -12,9 +12,11 @@ const artifacts=process.env.OBSERVATORY_QA_DIR||path.join(root,'private','approv
 const targets=Array.from({length:17},(_,i)=>({endpoint_id:randomUUID(),label:i===0?'Anchor':i===1?'Polaris':`Agent ${i+1}`,endpoint_revision:1,instance_id:randomUUID(),policy_revision:i<15?4:null,mode:i<15?'ask':null,status:i===15?'offline':i===16?'unsupported':'ready'}));
 const endpoints=targets.map(t=>({id:t.endpoint_id,revision:1,kind:'agent',label:t.label,management:{provider:'agent-instance',access:'manage',expected_id:t.instance_id,base_url:'https://settings.invalid'},ui_url:'https://settings.invalid'}));
 let view={id:randomUUID(),revision:1,world:{}},operation=null,loseReply=true,forbidden=false;
+let defaultValue={revision:0,mode:null};
+const defaultWrites=[];
 const writes=[],requests=[],errors=[],checks=[],captures=[];
 const pass=name=>{checks.push(name);console.log('PASS '+name)};
-const status=()=>({mode:targets.every(t=>t.mode==='automatic')?'automatic':'mixed',complete:false,observed_at:Date.now(),targets,preview:{targets:targets.map(({endpoint_id,endpoint_revision,instance_id,policy_revision})=>({endpoint_id,endpoint_revision,instance_id,policy_revision}))},last_operation:operation});
+const status=()=>({mode:targets.every(t=>t.mode==='automatic')?'automatic':'mixed',complete:false,observed_at:Date.now(),targets,preview:{targets:targets.map(({endpoint_id,endpoint_revision,instance_id,policy_revision})=>({endpoint_id,endpoint_revision,instance_id,policy_revision}))},last_operation:operation,new_agent_default:defaultValue,inheritance:[]});
 const server=http.createServer(async(req,res)=>{
  try{
   const url=new URL(req.url,'http://fixture');let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):null;
@@ -22,6 +24,7 @@ const server=http.createServer(async(req,res)=>{
   if(url.pathname==='/auth/session')return json({authenticated:true,owner:'fixture-owner',csrf:'fixture-csrf'});
   const api=url.pathname.replace('/api/v1/','');
   if(api==='approval-policy'){if(forbidden)return json({error:'Administrator required'},403);return json(status())}
+  if(api==='approval-policy/default'&&req.method==='PUT'){defaultWrites.push(body);assert.equal(body.expected_revision,defaultValue.revision);defaultValue={revision:defaultValue.revision+1,mode:body.mode};return json(defaultValue)}
   if(api==='approval-policy/operations'&&req.method==='POST'){
    writes.push(structuredClone(body));assert.equal(writes.length,1,'Browser must not resend');assert.equal(body.targets.length,17);assert.equal(body.mode,'automatic');
    operation={id:body.request_id,mode:body.mode,status:'partial',created_at:Date.now(),updated_at:Date.now(),targets:targets.map(t=>({...t,status:t.status==='ready'?'succeeded':t.status,observed:t.status==='ready'?{mode:'automatic',policy_revision:5,matches_requested_mode:true}:null}))};
@@ -51,6 +54,7 @@ try{
  assert(await page.locator('.ow-approval-agents').getByText('Not reachable',{exact:true}).count());assert(await page.locator('.ow-approval-agents').getByText('Not supported here',{exact:true}).count());pass('Partial outcome keeps unavailable and unsupported agents visible');
  await page.reload();await page.locator('[data-action=approvals]').click();await page.getByRole('heading',{name:'15 of 17 agents confirmed Automatic'}).waitFor();assert.equal(writes.length,1);pass('Reload restores the existing operation without another policy write');
  const mobileContext=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});const mobile=await mobileContext.newPage();mobile.on('pageerror',e=>errors.push(String(e)));await mobile.goto(base+'/?approvals=1');await mobile.getByRole('heading',{name:'15 of 17 agents confirmed Automatic'}).waitFor();assert.equal(writes.length,1);pass('New browser context recovers the server-owned operation without local storage');
+ await mobile.getByRole('checkbox',{name:'Use this setting for new agents I connect'}).check();await mobile.locator('[data-action=approvals-apply]').click();await mobile.getByText('New agents inherit Automatic once when connected.',{exact:false}).waitFor();assert.equal(defaultWrites.length,1);assert.equal(writes.length,1);pass('Save a persistent new-agent default without rewriting already Automatic agents');
  const mobileShot=path.join(artifacts,'mobile-approvals.png');await mobile.screenshot({path:mobileShot,fullPage:true});captures.push(mobileShot);
  const overflow=await mobile.evaluate(()=>document.documentElement.scrollWidth>innerWidth);assert.equal(overflow,false);const box=await mobile.locator('#ow-dialog').boundingBox();assert(box.width<=390);pass('Mobile layout fits without horizontal page overflow');
  await mobile.keyboard.press('Escape');await mobile.locator('#ow-dialog').waitFor({state:'hidden'});await mobile.locator('[data-action=approvals]').click();await mobile.locator('.ow-approval-agents li').first().waitFor();assert.equal(writes.length,1);pass('Closing and reopening never resubmits the change');
