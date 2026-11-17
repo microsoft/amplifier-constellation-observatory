@@ -30,6 +30,8 @@ pub fn operations(endpoint: &Value) -> Vec<Operation> {
     ];
     match provider {
         "agent-instance" => ops.extend([
+            op("approval-policy", "GET", "approval-policy", "admin"),
+            op("apply-approval-policy", "PUT", "approval-policy", "admin"),
             op("updates", "GET", "updates", "observe"),
             op("request-update", "POST", "updates", "manage"),
             op("update-policy", "PUT", "updates/policy", "manage"),
@@ -117,7 +119,14 @@ pub fn operations(endpoint: &Value) -> Vec<Operation> {
             if let Ok(extra) = serde_json::from_value::<Vec<Operation>>(
                 endpoint["management"]["operations"].clone(),
             ) {
-                for operation in extra {
+                for mut operation in extra {
+                    // Custom mappings cannot weaken approval-policy authority by
+                    // renaming the operation or declaring a lower local scope.
+                    if operation.path == "approval-policy"
+                        || operation.path.starts_with("approval-policy/")
+                    {
+                        operation.access = "admin".into();
+                    }
                     ops.retain(|existing| existing.id != operation.id);
                     ops.push(operation);
                 }
@@ -194,6 +203,7 @@ pub fn validate(value: &Value) -> ApiResult<()> {
                     || ![
                         "observe",
                         "manage",
+                        "admin",
                         "work",
                         "work:execute",
                         "memory",
@@ -261,6 +271,21 @@ async fn request(
         .bearer_auth(token);
     if let Some(v) = body {
         req = req.json(v);
+    }
+    if method == "PUT" && path == "approval-policy" {
+        // Identity discovery above can await the network. Admit this dispatch
+        // against the current registry only after that wait and request setup.
+        // Registry edits serialize with admission, not with the network request.
+        let _registry = state.inventory_registry_lock.lock().unwrap();
+        let current = endpoint["id"]
+            .as_str()
+            .and_then(|id| state.read("endpoints", id).ok());
+        if current.as_ref() != Some(endpoint) {
+            return Err(ApiError(
+                axum::http::StatusCode::CONFLICT,
+                "The saved connection changed before dispatch; no policy request was sent".into(),
+            ));
+        }
     }
     let mut response = req.send().await.map_err(|_| {
         if path == "service-connections" {
@@ -409,14 +434,22 @@ pub fn available_operations(endpoint: &Value, descriptor: &Value) -> Vec<Operati
     };
     all.into_iter()
         .filter(|op| {
-            (!service_operation(&op.id)
+            (!approval_operation(&op.id)
                 || descriptor["capabilities"]
                     .as_array()
                     .is_some_and(|capabilities| {
                         capabilities
                             .iter()
-                            .any(|c| c == "constellation.service-connections/1")
+                            .any(|c| c == "agent-instance.approval-policy/1")
                     }))
+                && (!service_operation(&op.id)
+                    || descriptor["capabilities"]
+                        .as_array()
+                        .is_some_and(|capabilities| {
+                            capabilities
+                                .iter()
+                                .any(|c| c == "constellation.service-connections/1")
+                        }))
                 && (["descriptor", "status"].contains(&op.id.as_str())
                     || advertised.iter().any(|a| {
                         a["path"] == op.path
@@ -429,6 +462,8 @@ pub fn available_operations(endpoint: &Value, descriptor: &Value) -> Vec<Operati
 }
 fn optional_operation(id: &str) -> bool {
     [
+        "approval-policy",
+        "apply-approval-policy",
         "updates",
         "request-update",
         "update-policy",
@@ -450,6 +485,9 @@ fn optional_operation(id: &str) -> bool {
         "service-connection-action",
     ]
     .contains(&id)
+}
+fn approval_operation(id: &str) -> bool {
+    matches!(id, "approval-policy" | "apply-approval-policy")
 }
 fn service_operation(id: &str) -> bool {
     matches!(id, "service-connections" | "service-connection-action")
@@ -572,7 +610,7 @@ pub async fn call(
                 "This provider does not offer that operation".into(),
             )
         })?;
-    if (selected.access == "manage" || selected.method != "GET")
+    if (matches!(selected.access.as_str(), "manage" | "admin") || selected.method != "GET")
         && endpoint["management"]["access"] != "manage"
     {
         return Err(ApiError::bad("This connection has observation access only"));
@@ -594,9 +632,17 @@ pub async fn call(
             }
             if endpoint["management"]["provider"] == "agent-instance"
                 && optional_operation(operation)
-                && !available_operations(endpoint, &descriptor)
+                && (!available_operations(endpoint, &descriptor)
                     .iter()
                     .any(|o| o.id == operation)
+                    || (approval_operation(operation)
+                        && !["approval-policy", "apply-approval-policy"]
+                            .iter()
+                            .all(|id| {
+                                available_operations(endpoint, &descriptor)
+                                    .iter()
+                                    .any(|o| &o.id == id)
+                            })))
             {
                 return Err(ApiError(
                     axum::http::StatusCode::NOT_IMPLEMENTED,

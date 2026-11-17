@@ -126,3 +126,32 @@
 #observatory-world .ow-machine-state strong{font-size:18px;color:#315d43}
 #observatory-world .ow-machine-state p{font-size:14px;margin:7px 0}
 @media(max-width:430px){#observatory-world .ow-pair-intro{gap:12px;align-items:flex-start}#observatory-world .ow-pair-intro .ow-mini-computer{width:95px;height:75px}#observatory-world .ow-pair-intro p{font-size:14px}#observatory-world .ow-pair-code{gap:10px}#observatory-world .ow-pair-code output{font-size:25px;letter-spacing:.01em}#observatory-world .ow-pair-steps{padding-left:20px}#observatory-world .ow-pair-platform{max-width:100%}}
+
+/* Approval settings use each installation's existing policy. */
+#observatory-world .ow-approval-panel{font-size:15px;line-height:1.55}
+#observatory-world .ow-approval-panel p{max-width:64ch}
+#observatory-world .ow-approval-intro{margin:18px 0 7px}
+#observatory-world .ow-approval-current{color:var(--ow-muted);font-size:14px}
+#observatory-world .ow-approval-choices{padding:0;margin:23px 0 14px;border:0;min-width:0}
+#observatory-world .ow-approval-choices legend{font-weight:800;margin-bottom:12px}
+#observatory-world .ow-approval-choices label{display:flex;gap:12px;padding:14px 0;border-top:1px solid #dac19f;cursor:pointer}
+#observatory-world .ow-approval-choices label:last-child{border-bottom:1px solid #dac19f}
+#observatory-world .ow-approval-choices input{accent-color:#315d43;width:20px;height:20px;flex:none;margin:3px 0 0}
+#observatory-world .ow-approval-choices strong,#observatory-world .ow-approval-choices small{display:block}
+#observatory-world .ow-approval-choices small{font-size:14px;font-weight:600;color:var(--ow-muted);margin-top:3px}
+#observatory-world .ow-approval-choices:disabled{opacity:.65}
+#observatory-world .ow-approval-limits,#observatory-world .ow-approval-note{font-size:13px;color:var(--ow-muted);margin-top:12px}
+#observatory-world .ow-approval-error{background:#fff0d8;border:1px solid #9b552f;color:#75341e;padding:13px;border-radius:10px;margin-top:16px}
+#observatory-world .ow-approval-result{margin-top:22px;padding:16px;background:#e8eddd;border:1px solid #9da987;border-radius:12px}
+#observatory-world .ow-approval-result h3{margin:0 0 6px;font-size:17px}
+#observatory-world .ow-approval-result p{font-size:14px}
+#observatory-world .ow-approval-agents{list-style:none;padding:0;margin:8px 0 20px}
+#observatory-world .ow-approval-agents li{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:14px 0;border-bottom:1px solid #dac19f}
+#observatory-world .ow-approval-agents li>div{min-width:0}
+#observatory-world .ow-approval-agents strong,#observatory-world .ow-approval-agents small,#observatory-world .ow-approval-state{display:block;overflow-wrap:anywhere}
+#observatory-world .ow-approval-state{font-size:14px;margin-top:2px}
+#observatory-world .ow-approval-agents small{font-size:13px;color:var(--ow-muted);margin-top:4px}
+#observatory-world .ow-approval-settings{font-size:13px;text-underline-offset:4px;flex:none;padding:8px 0}
+#observatory-world .ow-approval-settings:focus-visible{outline:3px solid #327d72;outline-offset:4px}
+#observatory-world .ow-approval-loading{height:145px;margin:22px 0;background:linear-gradient(#efdfc6 0 18px,transparent 18px 45px,#efdfc6 45px 65px,transparent 65px 93px,#efdfc6 93px 112px,transparent 112px);opacity:.7}
+@media(max-width:480px){#observatory-world .ow-approval-agents li{align-items:flex-start;gap:12px}#observatory-world .ow-approval-settings{max-width:85px;line-height:1.4}#observatory-world .ow-approval-panel .ow-dialog-actions{display:grid;grid-template-columns:1fr}#observatory-world .ow-top-actions{flex-wrap:wrap}}

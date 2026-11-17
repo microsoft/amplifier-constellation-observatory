@@ -145,6 +145,8 @@ jobs:
           node tests/markdown.mjs
           node tests/world-model.mjs
           node tests/world-browser.mjs
+          node tests/approval-policy-ui.mjs
+          node tests/approval-policy-browser.mjs
           node tests/machine-pairing-browser.mjs
       - name: Verify Windows does not require a separate VC++ runtime
         if: runner.os == 'Windows'

@@ -138,6 +138,71 @@ failure and does not imply a mutation. Local validation failures before dispatch
 remain separate. Saved service connections retain their specialized contract
 below.
 
+### Fleet approval mode
+
+These administrator-only routes are an optional client of each installed agent's
+authoritative policy. They do not create an Observatory policy service, grant
+remote access, enroll future agents automatically, or affect direct engine routes
+that bypass Instance. The fleet consists of all registered `kind: "agent"`
+endpoints, including unsupported and unreachable entries.
+
+- `GET /api/v1/approval-policy` observes each agent and returns `targets`,
+  `preview.targets`, `mode` (`ask`, `automatic`, `mixed`, or `unknown`), `complete`,
+  `observed_at`, and the durable `last_operation` (or null). A partial observation
+  reports `unknown`, never a fleet-wide mode inferred from only reachable agents.
+- `POST /api/v1/approval-policy/operations` accepts exactly
+  `{request_id, mode, targets}`. Use a fresh UUID, `ask` or `automatic`, and the
+  complete `preview.targets` array unchanged. Each target contains `endpoint_id`,
+  `endpoint_revision`, `instance_id` (nullable), and `policy_revision` (nullable).
+  The registered cohort, connection revisions and pinned identities must still
+  match. Newly available policies absent from the preview require a new preview.
+- `GET /api/v1/approval-policy/operations/{id}` returns the durable operation. It
+  may read an uncertain agent's current policy, but never repeats a mutation.
+
+Preview target states are `ready`, `duplicate`, `unsupported`, `offline`,
+`access-required`, or `conflict`; each includes `label`, `detail`, and observed
+`mode`/`policy_revision` when available. Connections to the same pinned instance
+are represented separately but deduplicated for mutation; `primary_endpoint_id`
+identifies the selected connection. Successfully inspected aliases are ordered by
+endpoint ID; an alias with an access or identity failure keeps that failure visible.
+Only `agent-instance` providers advertising both the
+`agent-instance.approval-policy/1` capability and exact `approval-policy` GET/PUT
+operations qualify. Observation-only connections, absent pinned identities, and
+remote credentials without Instance administrator scope remain explicit gaps.
+
+POST returns the recorded operation immediately, with `id`, `mode`, `status`
+(`running`, `complete`, or `partial`), per-target outcomes, and timestamps. A
+background task continues the accepted operation independently of the browser;
+there is no ongoing enforcement. At most one fleet policy operation runs at a
+time. Each target rereads its policy and uses the approved revision in an Instance
+compare-and-set PUT. The payload preserves `delegated_clients` exactly; it does not
+copy or rewrite remembered rules, mint credentials, or change selected engines.
+Ask continues honoring existing Always rules. Automatic approves valid current
+engine requests; delegation determines Always eligibility, not whether Automatic
+can operate. Engine, operating-system, resource and work-budget limits still apply.
+
+Target outcomes include `pending`, `sending`, `succeeded`, `unchanged`, `conflict`,
+`unknown`, `unsupported`, `access-required`, `offline`, `duplicate`, and `not-sent`.
+Every mutation has a durable `sending` intent before dispatch. Restart converts
+unfinished sends to `unknown` and undispatched entries to `not-sent`, without
+resuming the operation. Reusing a request UUID with the same payload returns its
+existing result; changing its payload returns 409. Unknown delivery remains
+unknown even if a later GET observes the requested mode: a separate `observed`
+object contains `mode`, `policy_revision`, `observed_at`, and
+`matches_requested_mode`. It is a current observation, not proof that the earlier
+request committed. The UI can recover the last operation after a lost POST reply
+or reload. Changing a policy again requires a deliberate new request and fresh
+whole-cohort preview; no retry or fleet default is applied automatically.
+
+The provider operations `approval-policy` and `apply-approval-policy` likewise
+require local `admin` scope, an explicitly managed connection and the remote
+installation's own administrator credential. Registry configuration cannot turn
+an observation credential into that authority. Generic mappings to
+`approval-policy` or its subpaths always require local `admin`, irrespective of
+their configured operation name or access label. Final dispatch admission checks
+the saved connection again after remote identity discovery; edits and detachment
+share that registry boundary. A change admitted before detachment may still finish.
+
 ### Saved service connections
 
 Agent Instance mappings require the pinned identity, advertised capability

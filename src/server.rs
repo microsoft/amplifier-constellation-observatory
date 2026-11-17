@@ -52,6 +52,7 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/places", get(places).post(add_place))
         .route("/api/v1/places/{id}", put(edit_place).delete(delete_place))
         .route("/app.js", get(script))
+        .route("/approval-policy.js", get(approval_policy_script))
         .route("/app.css", get(styles))
         .route("/agents/{id}/context/v1/query", post(crate::context::query))
         .route("/healthz", get(|| async { Json(json!({"ok":true})) }))
@@ -61,6 +62,15 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/descriptor", get(descriptor))
         .route("/api/v1/local-proof", get(auth::local_proof))
         .route("/api/v1/status", get(status))
+        .route("/api/v1/approval-policy", get(crate::fleet_policy::preview))
+        .route(
+            "/api/v1/approval-policy/operations",
+            post(crate::fleet_policy::apply),
+        )
+        .route(
+            "/api/v1/approval-policy/operations/{id}",
+            get(crate::fleet_policy::operation),
+        )
         .route("/api/v1/native-update/stop", post(update_stop))
         .route("/api/v1/native-update/finish", post(update_finish))
         .route("/api/v1/endpoints", get(endpoints).post(add_endpoint))
@@ -196,6 +206,12 @@ async fn script() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("../ui/app.js"),
+    )
+}
+async fn approval_policy_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../ui/approval-policy.js"),
     )
 }
 async fn styles() -> impl IntoResponse {
@@ -439,6 +455,7 @@ async fn delete_endpoint(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let p = auth::check(&s, &h, "manage", true)?;
+    let _inventory = s.inventory_registry_lock.lock().unwrap();
     s.remove("endpoints", &id, revision(&body)?)?;
     s.audit("endpoint.detached", Some(&id), json!({"actor":p.actor}))?;
     Ok(Json(json!({"detached":true})))

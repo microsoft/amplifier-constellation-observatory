@@ -1,25 +1,25 @@
 {
   "repository": "microsoft/amplifier-constellation-instance",
-  "version": "0.22.8",
-  "source": "91fd345c47e94a1a93231b752e65c61925df0ee6",
+  "version": "0.22.10",
+  "source": "41126571668f31da081f497fab7ecca7f9570927",
   "targets": {
     "aarch64-apple-darwin": {
-      "sha256": "350f7b7c421348f1e9ceeef2eae44f1ec3ab4950fd2b176353113e3993e1de62"
+      "sha256": "9df51148e22d5f913821365ed827ac8bdb4ddec6c8faee157f06cdb8ba1c245d"
     },
     "aarch64-pc-windows-msvc": {
-      "sha256": "559471c2c1190ec1815b492baaa87c63b6f04c5d2aa6cfffd9ce217502237c97"
+      "sha256": "d453f638011abbdd60bbd51dddbb486cc3554bc668951d93e0514018f6e3557d"
     },
     "aarch64-unknown-linux-gnu": {
-      "sha256": "bae041eab92d56aad8be653bdd6fdf6c204b7ebba9668c479291e7b432c666c1"
+      "sha256": "7b132f4f8bf0740017263f951224f0ea9a6efd0eb354f001d4acaf1d1cffb84b"
     },
     "x86_64-apple-darwin": {
-      "sha256": "144609e9a75dd1f0b43f4e3e6e6d285f4aa08301960e48ac207892513271439f"
+      "sha256": "f9bd7209fd3a3d820ac2a3e0913857ab6ae5c0cb2c2b60916c04529ac8e4748e"
     },
     "x86_64-pc-windows-msvc": {
-      "sha256": "bbbc7d5fc5a2e69a1e7479a52e4677636729a97e6a5a2a0bf9b91bceeb29b224"
+      "sha256": "fcddaa2ce9932989c183e0bd9acec9b5cc7e824228ba9214f0eebfd015a7960c"
     },
     "x86_64-unknown-linux-gnu": {
-      "sha256": "258c18690110bb57fe26c5123453f067f29438672375a25150f0fb1079431749"
+      "sha256": "e8d86fe659c9c75daa7e3ba6fd673dc33aa2f713c1ee585ea3f64cc897669d4a"
     }
   }
 }
