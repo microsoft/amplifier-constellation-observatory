@@ -7,6 +7,11 @@ computer so you can manage agents there too.
 It is an optional part of [Amplifier Constellation](https://github.com/microsoft/amplifier-constellation).
 Agents keep their own identities, settings, credentials, and work.
 
+Use **Approvals** to choose **Ask before actions** or **Allow all actions
+(Automatic)** across your agents. Select **Use this setting for new agents I
+connect** to save it as your default. Each agent keeps its own setting afterward;
+access limits and sign-in requirements still apply.
+
 ## Get started
 
 1. Download the **desktop** package for your operating system and processor from

@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub fn router(s: Arc<AppState>) -> Router {
+    crate::fleet_policy::start_inheritance(&s);
     Router::new()
         .merge(crate::machines::routes())
         .merge(crate::machine_network::routes())
@@ -63,6 +64,10 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/api/v1/local-proof", get(auth::local_proof))
         .route("/api/v1/status", get(status))
         .route("/api/v1/approval-policy", get(crate::fleet_policy::preview))
+        .route(
+            "/api/v1/approval-policy/default",
+            put(crate::fleet_policy::set_default),
+        )
         .route(
             "/api/v1/approval-policy/operations",
             post(crate::fleet_policy::apply),

@@ -85,5 +85,18 @@ await check('A newer operation from another browser replaces an older completed 
     assert.equal(f.controller.state.operation.id,latest.id);assert(!f.controller.canApply());
     assert.equal(f.saved.get('fixture:previous:'+old.id),old.id);assert.equal(f.calls.filter(c=>c.method==='POST').length,0);
 });
-console.log('10 approval UI controls passed');
-console.log(JSON.stringify({sourceSha256:createHash('sha256').update(source).digest('hex'),testSha256:createHash('sha256').update(await fs.readFile(fileURLToPath(import.meta.url))).digest('hex'),passed:10}));
+
+await check('New-agent default can be saved when every existing agent already matches',async()=>{
+ let defaultValue={revision:0,mode:null};
+ const f=setup((path,method,body)=>{if(method==='PUT'){assert.equal(path,'approval-policy/default');assert.deepEqual(body,{expected_revision:0,mode:'automatic'});defaultValue={revision:1,mode:'automatic'};return defaultValue;}return {...snapshot([{...baseTargets[0],mode:'automatic'}]),new_agent_default:defaultValue};});
+ await f.controller.refresh();assert(!f.controller.canApply());f.controller.setInherit(true);assert(f.controller.canApply());await f.controller.apply();
+ assert.equal(f.calls.filter(c=>c.method==='PUT').length,1);assert.equal(f.calls.filter(c=>c.method==='POST').length,0);assert.equal(f.controller.state.snapshot.new_agent_default.mode,'automatic');
+ assert(renderApprovalPolicy(f.controller).includes('Later per-agent changes are preserved'));
+});
+await check('Lost default response requires readback and never resends automatically',async()=>{
+ let defaultValue={revision:0,mode:null};const f=setup((path,method)=>{if(method==='PUT'){defaultValue={revision:1,mode:'automatic'};throw Error('lost reply');}return {...snapshot([{...baseTargets[0],mode:'automatic'}]),new_agent_default:defaultValue};});
+ await f.controller.refresh();f.controller.setInherit(true);await f.controller.apply();assert.equal(f.controller.state.snapshot,null);assert(!f.controller.canApply());
+ await f.controller.refresh();assert(!f.controller.canApply());assert.equal(f.calls.filter(c=>c.method==='PUT').length,1);
+});
+console.log('12 approval UI controls passed');
+console.log(JSON.stringify({sourceSha256:createHash('sha256').update(source).digest('hex'),testSha256:createHash('sha256').update(await fs.readFile(fileURLToPath(import.meta.url))).digest('hex'),passed:12}));
