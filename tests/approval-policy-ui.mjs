@@ -98,5 +98,5 @@ await check('Lost default response requires readback and never resends automatic
  await f.controller.refresh();f.controller.setInherit(true);await f.controller.apply();assert.equal(f.controller.state.snapshot,null);assert(!f.controller.canApply());
  await f.controller.refresh();assert(!f.controller.canApply());assert.equal(f.calls.filter(c=>c.method==='PUT').length,1);
 });
-console.log('10 approval UI controls passed');
-console.log(JSON.stringify({sourceSha256:createHash('sha256').update(source).digest('hex'),testSha256:createHash('sha256').update(await fs.readFile(fileURLToPath(import.meta.url))).digest('hex'),passed:10}));
+console.log('12 approval UI controls passed');
+console.log(JSON.stringify({sourceSha256:createHash('sha256').update(source).digest('hex'),testSha256:createHash('sha256').update(await fs.readFile(fileURLToPath(import.meta.url))).digest('hex'),passed:12}));
