@@ -51,16 +51,6 @@
       "from": "self",
       "relation": "contains",
       "to": "local-setup"
-    },
-    {
-      "from": "local-setup",
-      "relation": "uses",
-      "to": "agents"
-    },
-    {
-      "from": "local-setup",
-      "relation": "uses",
-      "to": "connectors"
     }
   ],
   "nodes": [
