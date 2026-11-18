@@ -5,6 +5,12 @@ on:
     tags: ['v[0-9]*', 'machine-helper-v[0-9]*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      helpers_only:
+        description: Build only the six-platform Computer helper inputs
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -46,7 +52,7 @@ jobs:
 
   observatory:
     needs: [helper-closure]
-    if: ${{ !startsWith(github.ref, 'refs/tags/machine-helper-v') }}
+    if: ${{ !startsWith(github.ref, 'refs/tags/machine-helper-v') && !(github.event_name == 'workflow_dispatch' && inputs.helpers_only == true) }}
     strategy:
       fail-fast: false
       matrix:
