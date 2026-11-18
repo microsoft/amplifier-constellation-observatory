@@ -33,21 +33,25 @@ jobs:
           pattern: release-helper-*
           merge-multiple: true
           path: helper-artifacts
+      - name: Check build-only signed input boundaries without network access
+        run: python scripts/test-signed-build-inputs.py
       - id: closure
-        name: Bind the exact same-source six-platform helper closure
+        name: Bind the selected six-platform helper source and exact bytes
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_INPUTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.helpers_only == true }}
         run: |
           version=$(python -c 'import tomllib; print(tomllib.load(open("machine-helper/Cargo.toml", "rb"))["package"]["version"])')
-          python scripts/prepare-helper-release.py --directory helper-artifacts --output helper-closure --version "$version" --source "$GITHUB_SHA"
-          bundle="helper-closure/constellation-machine-helpers-$version.zip"
-          digest=$(python -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"),"sha256").hexdigest())' "$bundle")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
-          echo "source=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          source_args=()
+          if [[ "$SOURCE_INPUTS_ONLY" == true ]]; then source_args=(--source-inputs-only); fi
+          python scripts/fetch-signed-build-inputs.py select-helpers --source-directory helper-artifacts --output helper-closure --version "$version" --source "$GITHUB_SHA" --github-output "$GITHUB_OUTPUT" "${source_args[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: qualified-machine-helpers
-          path: helper-closure/constellation-machine-helpers-*.zip*
+          path: |
+            helper-closure/constellation-machine-helpers-*.zip*
+            helper-closure/signed-input-provenance.json
           if-no-files-found: error
 
   observatory:
@@ -208,18 +212,34 @@ jobs:
         with:
           name: qualified-machine-helpers
           path: ${{ runner.temp }}/observatory-helper-closure
-      - name: Compose the exact same-run complete desktop package
+      - name: Compose the complete desktop from explicitly selected owner inputs
         env:
           TARGET: ${{ matrix.target }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python scripts/fetch-instance-bundle.py --target "$TARGET" --output "$RUNNER_TEMP/observatory-instance-bundle"
+          selection=$(python scripts/fetch-signed-build-inputs.py inspect)
+          signed=$(python -c 'import json,sys; print("true" if json.loads(sys.argv[1])["armed"] else "false")' "$selection")
           slack_args=()
-          if [[ "$TARGET" == *-pc-windows-msvc || "$TARGET" == *-apple-darwin ]]; then
-            python scripts/fetch-slack-bundle.py --target "$TARGET" --output "$RUNNER_TEMP/observatory-slack-bundle.zip"
-            slack_args=(--slack-bundle "$RUNNER_TEMP/observatory-slack-bundle.zip")
+          if [[ "$TARGET" == *-apple-darwin && "$signed" == true ]]; then
+            python scripts/fetch-signed-build-inputs.py target --target "$TARGET" --output "$RUNNER_TEMP/observatory-signed-owner-inputs" > "$RUNNER_TEMP/observatory-signed-input-provenance.json"
+            instance_bundle="$RUNNER_TEMP/observatory-signed-owner-inputs/instance"
+            slack_args=(--slack-bundle "$RUNNER_TEMP/observatory-signed-owner-inputs/slack.zip")
+          else
+            instance_bundle="$RUNNER_TEMP/observatory-instance-bundle"
+            python scripts/fetch-instance-bundle.py --target "$TARGET" --output "$instance_bundle"
+            if [[ "$TARGET" == *-pc-windows-msvc || "$TARGET" == *-apple-darwin ]]; then
+              python scripts/fetch-slack-bundle.py --target "$TARGET" --output "$RUNNER_TEMP/observatory-slack-bundle.zip"
+              slack_args=(--slack-bundle "$RUNNER_TEMP/observatory-slack-bundle.zip")
+            fi
           fi
           version=$("$OBSERVATORY_RELEASE_BINARY" --version | cut -d' ' -f2)
-          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$RUNNER_TEMP/observatory-instance-bundle" --machine-helpers "$RUNNER_TEMP/observatory-helper-closure/constellation-machine-helpers-${{ needs.helper-closure.outputs.version }}.zip" --helpers-sha256 "${{ needs.helper-closure.outputs.sha256 }}" "${slack_args[@]}" --output dist
+          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$instance_bundle" --machine-helpers "$RUNNER_TEMP/observatory-helper-closure/constellation-machine-helpers-${{ needs.helper-closure.outputs.version }}.zip" --helpers-sha256 "${{ needs.helper-closure.outputs.sha256 }}" "${slack_args[@]}" --output dist
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'macOS'
+        with:
+          name: signed-input-provenance-${{ matrix.target }}
+          path: ${{ runner.temp }}/observatory-signed-input-provenance.json
+          if-no-files-found: ignore
       - name: Verify actual packaged Observatory to Slack setup and saved-connection continuity
         if: runner.os == 'Windows' || runner.os == 'macOS'
         env:
