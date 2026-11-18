@@ -287,6 +287,12 @@ fn budget(action: Action) -> Duration {
         // Owner action budget is60s; fixed10s transport/exit margin does not
         // extend that product budget or permit redispatch.
         Action::Start { .. } => 70,
+        // These fixed owner operations have an existing180s helper budget.
+        // The facade allows10s for its response; this outer bridge allows
+        // another10s for transport/exit, without retrying the owner action.
+        Action::Api(
+            ApiAction::Authorize | ApiAction::Confirm | ApiAction::Connect | ApiAction::Discard,
+        ) => 200,
         Action::Status | Action::Api(_) => 100,
     })
 }
@@ -441,6 +447,35 @@ async fn run(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fixed_owner_setup_transport_fits_existing_helper_budget() {
+        for api in [
+            ApiAction::Authorize,
+            ApiAction::Confirm,
+            ApiAction::Connect,
+            ApiAction::Discard,
+        ] {
+            assert_eq!(budget(Action::Api(api)), Duration::from_secs(200));
+        }
+        for api in [
+            ApiAction::GetConfig,
+            ApiAction::PutConfig,
+            ApiAction::GetSetup,
+            ApiAction::GetStatus,
+            ApiAction::GetConversations,
+            ApiAction::GetActivity,
+        ] {
+            assert_eq!(budget(Action::Api(api)), Duration::from_secs(100));
+        }
+        assert_eq!(
+            budget(Action::Start {
+                request_id: Uuid::nil()
+            }),
+            Duration::from_secs(70)
+        );
+        assert_eq!(budget(Action::Setup), Duration::from_secs(300));
+    }
 
     #[test]
     fn fixed_api_routes_and_action_discriminators_cannot_be_overridden() {

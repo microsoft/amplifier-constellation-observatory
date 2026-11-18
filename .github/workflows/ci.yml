@@ -168,6 +168,7 @@ jobs:
           node tests/agent-setup-browser.mjs
           node tests/slack-setup-browser.mjs
           node tests/consumer-onboarding-browser.mjs
+          python tests/consumer_setup_live.py --self-test
       - uses: actions/upload-artifact@v4
         if: always() && (runner.os == 'Windows' || runner.os == 'macOS')
         with:
@@ -212,6 +213,20 @@ jobs:
           fi
           version=$("$OBSERVATORY_RELEASE_BINARY" --version | cut -d' ' -f2)
           python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$RUNNER_TEMP/observatory-instance-bundle" --machine-helpers "$RUNNER_TEMP/observatory-helper-closure/constellation-machine-helpers-${{ needs.helper-closure.outputs.version }}.zip" --helpers-sha256 "${{ needs.helper-closure.outputs.sha256 }}" "${slack_args[@]}" --output dist
+      - name: Verify actual packaged Observatory to Slack setup and saved-connection continuity
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          for metadata in dist/agent-observatory-*-"$TARGET"-desktop.zip.json; do
+            python scripts/check-consumer-setup.py --metadata "$metadata" --evidence "$RUNNER_TEMP/observatory-actual-consumer/setup"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always() && (runner.os == 'Windows' || runner.os == 'macOS')
+        with:
+          name: actual-consumer-setup-${{ matrix.target }}
+          path: ${{ runner.temp }}/observatory-actual-consumer
+          if-no-files-found: warn
       - name: Verify packaged local browser and computer network setup
         if: runner.os == 'Linux' && runner.arch == 'X64'
         env:
