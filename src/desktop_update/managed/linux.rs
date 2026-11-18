@@ -2214,11 +2214,10 @@ mod tests {
             );
         }
         // A baseline-only call cannot ignore a transition created after its first read.
+        let error = guard(h, None).unwrap_err();
         assert!(
-            guard(h, None)
-                .unwrap_err()
-                .to_string()
-                .contains("new managed transition")
+            error.to_string().contains("new managed transition"),
+            "{error:#}"
         );
     }
     #[test]
