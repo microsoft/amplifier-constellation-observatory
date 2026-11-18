@@ -81,14 +81,16 @@ pub fn choose_initial_bootstrap(
 pub fn read_selected_bootstrap(path: &Path) -> Result<Vec<u8>> {
     use std::io::Read;
     ensure!(path.is_absolute(), "Choose a local setup file");
-    let mut observed = PathBuf::new();
-    for component in path.components() {
-        ensure!(
-            !matches!(component, std::path::Component::ParentDir),
-            "Choose the original setup file"
-        );
-        observed.push(component);
-        let metadata = std::fs::symlink_metadata(&observed)?;
+    ensure!(
+        !path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir)),
+        "Choose the original setup file"
+    );
+    // Full ancestors retain a Windows drive/UNC root; a standalone Prefix
+    // component (for example \\?\C:) is not an ordinary filesystem path.
+    for observed in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let metadata = std::fs::symlink_metadata(observed)?;
         ensure!(
             !metadata.file_type().is_symlink(),
             "Choose the original setup file, not a link"
