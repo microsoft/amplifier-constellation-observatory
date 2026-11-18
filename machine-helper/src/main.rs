@@ -61,11 +61,18 @@ async fn run(cli: Cli) -> Result<()> {
             }
         })
         .or_else(|| cli.home.as_ref().map(|h| h.join("observatory.json")));
-    let Some(path) = bootstrap_path else {
-        return no_bootstrap(cli.no_browser).await;
+    let choice = platform::choose_initial_bootstrap(
+        bootstrap_path,
+        cfg!(target_os = "macos") && !background && !cli.no_browser && cli.home.is_none(),
+        platform::choose_bootstrap_file,
+    )?;
+    let raw = match choice {
+        platform::BootstrapChoice::Existing(path) => std::fs::read(path)
+            .context("Download setup from your Observatory; its connection file is missing")?,
+        platform::BootstrapChoice::Selected(path) => platform::read_selected_bootstrap(&path)?,
+        platform::BootstrapChoice::Cancelled => return Ok(()),
+        platform::BootstrapChoice::Missing => return no_bootstrap(cli.no_browser).await,
     };
-    let raw = std::fs::read(path)
-        .context("Download setup from your Observatory; its connection file is missing")?;
     ensure!(raw.len() <= 131072, "Setup file is too large");
     let bootstrap: Bootstrap = serde_json::from_slice(&raw)
         .context("Use the unchanged setup download from Observatory")?;

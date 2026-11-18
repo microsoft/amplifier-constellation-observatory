@@ -153,6 +153,32 @@ class PackagingTests(unittest.TestCase):
             packaging.package(bundle.parent)
         self.assertEqual(bundle.read_bytes(), before)
 
+    def test_separate_file_capability_is_independent_of_signed_provenance(self):
+        record={'bootstrap_delivery':'separate_file','signed_or_notarized':False}
+        self.assertEqual(packaging.distribution(record,'macos-aarch64'),{'bootstrap_delivery':'separate_file'})
+        signed={'schema':1,'origin_archive_sha256':'a'*64,'origin_binary_sha256':'b'*64,
+                'signing_receipt_sha256':'c'*64,'team_id':'ABCDEFGHIJ'}
+        record.update(signed_or_notarized=True,signed_derivative=signed)
+        self.assertEqual(packaging.distribution(record,'macos-aarch64')['signed_derivative'],signed)
+        invalid=[{**record,'bootstrap_delivery':None},{**record,'signed_or_notarized':False},
+                 {**record,'signed_derivative':{**signed,'schema':True}},
+                 {**record,'signed_derivative':{**signed,'team_id':1234567890}},
+                 {**record,'signed_derivative':{**signed,'origin_archive_sha256':'A'*64}},
+                 {**record,'signed_derivative':{**signed,'extra':True}}]
+        for row in invalid:
+            with self.subTest(row=row),self.assertRaises(ValueError):packaging.distribution(row,'macos-aarch64')
+        with self.assertRaises(ValueError):packaging.distribution(record,'windows-x86_64')
+
+    def test_signed_archive_requires_resource_seal_before_aggregate_is_written(self):
+        folder=self.root/'signed';bundle=self.inputs(folder);before=bundle.read_bytes()
+        path=next(folder.glob('*macos-aarch64.zip.json'));record=json.loads(path.read_text())
+        record.update(bootstrap_delivery='separate_file',signed_or_notarized=True,
+                      signed_derivative={'schema':1,'origin_archive_sha256':'a'*64,'origin_binary_sha256':'b'*64,
+                                         'signing_receipt_sha256':'c'*64,'team_id':'ABCDEFGHIJ'})
+        path.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError,'seal is missing'):packaging.package(folder)
+        self.assertEqual(bundle.read_bytes(),before)
+
     def test_unreviewed_outer_digest_preserves_every_staged_and_installation_file(self):
         bundle = self.bundle()
         self.stage(bundle)

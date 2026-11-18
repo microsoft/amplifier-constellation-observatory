@@ -46,10 +46,10 @@ def prepare(source, output, version, expected_source=None):
             ordinary(path)
         record = json.loads(metadata.read_text(encoding='utf-8'))
         expected = {'platform': platform, 'version': version, 'filename': name,
-                    'bootstrap_path': 'observatory-pairing.json', 'bootstrap_included': False,
-                    'signed_or_notarized': False}
-        if any(record.get(key) != value for key, value in expected.items()):
+                    'bootstrap_path': 'observatory-pairing.json', 'bootstrap_included': False}
+        if any(record.get(key) != value for key, value in expected.items()) or 'signed_or_notarized' not in record:
             raise ValueError('Helper release metadata differs: ' + name)
+        distribution=aggregate.distribution(record,platform)
         if expected_source is not None and record.get('source') != expected_source:
             raise ValueError('Helper source revision differs: ' + name)
         actual = digest(archive)
@@ -61,6 +61,8 @@ def prepare(source, output, version, expected_source=None):
         names = {executable, 'START-HERE.txt', 'LICENSE', 'NUNITO-LICENSE.txt'}
         if platform.startswith('macos'):
             names.add('Constellation Computer.app/Contents/Info.plist')
+        if distribution.get('signed_derivative'):
+            names.add('Constellation Computer.app/Contents/_CodeSignature/CodeResources')
         with zipfile.ZipFile(archive) as bundle:
             if len(bundle.namelist()) != len(names) or set(bundle.namelist()) != names:
                 raise ValueError('Unexpected helper payload or embedded pairing setup')

@@ -851,6 +851,134 @@ async fn mac_setup_carries_public_bootstrap_inside_app_for_translocation_safe_lo
 }
 
 #[tokio::test]
+async fn signed_mac_setup_adds_only_sibling_json_and_preserves_every_app_member() {
+    use sha2::{Digest, Sha256};
+    use std::io::{Cursor, Read, Write};
+    let (_dir, state, admin) = fixture();
+    let folder = state.home.join("machine-helper-artifacts");
+    std::fs::create_dir(&folder).unwrap();
+    let members = [
+        (
+            "Constellation Computer.app/Contents/MacOS/constellation-machine-helper",
+            b"inert signed-cohort fixture".as_slice(),
+            0o755,
+        ),
+        (
+            "Constellation Computer.app/Contents/Info.plist",
+            b"inert plist".as_slice(),
+            0o644,
+        ),
+        (
+            "Constellation Computer.app/Contents/_CodeSignature/CodeResources",
+            b"inert seal; not real signing".as_slice(),
+            0o644,
+        ),
+    ];
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, data, mode) in members {
+        archive
+            .start_file(
+                name,
+                zip::write::SimpleFileOptions::default()
+                    .system(zip::System::Unix)
+                    .unix_permissions(mode),
+            )
+            .unwrap();
+        archive.write_all(data).unwrap();
+    }
+    let original = archive.finish().unwrap().into_inner();
+    std::fs::write(folder.join("mac.zip"), &original).unwrap();
+    let derivative = json!({"schema":1,"origin_archive_sha256":"a".repeat(64),"origin_binary_sha256":"b".repeat(64),"signing_receipt_sha256":"c".repeat(64),"team_id":"ABCDEFGHIJ"});
+    let row = json!({"platform":"macos-aarch64","label":"Mac","architecture":"Apple silicon","filename":"mac.zip","sha256":format!("{:x}",Sha256::digest(&original)),"version":"0.3.4","bootstrap_delivery":"separate_file","signed_derivative":derivative});
+    let manifest = folder.join("manifest.json");
+    std::fs::write(
+        &manifest,
+        json!({"schema":1,"artifacts":[row.clone()]}).to_string(),
+    )
+    .unwrap();
+    let app = server::router(state.clone());
+    let created = create(&app, &admin).await;
+    assert_eq!(
+        created["downloads"][0]["bootstrap_delivery"],
+        "separate_file"
+    );
+    assert_eq!(created["downloads"][0]["signed_distribution"], true);
+    let url = created["downloads"][0]["url"].as_str().unwrap();
+    let download = || {
+        Request::builder()
+            .uri(url)
+            .header("authorization", format!("Bearer {admin}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let reply = app.clone().oneshot(download()).await.unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    let bytes = to_bytes(reply.into_body(), 1024 * 1024).await.unwrap();
+    let mut zipped = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    assert_eq!(zipped.len(), members.len() + 1);
+    assert!(
+        zipped
+            .by_name("Constellation Computer.app/Contents/Resources/observatory-pairing.json")
+            .is_err()
+    );
+    for (name, data, mode) in members {
+        let mut file = zipped.by_name(name).unwrap();
+        assert_eq!(file.unix_mode().unwrap() & 0o777, mode);
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, data);
+    }
+    let mut bootstrap = String::new();
+    zipped
+        .by_name("observatory-pairing.json")
+        .unwrap()
+        .read_to_string(&mut bootstrap)
+        .unwrap();
+    let value: Value = serde_json::from_str(&bootstrap).unwrap();
+    assert_eq!(value["pairing_id"], created["pairing"]["id"]);
+    assert!(!bootstrap.contains(created["pairing"]["code"].as_str().unwrap()));
+    assert!(!bootstrap.contains(&admin));
+    assert_eq!(std::fs::read(folder.join("mac.zip")).unwrap(), original);
+    // A declared signed artifact must not silently become a legacy embedding.
+    for mode in ["no-delivery", "legacy-seal", "wrong-team", "wrong-platform"] {
+        let mut changed = row.clone();
+        match mode {
+            "no-delivery" => {
+                changed
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("bootstrap_delivery");
+            }
+            "legacy-seal" => {
+                changed
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("bootstrap_delivery");
+                changed.as_object_mut().unwrap().remove("signed_derivative");
+            }
+            "wrong-team" => changed["signed_derivative"]["team_id"] = json!("wrong"),
+            "wrong-platform" => changed["platform"] = json!("windows-x86_64"),
+            _ => unreachable!(),
+        }
+        std::fs::write(
+            &manifest,
+            json!({"schema":1,"artifacts":[changed]}).to_string(),
+        )
+        .unwrap();
+        assert!(
+            app.clone()
+                .oneshot(download())
+                .await
+                .unwrap()
+                .status()
+                .is_client_error(),
+            "{mode}"
+        );
+        assert_eq!(std::fs::read(folder.join("mac.zip")).unwrap(), original);
+    }
+}
+
+#[tokio::test]
 async fn fixed_paired_install_keeps_legacy_access_and_original_request_after_lost_result() {
     let (_dir, state, token) = fixture();
     let app = server::router(state.clone());
