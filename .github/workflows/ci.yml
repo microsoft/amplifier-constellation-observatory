@@ -219,8 +219,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
+          launch_args=()
+          if [[ "$TARGET" == *-apple-darwin ]]; then launch_args=(--mac-launch-services); fi
           for metadata in dist/agent-observatory-*-"$TARGET"-desktop.zip.json; do
-            python scripts/check-consumer-setup.py --metadata "$metadata" --evidence "$RUNNER_TEMP/observatory-actual-consumer/setup"
+            python scripts/check-consumer-setup.py --metadata "$metadata" --evidence "$RUNNER_TEMP/observatory-actual-consumer/setup" "${launch_args[@]}"
           done
       - uses: actions/upload-artifact@v4
         if: always() && (runner.os == 'Windows' || runner.os == 'macOS')

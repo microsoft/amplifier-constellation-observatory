@@ -23,6 +23,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import plistlib
+import signal
 import shutil
 import stat
 import subprocess
@@ -129,6 +130,15 @@ def inspect_package(metadata_path: Path, expected_metadata_sha256: str) -> dict:
         raise ValueError("Desktop archive size or SHA256 differs")
     entry = member_path(record["entry"])
     root = entry.parent
+    layout = record.get('mac_bundle_layout')
+    if 'mac_bundle_layout' in record:
+        if record['os'] != 'macos' or type(layout) is not int or layout != 1:
+            raise ValueError('Unsupported explicit Mac package layout')
+        if str(entry) != 'Observatory.app/Contents/MacOS/agent-observatory':
+            raise ValueError('Unexpected Mac service entry')
+        if record.get('gui_entry') != 'Observatory.app/Contents/MacOS/Observatory':
+            raise ValueError('Unexpected Mac GUI entry')
+        root = PurePosixPath('Observatory.app/Contents/Resources')
     with zipfile.ZipFile(archive) as source:
         infos = source.infolist()
         if len(infos) > MAX_MEMBERS or sum(i.file_size for i in infos) > MAX_UNPACKED_BYTES:
@@ -156,7 +166,12 @@ def inspect_package(metadata_path: Path, expected_metadata_sha256: str) -> dict:
         binary_sha = member_digest(entry)
         if binary_sha != checked_hash(record["binary_sha256"]):
             raise ValueError("Packaged Observatory executable differs")
+        if layout is not None and member_digest(member_path(record['gui_entry'])) != checked_hash(record['gui_sha256']):
+            raise ValueError('Packaged Mac GUI launcher differs')
         package = json.loads(read(root / "observatory-package.json"))
+        if (('mac_bundle_layout' in package) != ('mac_bundle_layout' in record)
+                or package.get('mac_bundle_layout') != layout):
+            raise ValueError('External and embedded Mac layout markers differ')
         if any(package.get(key) != record.get(key) for key in ("version", "target", "binary_sha256", "slack_bundle")):
             raise ValueError("Desktop metadata and embedded package provenance differ")
         instance_root = root / "support/instance"
@@ -278,12 +293,22 @@ def run_packaged(args, inspected: dict) -> None:
     node = verify_tool(args.node, args.node_sha256)
     playwright = verify_tool(args.playwright_module, args.playwright_sha256)
     browser = verify_tool(args.browser, args.browser_sha256)
+    mac_launch = bool(args.mac_launch_services)
+    if mac_launch and (sys.platform != 'darwin' or inspected['record'].get('mac_bundle_layout') != 1):
+        raise FixtureBlocked('LaunchServices requires the exact Mac GUI package layout')
     before = [snapshot(p.absolute()) for p in args.preserve]
     # This directory is deliberately not TemporaryDirectory: any failure retains
     # all evidence and partial homes. Checked cleanup is only a successful phase.
     root = Path(tempfile.mkdtemp(prefix="Observatory actual onboarding café ")).resolve()
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=False)
+    if mac_launch:
+        help_result = os_command(['/usr/bin/open', '-h'], timeout=10)
+        help_bytes = help_result.stdout + help_result.stderr
+        (evidence/'launchservices-open-help.txt').write_bytes(help_bytes)
+        if help_result.returncode not in (0, 1):
+            raise FixtureBlocked('Installed open help was unavailable; no application dispatched')
+        require_open_options(help_bytes.decode('utf-8', errors='strict'))
     extracted = root / "download"
     extracted.mkdir()
     with zipfile.ZipFile(inspected["archive"]) as source:
@@ -307,12 +332,21 @@ def run_packaged(args, inspected: dict) -> None:
               "instance": inspected["instance"], "slack": inspected["slack"],
               "operation_id": str(uuid.uuid4()), "limits": LIVE_LIMITS,
               "application_env": os_only_environment()}
+    inputs['launch_mode'] = 'mac_launch_services' if mac_launch else 'direct_payload'
+    if mac_launch:
+        inputs.update(app=str(extracted/'Observatory.app'),
+                      gui=str(extracted.joinpath(*member_path(inspected['record']['gui_entry']).parts)),
+                      gui_sha256=inspected['record']['gui_sha256'],
+                      fixture_python=str(Path(sys.executable).resolve()),
+                      fixture_python_sha256=digest(Path(sys.executable).resolve()),
+                      fixture_controller=str(Path(__file__).resolve()),
+                      fixture_controller_sha256=digest(Path(__file__).resolve()))
     input_path = root / "browser-inputs.json"
     with input_path.open("x", encoding="utf-8") as output:
         json.dump(inputs, output)
     if os.name != "nt": input_path.chmod(0o600)
     result = {"schema": 1, "status": "running", "root": str(root), "before": before,
-              "package": inspected["record"], "limits": LIVE_LIMITS}
+              "package": inspected["record"], "launch_mode":inputs['launch_mode'], "limits": LIVE_LIMITS}
     outcome = evidence / "completion.json"
     outcome.write_text(json.dumps(result, indent=2) + "\n")
     console=ConsoleMonitor()
@@ -422,6 +456,126 @@ def retain_cleanup_outcome(result: dict, evidence: Path) -> None:
                              'audit':str(evidence/'owned-cleanup.json')}
 
 
+def require_open_options(help_text: str) -> None:
+    # The actual host's installed tool is authoritative. Do not turn a missing
+    # LaunchServices feature into a direct-executable fallback.
+    for flag in ('-n', '-W', '--stdout', '--stderr', '--args'):
+        if re.search(r'(?<![\w-])' + re.escape(flag) + r'(?![\w-])', help_text) is None:
+            raise FixtureBlocked('Installed open does not advertise the required launch controls')
+
+
+def mac_arguments_bytes(raw: bytes) -> list[str]:
+    # KERN_PROCARGS2: argc, executable path, alignment NULs, then argc argv
+    # strings. Environment bytes are deliberately not decoded or returned.
+    if not 5 <= len(raw) <= 512 * 1024:
+        raise ValueError('Bounded Mac process arguments unavailable')
+    argc = int.from_bytes(raw[:4], sys.byteorder, signed=True)
+    if not 1 <= argc <= 32:
+        raise ValueError('Unexpected Mac argument count')
+    at = raw.index(b'\0', 4) + 1
+    while at < len(raw) and raw[at] == 0:
+        at += 1
+    result = []
+    for _ in range(argc):
+        end = raw.index(b'\0', at)
+        result.append(os.fsdecode(raw[at:end])); at = end + 1
+    return result
+
+
+def mac_arguments(pid: int) -> list[str]:
+    libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint,
+                           ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                           ctypes.c_void_p, ctypes.c_size_t]
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, exact PID
+    size = ctypes.c_size_t(512 * 1024)
+    buf = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        raise OSError('Exact Mac process arguments unavailable')
+    return mac_arguments_bytes(buf.raw[:size.value])
+
+
+def validate_desktop_runtime(runtime: dict, expected_hash: str) -> int:
+    pid = runtime.get('pid')
+    if type(pid) is not int or pid <= 0 or runtime.get('binary_sha256') != checked_hash(expected_hash):
+        raise AssertionError('Fresh desktop runtime does not identify the selected service')
+    return pid
+
+
+def private_read_json(path: Path, limit: int = 1024 * 1024) -> tuple[dict, bytes]:
+    ordinary(path)
+    info = path.stat()
+    if info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > limit:
+        raise AssertionError('Fixture observation is not private and bounded')
+    raw = path.read_bytes()
+    if len(raw) > limit:
+        raise AssertionError('Fixture observation grew beyond its limit')
+    return json.loads(raw), raw
+
+
+def private_create_json(path: Path, value: dict) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w') as output:
+        json.dump(value, output, indent=2); output.write('\n'); output.flush(); os.fsync(output.fileno())
+
+
+def mac_desktop_control(input_path: Path, witness_path: Path, *, stop: bool) -> dict:
+    """Fixture-only, exact fresh app observation/stop. Never target open's PID."""
+    if sys.platform != 'darwin':
+        raise FixtureBlocked('Mac desktop observer is not applicable')
+    inputs, input_bytes = private_read_json(input_path)
+    root = ordinary(Path(inputs['root']), directory=True).resolve(strict=True)
+    if (inputs.get('schema') != 1 or inputs.get('launch_mode') != 'mac_launch_services'
+            or root != input_path.parent.resolve(strict=True)
+            or root != witness_path.parent.resolve(strict=True)
+            or not re.fullmatch(r'mac-desktop-[12]\.json', witness_path.name)):
+        raise AssertionError('Exact fixture root/witness scope differs')
+    home = Path(inputs['home']); executable = Path(inputs['binary'])
+    if (home.parent != root or executable != root/'download/Observatory.app/Contents/MacOS/agent-observatory'
+            or digest(ordinary(executable)) != inputs['binary_sha256']):
+        raise AssertionError('Exact disposable home or service bytes differ')
+    expected_arguments = [str(executable), '--home', str(home), '--no-browser']
+    runtime, runtime_bytes = private_read_json(home/'runtime.json')
+    pid = validate_desktop_runtime(runtime, inputs['binary_sha256'])
+    process = OwnedProcess(pid, executable)
+    try:
+        if process.identity.get('uid') != os.getuid():
+            raise AssertionError('Desktop process belongs to another user')
+        if not arguments_equal(mac_arguments(pid), expected_arguments, {0, 2}) or process.absent():
+            raise AssertionError('Desktop process home, arguments or generation differs')
+        observed = {'schema':1, 'input_sha256':hashlib.sha256(input_bytes).hexdigest(),
+                    'home':str(home), 'home_identity':directory_identity(home),
+                    'executable':str(executable), 'binary_sha256':inputs['binary_sha256'],
+                    'process_identity':process.identity, 'arguments':expected_arguments,
+                    'runtime_sha256':hashlib.sha256(runtime_bytes).hexdigest(),
+                    'proof':'runtime_record_and_same_user_exact_image_home_arguments_and_birth'}
+        if not stop:
+            private_create_json(witness_path, observed)
+            return observed
+        saved, _ = private_read_json(witness_path)
+        if saved != observed:
+            raise AssertionError('Captured desktop ownership changed; no stop dispatched')
+        intent = witness_path.with_suffix('.stop-intent.json')
+        private_create_json(intent, {'schema':1, 'witness_sha256':digest(witness_path),
+                                     'process_identity':process.identity, 'effect':'one_SIGTERM'})
+        # Same-generation, image and typed argv are rechecked after persistence.
+        if (process.absent() or not arguments_equal(mac_arguments(pid), expected_arguments, {0, 2})
+                or digest(executable) != inputs['binary_sha256'] or process.absent()):
+            raise AssertionError('Captured desktop changed before stop; intent preserved')
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 10
+        while not process.absent():
+            if time.monotonic() >= deadline:
+                raise AssertionError('Captured desktop stop outcome is unknown')
+            time.sleep(.1)
+        result = {'schema':1,'process_identity':process.identity,'same_generation_absent':True,
+                  'stop_dispatches':1,'proof':observed['proof']}
+        private_create_json(witness_path.with_suffix('.stopped.json'), result)
+        return result
+    finally:
+        process.close()
+
+
 class OwnedProcess:
     """Observer handle/generation only; never grants a kill or replacement."""
     def __init__(self, pid: int, executable: Path):
@@ -468,7 +622,7 @@ class OwnedProcess:
         if n == 0 and c.get_errno() == 3: return None
         if n != c.sizeof(value) or value.pid != pid: raise OSError('Process generation unavailable')
         if value.status == 5: return None
-        return {'pid':pid,'start_seconds':str(value.seconds),'start_microseconds':str(value.microseconds)}
+        return {'pid':pid,'start_seconds':str(value.seconds),'start_microseconds':str(value.microseconds),'uid':value.uid}
 
     def absent(self):
         if os.name == 'nt':
@@ -620,7 +774,7 @@ def checked_owned_cleanup(browser_result: dict, evidence: Path) -> dict:
 
 
 class OfflineTests(unittest.TestCase):
-    def package_fixture(self, root: Path, *, slack_ready: bool = True) -> Path:
+    def package_fixture(self, root: Path, *, slack_ready: bool = True, mac: bool = False) -> Path:
         def sha(value): return hashlib.sha256(value).hexdigest()
         target = "x86_64-pc-windows-msvc"
         files = {"agent-observatory.exe": b"inert Observatory fixture, never executed"}
@@ -642,6 +796,20 @@ class OfflineTests(unittest.TestCase):
                    "binary_sha256": sha(files["agent-observatory.exe"]), "slack_bundle": binding,
                    "instance_manifest_sha256": sha(instance_bytes)}
         files["observatory-package.json"] = json.dumps(package).encode()
+        if mac:
+            target = 'aarch64-apple-darwin'
+            instance['target'] = target; descriptor['target'] = target
+            instance_bytes = json.dumps(instance).encode(); descriptor_bytes = json.dumps(descriptor).encode()
+            binding = {**descriptor, 'descriptor_sha256':sha(descriptor_bytes)}
+            package.update(target=target, mac_bundle_layout=1, slack_bundle=binding,
+                           instance_manifest_sha256=sha(instance_bytes))
+            files = {'Observatory.app/Contents/MacOS/agent-observatory':files['agent-observatory.exe'],
+                     'Observatory.app/Contents/MacOS/Observatory':b'inert GUI fixture, never executed',
+                     'Observatory.app/Contents/Resources/observatory-package.json':json.dumps(package).encode(),
+                     'Observatory.app/Contents/Resources/support/instance/consumer-bundle.json':instance_bytes,
+                     'Observatory.app/Contents/Resources/support/instance/agent-instance.exe':instance_binary,
+                     'Observatory.app/Contents/Resources/support/slack/descriptor.json':descriptor_bytes,
+                     'Observatory.app/Contents/Resources/support/slack/'+target+'.zip':archive_bytes}
         archive = root / "fixture.zip"
         with zipfile.ZipFile(archive, "w") as zipped:
             for name, data in files.items():
@@ -652,8 +820,76 @@ class OfflineTests(unittest.TestCase):
                   "sha256": digest(archive), "binary_sha256": package["binary_sha256"],
                   "includes_agent_setup": True, "includes_computer_setup": True,
                   "includes_slack_setup": slack_ready, "slack_bundle": binding, "instance_version": instance["version"]}
+        if mac:
+            record.update(os='macos', mac_bundle_layout=1,
+                          entry='Observatory.app/Contents/MacOS/agent-observatory',
+                          gui_entry='Observatory.app/Contents/MacOS/Observatory',
+                          gui_sha256=sha(files['Observatory.app/Contents/MacOS/Observatory']))
         metadata = root / "fixture.json"; metadata.write_text(json.dumps(record))
         return metadata
+
+    def test_launchservices_flags_must_be_advertised_by_the_installed_tool(self):
+        flags = ['-n','-W','--stdout','--stderr','--args']
+        require_open_options('Usage: open '+ ' '.join(flags))
+        for missing in flags:
+            with self.subTest(missing=missing), self.assertRaises(FixtureBlocked):
+                require_open_options(' '.join(flag for flag in flags if flag != missing)+' '+missing+'-unsupported')
+
+    def test_mac_argument_reader_excludes_environment_and_refuses_incomplete_arguments(self):
+        args = [b'/exact/application',b'--home',b'/fresh/home',b'--no-browser']
+        raw = len(args).to_bytes(4,sys.byteorder,signed=True)+args[0]+b'\0\0'+b'\0'.join(args)+b'\0TOKEN=not-returned\0'
+        self.assertEqual(mac_arguments_bytes(raw),[os.fsdecode(a) for a in args])
+        self.assertNotIn('TOKEN', repr(mac_arguments_bytes(raw)))
+        for invalid in [b'', (33).to_bytes(4,sys.byteorder)+raw[4:], raw[:20]]:
+            with self.assertRaises(ValueError): mac_arguments_bytes(invalid)
+
+    def test_runtime_record_requires_exact_binary_and_nonboolean_positive_pid(self):
+        self.assertEqual(validate_desktop_runtime({'pid':42,'binary_sha256':'a'*64},'a'*64),42)
+        for pid in [True,0,-1,'42',None]:
+            with self.assertRaises(AssertionError): validate_desktop_runtime({'pid':pid,'binary_sha256':'a'*64},'a'*64)
+        with self.assertRaises(AssertionError): validate_desktop_runtime({'pid':42,'binary_sha256':'b'*64},'a'*64)
+
+    def test_mac_resources_and_gui_bytes_are_bound_without_a_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            metadata = self.package_fixture(Path(temporary),mac=True)
+            inspected = inspect_package(metadata,digest(metadata))
+            self.assertEqual(inspected['package']['mac_bundle_layout'],1)
+            original = json.loads(metadata.read_bytes())
+            for delta in [{'gui_sha256':'f'*64},{'mac_bundle_layout':None},{'mac_bundle_layout':True},
+                          {'mac_bundle_layout':2},{'gui_entry':'Observatory.app/Contents/MacOS/other'}]:
+                metadata.write_text(json.dumps({**original,**delta}))
+                with self.subTest(delta=delta), self.assertRaises(ValueError): inspect_package(metadata,digest(metadata))
+
+    @unittest.skipIf(os.name == 'nt', 'Portable fake Mac owner requires Unix file ownership fields')
+    def test_mac_stop_requires_saved_generation_and_durable_single_dispatch(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();home=root/'fresh';home.mkdir()
+            executable=root/'download/Observatory.app/Contents/MacOS/agent-observatory'
+            executable.parent.mkdir(parents=True);executable.write_bytes(b'inert fixture')
+            inputs={'schema':1,'root':str(root),'home':str(home),'binary':str(executable),
+                    'binary_sha256':digest(executable),'launch_mode':'mac_launch_services'}
+            input_path=root/'browser-inputs.json';private_create_json(input_path,inputs)
+            runtime=home/'runtime.json';private_create_json(runtime,{'pid':42,'binary_sha256':digest(executable)})
+            witness=root/'mac-desktop-1.json';killed=[]
+            class FakeProcess:
+                def __init__(self,pid,_): self.identity={'pid':pid,'uid':os.getuid(),'start_seconds':'1','start_microseconds':'2'}
+                def absent(self): return bool(killed)
+                def close(self): pass
+            args=[str(executable),'--home',str(home),'--no-browser']
+            with patch(__name__+'.sys.platform','darwin'),patch(__name__+'.OwnedProcess',FakeProcess), \
+                    patch(__name__+'.mac_arguments',return_value=args),patch(__name__+'.os.kill',side_effect=lambda *a:killed.append(a)) as kill:
+                mac_desktop_control(input_path,witness,stop=False)
+                original=witness.read_bytes(); changed=json.loads(original);changed['process_identity']['start_seconds']='0'
+                witness.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(AssertionError,'ownership changed'):mac_desktop_control(input_path,witness,stop=True)
+                kill.assert_not_called();self.assertFalse(witness.with_suffix('.stop-intent.json').exists())
+                witness.write_bytes(original)
+                result=mac_desktop_control(input_path,witness,stop=True)
+                self.assertTrue(result['same_generation_absent']);kill.assert_called_once_with(42,signal.SIGTERM)
+                killed.clear()
+                with self.assertRaises(FileExistsError):mac_desktop_control(input_path,witness,stop=True)
+                kill.assert_called_once()
 
     def test_checked_cleanup_contract_is_required_before_native_dispatch(self):
         from unittest.mock import patch
@@ -768,16 +1004,28 @@ class OfflineTests(unittest.TestCase):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    control = parser.add_mutually_exclusive_group()
+    control.add_argument('--mac-observe-desktop', type=Path, help=argparse.SUPPRESS)
+    control.add_argument('--mac-stop-desktop', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--mac-witness', type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--metadata", type=Path)
     parser.add_argument("--metadata-sha256")
     parser.add_argument("--run", action="store_true", help="Requires the frozen owner cleanup contract")
+    parser.add_argument('--mac-launch-services', action='store_true',
+                        help='Use the actual Mac app through LaunchServices; never fall back to direct execution')
     parser.add_argument("--node", type=Path); parser.add_argument("--node-sha256")
     parser.add_argument("--playwright-module", type=Path); parser.add_argument("--playwright-sha256")
     parser.add_argument("--browser", type=Path); parser.add_argument("--browser-sha256")
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--preserve", type=Path, action="append", default=[])
     args = parser.parse_args()
+    if args.mac_observe_desktop or args.mac_stop_desktop:
+        if not args.mac_witness:
+            parser.error('The exact fixture witness path is required')
+        value = mac_desktop_control(args.mac_observe_desktop or args.mac_stop_desktop,
+                                    args.mac_witness, stop=bool(args.mac_stop_desktop))
+        print(json.dumps(value)); return
     if args.self_test:
         result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(OfflineTests))
         raise SystemExit(0 if result.wasSuccessful() else 1)

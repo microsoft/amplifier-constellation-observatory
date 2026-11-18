@@ -26,7 +26,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metadata", required=True, type=Path)
     parser.add_argument("--evidence", required=True, type=Path)
+    parser.add_argument("--mac-launch-services", action="store_true",
+                        help="Launch the exact Mac application through LaunchServices")
     args = parser.parse_args()
+    if args.mac_launch_services and sys.platform != "darwin":
+        raise ValueError("LaunchServices qualification requires macOS")
     metadata = args.metadata.resolve(strict=True)
     evidence = args.evidence.resolve()
     if evidence.exists() or evidence.with_suffix(".inputs.json").exists():
@@ -56,6 +60,8 @@ def main():
     command = [sys.executable, str(ROOT / "tests/consumer_setup_live.py"), "--run",
                "--metadata", str(metadata), "--metadata-sha256", bindings["inputs"]["metadata"]["sha256"],
                "--evidence", str(evidence)]
+    if args.mac_launch_services:
+        command.append("--mac-launch-services")
     for name, path_flag, hash_flag in (("node", "--node", "--node-sha256"),
                                        ("playwright", "--playwright-module", "--playwright-sha256"),
                                        ("browser", "--browser", "--browser-sha256")):

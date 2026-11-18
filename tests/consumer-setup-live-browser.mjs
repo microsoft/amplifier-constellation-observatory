@@ -23,6 +23,14 @@ assert.equal(input.schema, 1);
 assert(path.isAbsolute(input.home) && path.dirname(input.home) === input.root);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 assert.equal(sha(await fs.readFile(input.binary)), input.binary_sha256);
+assert(['direct_payload', 'mac_launch_services'].includes(input.launch_mode));
+const macLaunch = input.launch_mode === 'mac_launch_services';
+if (macLaunch) {
+  assert.equal(process.platform, 'darwin');
+  assert.equal(input.app, path.join(input.root, 'download/Observatory.app'));
+  assert.equal(input.gui, path.join(input.app, 'Contents/MacOS/Observatory'));
+  assert.equal(sha(await fs.readFile(input.gui)), input.gui_sha256);
+}
 const {chromium} = await import(pathToFileURL(input.playwright_module).href);
 const {DatabaseSync} = await import('node:sqlite'); // qualification Node >=22.13; not a product dependency
 const output = name => path.join(input.evidence, name);
@@ -35,6 +43,8 @@ let slackBefore, slackAfter, parentExited = false, completed = false;
 let slackCleanup, instanceCleanup;
 const retainedFixtureState = JSON.stringify({fixture_only:true, name:'existing local state', value:randomUUID()});
 let stdout = '', stderr = '';
+let launchNumber = 0, macWitness, macPayload;
+const macLogs = [], macGenerations = [], macStops = [], macEvidence = [];
 
 async function checkpoint(phase, detail = {}) {
   observations.push({phase, at: new Date().toISOString(), ...detail});
@@ -72,8 +82,90 @@ async function operation(name, body = {}) {
   });
 }
 async function click(locator) { await openGuard(); await locator.click(); }
+async function privateMacJson(file, directory = false) {
+  const info = await fs.lstat(file);
+  assert(!info.isSymbolicLink() && (directory ? info.isDirectory() : info.isFile()));
+  assert.equal(info.uid, process.getuid()); assert.equal(info.mode & 0o077, 0);
+  if (directory) return;
+  assert(info.size <= 1024 * 1024);
+  const bytes = await fs.readFile(file); assert(bytes.length <= 1024 * 1024);
+  return JSON.parse(bytes);
+}
+async function macSetupUrl() {
+  const control = path.join(input.root, '.observatory-launch-' + sha(input.home).slice(0, 16));
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    await openGuard();
+    if (child.exitCode !== null || child.signalCode !== null) throw Error('LaunchServices exited before setup was observed');
+    try {
+      await privateMacJson(control, true);
+      const session = await privateMacJson(path.join(control, 'setup-session.json'));
+      const url = new URL(session.origin);
+      assert.equal(url.protocol, 'http:'); assert.equal(url.hostname, '127.0.0.1');
+      assert(url.port && url.pathname === '/' && !url.username && !url.password && !url.hash && !url.search);
+      assert(typeof session.token === 'string' && /^[A-Za-z0-9_-]{20,256}$/.test(session.token));
+      assert(Number.isSafeInteger(session.expires_at) && session.expires_at > Date.now()
+        && session.expires_at <= Date.now() + 31 * 60_000);
+      base = url.origin; return base + '/#' + session.token;
+    } catch (error) {
+      // Read-only polling may see the owner's initial create/write in progress.
+      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw Error('LaunchServices private setup readiness deadline');
+}
+async function macControl(stop = false) {
+  assert(macLaunch && macWitness);
+  assert.equal(sha(await fs.readFile(input.fixture_python)), input.fixture_python_sha256);
+  assert.equal(sha(await fs.readFile(input.fixture_controller)), input.fixture_controller_sha256);
+  const observer = spawn(input.fixture_python, [input.fixture_controller,
+    stop ? '--mac-stop-desktop' : '--mac-observe-desktop', process.argv[2], '--mac-witness', macWitness],
+  {env: input.application_env, stdio: ['ignore', 'pipe', 'pipe']});
+  let value = '', diagnostic = '', timer;
+  observer.stdout.on('data', data => { if (value.length <= 1024 * 1024) value += data; });
+  observer.stderr.on('data', data => { if (diagnostic.length <= 1024 * 1024) diagnostic += data; });
+  try {
+    const exit = await Promise.race([
+      new Promise((resolve, reject) => { observer.once('error', reject); observer.once('close', (code, signal) => resolve({code, signal})); }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(Error('Exact desktop observation/stop is unknown')), stop ? 15_000 : 10_000); }),
+    ]);
+    assert.equal(exit.code, 0, 'Exact desktop ownership/stop was not confirmed'); assert.equal(exit.signal, null);
+    assert(value.length <= 1024 * 1024 && diagnostic.length <= 1024 * 1024);
+    return JSON.parse(value);
+  } finally {
+    clearTimeout(timer);
+    await fs.writeFile(output(`mac-desktop-${launchNumber}-${stop ? 'stop' : 'observe'}.stderr`), diagnostic);
+    // No kill or repeated stop after a transport timeout. The exact helper's
+    // saved intent/result remains available in the retained private root.
+    observer.stdout.destroy(); observer.stderr.destroy(); observer.unref();
+  }
+}
+async function bindMacPayload() {
+  if (!macLaunch) return;
+  macPayload = await macControl();
+  if (macGenerations.length) assert.notDeepEqual(macPayload.process_identity, macGenerations.at(-1));
+  macGenerations.push(macPayload.process_identity);
+  await checkpoint('launchservices-service-generation-bound', {launch: launchNumber,
+    opener_pid: child.pid, process_identity: macPayload.process_identity, proof: macPayload.proof});
+}
 async function start(first) {
   await openGuard();
+  if (macLaunch) {
+    assert.equal(++launchNumber, first ? 1 : 2); macPayload = undefined;
+    macWitness = path.join(input.root, `mac-desktop-${launchNumber}.json`);
+    const files = ['stdout', 'stderr'].map(kind => path.join(input.root, `mac-desktop-${launchNumber}.${kind}`));
+    for (const file of files) { const handle = await fs.open(file, 'wx', 0o600); await handle.close(); }
+    macLogs.push(files);
+    assert.equal(sha(await fs.readFile(input.gui)), input.gui_sha256);
+    child = spawn('/usr/bin/open', ['-n', '-W', '--stdout', files[0], '--stderr', files[1], input.app,
+      '--args', '--home', input.home, '--no-browser'], {env: input.application_env, stdio: ['ignore','pipe','pipe']});
+    child.on('error', () => {}); // readiness remains unknown; never a fallback launch
+    child.stdout.on('data', bytes => { stdout += bytes; }); child.stderr.on('data', bytes => { stderr += bytes; });
+    await checkpoint(first ? 'launchservices-dispatched' : 'launchservices-reopened', {opener_pid: child.pid,
+      application_identity: 'not yet observed', launch: launchNumber});
+    return first ? macSetupUrl() : undefined;
+  }
   child = spawn(input.binary, ['--home', input.home, '--no-browser'], {
     env: input.application_env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
@@ -99,6 +191,25 @@ async function start(first) {
 async function stopOwnedParent() {
   assert(child && child.exitCode === null && child.signalCode === null);
   assert(!stopDispatches.has(child), 'An unconfirmed parent stop is never dispatched again');
+  if (macLaunch) {
+    assert(macPayload, 'Unbound LaunchServices application is retained without a guessed stop');
+    stopDispatches.add(child);
+    const result = await macControl(true);
+    assert.equal(result.same_generation_absent, true); assert.equal(result.stop_dispatches, 1);
+    assert.deepEqual(result.process_identity, macPayload.process_identity);
+    macStops.push(result);
+    if (child.exitCode === null && child.signalCode === null) {
+      let timer;
+      try { await Promise.race([once(child, 'exit'), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Error('LaunchServices waiter exit is unknown')), 10_000);
+      })]); } finally { clearTimeout(timer); }
+    }
+    assert.equal(child.exitCode, 0); assert.equal(child.signalCode, null);
+    parentExited = true;
+    await checkpoint('observatory-parent-exited', {launch: launchNumber, process_identity: result.process_identity,
+      same_generation_absent: true, opener_pid: child.pid, opener_exit_code: child.exitCode});
+    return;
+  }
   const process = child, exited = once(process, 'exit');
   stopDispatches.add(process);
   process.kill(); // exact child handle, never an executable-name or descendant kill
@@ -235,6 +346,7 @@ try {
   await page.locator('.ow-top').waitFor({timeout: 180_000});
   const session = await (await context.request.get(base + '/auth/session')).json();
   assert.equal(session.authenticated, true); csrf = session.csrf;
+  await bindMacPayload();
   const accountSha = sha(await fs.readFile(path.join(input.home, 'secrets/local-password.json')));
   const desktopConfigSha = sha(await fs.readFile(path.join(input.home, 'config.json')));
   await checkpoint('actual-desktop-account-created');
@@ -347,6 +459,7 @@ try {
     await new Promise(resolve => setTimeout(resolve, 200)); // GET only; no repeated launch or setup
   }
   assert(listening, 'Reopened same desktop did not confirm its saved account');
+  await bindMacPayload();
   await page.goto(base); await page.locator('.ow-top').waitFor({timeout: 30_000});
   await openSavedSlack();
   const reopened = await api(`endpoints/${endpoint.id}/slack-setup`, undefined, 'GET');
@@ -398,15 +511,45 @@ try {
   // Only close our browser and exact Observatory child; checked owned-profile
   // cleanup is a separate controller phase after a conclusive successful result.
   await browser?.close();
-  if (child && child.exitCode === null && child.signalCode === null && !stopDispatches.has(child)) {
+  if (child && child.exitCode === null && child.signalCode === null && !stopDispatches.has(child)
+      && (!macLaunch || macPayload)) {
     try { await stopOwnedParent(); } catch { completed = false; }
+  }
+  if (macLaunch) {
+    // Unbound/unknown LaunchServices generations and their waiter are retained.
+    // Closing observer pipes is not a stop of the app or of its descendants.
+    child?.stdout?.destroy(); child?.stderr?.destroy(); child?.unref();
+    if (completed && (macGenerations.length !== 2 || macStops.length !== 2)) completed = false;
+    try {
+      for (const [out, err] of macLogs) {
+        for (const [file, kind] of [[out, 'stdout'], [err, 'stderr']]) {
+          const stat = await fs.lstat(file); assert(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 4 * 1024 * 1024);
+          const text = await fs.readFile(file, 'utf8');
+          if (kind === 'stdout') stdout += text; else stderr += text;
+        }
+      }
+      for (let launch = 1; launch <= launchNumber; launch++) {
+        for (const suffix of ['.json', '.stop-intent.json', '.stopped.json']) {
+          const name = `mac-desktop-${launch}${suffix}`, file = path.join(input.root, name);
+          if (await absent(file)) continue;
+          await privateMacJson(file);
+          const bytes = await fs.readFile(file);
+          await fs.writeFile(output(name), bytes, {flag:'wx', mode:0o600});
+          macEvidence.push({file:name, size:bytes.length, sha256:sha(bytes)});
+        }
+      }
+    } catch (error) {
+      completed = false; await checkpoint('mac-evidence-retained-with-observation-error', {error_type:error.name});
+    }
   }
   const safeText = value => { let out = value; for (const secret of [password, canary, csrf]) if (secret) out = out.split(secret).join('[fixture secret]');
     return out.replace(/(#)[A-Za-z0-9_-]{20,}/g, '#[setup capability]'); };
   await fs.writeFile(output('desktop.stdout'), safeText(stdout));
   await fs.writeFile(output('desktop.stderr'), safeText(stderr));
   const result = {schema: 1, status: completed ? 'local_setup_ready' : 'failed_or_unknown_retained',
-    operation_id: input.operation_id, observatory_home: input.home, instance_home: plan?.home,
+    operation_id: input.operation_id, launch_mode: input.launch_mode, mac_service_generations: macGenerations,
+    mac_service_stop_results: macStops, mac_evidence: macEvidence,
+    observatory_home: input.home, instance_home: plan?.home,
     endpoint_id: endpoint?.id, instance_id: endpoint?.management?.expected_id,
     instance_cleanup: instanceCleanup, slack_cleanup: slackCleanup,
     parent_exited: parentExited, observations, requests, browser_errors: browserErrors,
