@@ -53,7 +53,11 @@ class Fixture:
             files = {'helper':b'inert helper bytes; never executed'}
             row = {'platform':platform,'source':'b'*40,'version':'0.3.5','filename':platform+'.zip'}
             if platform.startswith('macos-'):
-                files['Constellation Computer.app/Contents/_CodeSignature/CodeResources'] = b'inert seal'
+                files={'Constellation Computer.app/Contents/MacOS/constellation-machine-helper':b'inert helper',
+                       'Constellation Computer.app/Contents/Info.plist':b'plist',
+                       'Constellation Computer.app/Contents/_CodeSignature/CodeResources':b'inert seal',
+                       'Constellation Computer.app/Contents/CodeResources':b'inert staple ticket',
+                       'START-HERE.txt':b'notice','LICENSE':b'license','NUNITO-LICENSE.txt':b'font license'}
                 row.update(bootstrap_delivery='separate_file', signed_derivative={'schema':1,
                     'origin_archive_sha256':'2'*64,'origin_binary_sha256':'3'*64,
                     'signing_receipt_sha256':'4'*64,'team_id':'ABCDEFGHIJ'})

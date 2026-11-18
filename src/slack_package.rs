@@ -19,6 +19,8 @@ use std::{
 pub const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_MEMBERS: usize = 20_000;
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+const STAPLE_TICKET: &str = "Slack Connector.app/Contents/CodeResources";
+const MAX_STAPLE_TICKET: u64 = 64 * 1024;
 const RECEIPT: &str = "observatory-slack-package.json";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -185,6 +187,15 @@ impl ReleaseDescriptor {
         let mut path_spellings = BTreeMap::new();
         for (name, file) in &self.files {
             member_name(name)?;
+            if name == STAPLE_TICKET {
+                ensure!(
+                    self.signed_derivative.is_some()
+                        && paths.plist.is_some()
+                        && file.mode == 0o644
+                        && (1..=MAX_STAPLE_TICKET).contains(&file.size),
+                    "Invalid signed Mac Slack staple ticket"
+                );
+            }
             let mut prefix = String::new();
             for part in name.split('/') {
                 if !prefix.is_empty() {
@@ -212,7 +223,11 @@ impl ReleaseDescriptor {
                     || matches!(name.as_str(), "START-HERE.txt" | "LICENSE")
                     || paths.plist == Some(name.as_str())
                     || (self.signed_derivative.is_some()
-                        && name == "Slack Connector.app/Contents/_CodeSignature/CodeResources")
+                        && matches!(
+                            name.as_str(),
+                            "Slack Connector.app/Contents/_CodeSignature/CodeResources"
+                                | STAPLE_TICKET
+                        ))
                     || name
                         .strip_prefix(paths.python)
                         .is_some_and(|tail| !tail.is_empty()),
@@ -716,6 +731,13 @@ mod tests {
             seal.into(),
             (b"inert signature resource fixture".to_vec(), 0o644),
         );
+        fixture.files.insert(
+            STAPLE_TICKET.into(),
+            (
+                b"inert Apple staple ticket; no notarization claim".to_vec(),
+                0o644,
+            ),
+        );
         fixture.reseal();
         assert!(fixture.stage().is_err());
         assert!(!fixture.destination.exists());
@@ -732,6 +754,30 @@ mod tests {
             std::fs::read(fixture.destination.join(seal)).unwrap(),
             fixture.files[seal].0
         );
+        assert_eq!(
+            std::fs::read(fixture.destination.join(STAPLE_TICKET)).unwrap(),
+            fixture.files[STAPLE_TICKET].0
+        );
+        let mut without_ticket = fixture.release.clone();
+        without_ticket.files.remove(STAPLE_TICKET);
+        assert!(without_ticket.validate_for_target(MAC).is_ok());
+        for (size, mode) in [(0, 0o644), (MAX_STAPLE_TICKET + 1, 0o644), (1, 0o755)] {
+            let mut invalid = fixture.release.clone();
+            let ticket = invalid.files.get_mut(STAPLE_TICKET).unwrap();
+            ticket.size = size;
+            ticket.mode = mode;
+            assert!(invalid.validate_for_target(MAC).is_err());
+        }
+        for name in [
+            "Slack Connector.app/Contents/OtherTicket",
+            "Slack Connector.app/Contents/coderesources",
+            "CodeResources",
+        ] {
+            let mut invalid = fixture.release.clone();
+            let ticket = invalid.files.remove(STAPLE_TICKET).unwrap();
+            invalid.files.insert(name.into(), ticket);
+            assert!(invalid.validate_for_target(MAC).is_err());
+        }
         let mut invalid = fixture.release.clone();
         invalid.files.remove(seal);
         assert!(invalid.validate_for_target(MAC).is_err());

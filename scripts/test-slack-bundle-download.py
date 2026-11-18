@@ -103,4 +103,23 @@ class DownloadTests(unittest.TestCase):
                 row['release']['signed_derivative'][field] = original
 
 
+    def test_staple_descriptor_only_accepts_signed_mac_fixed_bounded_ticket(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);_,lock,row=self.fixture(root);target='aarch64-apple-darwin'
+            row['url']=None;row['release']['target']=target
+            row['release']['signed_derivative']={'schema':1,'origin_archive_sha256':'1'*64,
+                'origin_native_bundle_sha256':'2'*64,'signing_receipt_sha256':'3'*64,'team_id':'ABCDEFGHIJ'}
+            files={'Slack Connector.app/Contents/_CodeSignature/CodeResources':{}}
+            row['release']['files']=files
+            good={'size':1653,'mode':0o644,'sha256':'4'*64}
+            def selected(ticket):
+                files[fetch.STAPLE_TICKET]=ticket;lock.write_text(json.dumps({'schema':1,'targets':{target:row}}))
+                return fetch.selected(target,lock)
+            selected(good);selected({**good,'size':fetch.MAX_STAPLE_TICKET})
+            for bad in (None,{**good,'size':0},{**good,'size':True},{**good,'size':fetch.MAX_STAPLE_TICKET+1},
+                        {**good,'mode':0o755},{**good,'sha256':'A'*64},{**good,'extra':True}):
+                with self.subTest(bad=bad),self.assertRaises(ValueError):selected(bad)
+            row['release'].pop('signed_derivative')
+            with self.assertRaises(ValueError):selected(good)
+
 if __name__ == '__main__': unittest.main()

@@ -93,6 +93,8 @@ class HelperReleaseTests(unittest.TestCase):
             origin=record['sha256'];originals[archive.name]=archive.read_bytes()
             with zipfile.ZipFile(archive,'a') as zipped:
                 zipped.writestr('Constellation Computer.app/Contents/_CodeSignature/CodeResources',b'inert test seal, no signing claim')
+                ticket=zipfile.ZipInfo(release.aggregate.MAC_TICKET);ticket.create_system=3;ticket.external_attr=0o100644<<16
+                zipped.writestr(ticket,b'inert staple ticket, no notary claim')
             record.update(sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),signed_or_notarized=True,
                           signed_derivative={'schema':1,'origin_archive_sha256':origin,'origin_binary_sha256':record['binary_sha256'],
                                              'signing_receipt_sha256':'c'*64,'team_id':'ABCDEFGHIJ'})

@@ -13,6 +13,8 @@ import urllib.request
 TARGETS = {'x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc',
            'x86_64-apple-darwin', 'aarch64-apple-darwin'}
 MAX_BYTES = 1024 ** 3
+STAPLE_TICKET = 'Slack Connector.app/Contents/CodeResources'
+MAX_STAPLE_TICKET = 64 * 1024
 REDIRECT_HOSTS = {'github.com', 'release-assets.githubusercontent.com',
                   'objects.githubusercontent.com'}
 
@@ -33,6 +35,15 @@ def selected(target, lock_path):
             or not 1 <= release['archive_size'] <= MAX_BYTES):
         raise ValueError('Invalid reviewed Slack package pin')
     signed = release.get('signed_derivative')
+    files = release.get('files', {})
+    if isinstance(files,dict) and STAPLE_TICKET in files:
+        ticket = files[STAPLE_TICKET]
+        if (signed is None or not target.endswith('-apple-darwin')
+                or not isinstance(ticket,dict) or set(ticket)!={'size','sha256','mode'}
+                or type(ticket['size']) is not int or not 1<=ticket['size']<=MAX_STAPLE_TICKET
+                or type(ticket['mode']) is not int or ticket['mode']!=0o644
+                or not isinstance(ticket['sha256'],str) or not re.fullmatch(r'[a-f0-9]{64}',ticket['sha256'])):
+            raise ValueError('Invalid signed Mac Slack staple ticket')
     if signed is not None:
         fields = {'schema', 'origin_archive_sha256', 'origin_native_bundle_sha256',
                   'signing_receipt_sha256', 'team_id'}

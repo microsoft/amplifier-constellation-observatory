@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Combine exact platform release archives for an Observatory's setup downloads."""
-import argparse, hashlib, json, re, zipfile
+import argparse, hashlib, json, re, stat, zipfile
 from pathlib import Path
 
 PLATFORMS={'windows-x86_64':('Windows','Intel / AMD'),'windows-aarch64':('Windows','ARM64'),'macos-aarch64':('Mac','Apple silicon'),'macos-x86_64':('Mac','Intel'),'linux-aarch64':('Linux','ARM64'),'linux-x86_64':('Linux','Intel / AMD')}
+MAC_SEAL='Constellation Computer.app/Contents/_CodeSignature/CodeResources'
+MAC_TICKET='Constellation Computer.app/Contents/CodeResources'
+MAX_STAPLE_TICKET=64*1024
 
 def distribution(record, platform):
     """Validate owner provenance; never infer or perform signing/notarization."""
@@ -26,6 +29,28 @@ def distribution(record, platform):
         extra['signed_derivative']=derivative
     return extra
 
+def validate_signed_members(archive, platform, extra):
+    """Only a fixed bounded ticket may extend the exact signed Mac inventory.
+
+    Presence does not prove notarization: the reviewed final archive digest and
+    owner provenance remain required, and every original app member is retained.
+    """
+    names=archive.namelist();signed=bool(extra.get('signed_derivative'))
+    if MAC_TICKET in names:
+        ticket=archive.getinfo(MAC_TICKET);mode=ticket.external_attr>>16
+        if (not signed or not platform.startswith('macos-')
+                or extra.get('bootstrap_delivery')!='separate_file'
+                or stat.S_IFMT(mode)!=stat.S_IFREG or stat.S_IMODE(mode)!=0o644
+                or not 0<ticket.file_size<=MAX_STAPLE_TICKET):
+            raise ValueError('Invalid signed Mac helper staple ticket')
+    if signed:
+        if MAC_SEAL not in names:raise ValueError('Signed helper resource seal is missing')
+        required={'Constellation Computer.app/Contents/MacOS/constellation-machine-helper',
+                  'Constellation Computer.app/Contents/Info.plist','START-HERE.txt','LICENSE','NUNITO-LICENSE.txt',MAC_SEAL}
+        if (len(names)!=len(set(names)) or not required<=set(names)
+                or set(names)-required not in (set(),{MAC_TICKET})):
+            raise ValueError('Unexpected signed helper inventory')
+
 def package(directory,version='0.2.0'):
     artifacts=[];sources=[]
     for platform,(label,architecture) in PLATFORMS.items():
@@ -34,10 +59,8 @@ def package(directory,version='0.2.0'):
         digest=hashlib.sha256(path.read_bytes()).hexdigest()
         if record['sha256']!=digest or record['platform']!=platform or record['version']!=version:raise ValueError('Platform build provenance mismatch')
         extra=distribution(record,platform)
-        if extra.get('signed_derivative'):
-            with zipfile.ZipFile(path) as archive:
-                if 'Constellation Computer.app/Contents/_CodeSignature/CodeResources' not in archive.namelist():
-                    raise ValueError('Signed helper resource seal is missing')
+        with zipfile.ZipFile(path) as archive:
+            validate_signed_members(archive,platform,extra)
         if (directory/(filename+'.sha256')).read_text().split()!=[digest,filename]:raise ValueError('Platform checksum mismatch')
         sources.append(record.get('source'))
         row=dict(platform=platform,label=label,architecture=architecture,filename=filename,sha256=digest,version=version)

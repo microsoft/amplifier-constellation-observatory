@@ -867,15 +867,30 @@ fn setup_archive(
         return Err(ApiError::bad("Invalid helper archive"));
     }
     let mut has_resource_seal = false;
+    let mut names = std::collections::BTreeSet::new();
+    let ticket = "Constellation Computer.app/Contents/CodeResources";
     for i in 0..archive.len() {
         let f = archive
             .by_index(i)
             .map_err(|_| ApiError::bad("Invalid helper archive"))?;
         let name = f
             .name()
-            .map_err(|_| ApiError::bad("Invalid helper archive name"))?;
+            .map_err(|_| ApiError::bad("Invalid helper archive name"))?
+            .into_owned();
         has_resource_seal |=
             name == "Constellation Computer.app/Contents/_CodeSignature/CodeResources";
+        names.insert(name.clone());
+        if name == ticket
+            && (!signed_derivative
+                || !separate_file
+                || !platform.starts_with("macos-")
+                || !(1..=64 * 1024).contains(&f.size())
+                || !f
+                    .unix_mode()
+                    .is_some_and(|m| m & 0o170000 == 0o100000 && m & 0o7777 == 0o644))
+        {
+            return Err(ApiError::bad("Invalid signed Mac helper staple ticket"));
+        }
         if f.enclosed_name().is_none()
             || name.contains(['\\', ':'])
             || name
@@ -886,6 +901,24 @@ fn setup_archive(
             || f.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000)
         {
             return Err(ApiError::bad("Unsafe helper archive"));
+        }
+    }
+    if signed_derivative {
+        let required = [
+            "Constellation Computer.app/Contents/MacOS/constellation-machine-helper",
+            "Constellation Computer.app/Contents/Info.plist",
+            "Constellation Computer.app/Contents/_CodeSignature/CodeResources",
+            "START-HERE.txt",
+            "LICENSE",
+            "NUNITO-LICENSE.txt",
+        ];
+        if names.len() != archive.len()
+            || !required.iter().all(|name| names.contains(*name))
+            || names
+                .iter()
+                .any(|name| !required.contains(&name.as_str()) && name != ticket)
+        {
+            return Err(ApiError::bad("Unexpected signed Mac helper inventory"));
         }
     }
     if (platform.starts_with("macos-") && has_resource_seal && !separate_file)

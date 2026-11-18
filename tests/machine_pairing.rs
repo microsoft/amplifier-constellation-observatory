@@ -873,6 +873,14 @@ async fn signed_mac_setup_adds_only_sibling_json_and_preserves_every_app_member(
             b"inert seal; not real signing".as_slice(),
             0o644,
         ),
+        (
+            "Constellation Computer.app/Contents/CodeResources",
+            b"inert Apple staple ticket; not notarization proof".as_slice(),
+            0o644,
+        ),
+        ("START-HERE.txt", b"start".as_slice(), 0o644),
+        ("LICENSE", b"license".as_slice(), 0o644),
+        ("NUNITO-LICENSE.txt", b"font license".as_slice(), 0o644),
     ];
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (name, data, mode) in members {

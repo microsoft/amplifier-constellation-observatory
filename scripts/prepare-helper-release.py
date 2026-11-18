@@ -62,8 +62,11 @@ def prepare(source, output, version, expected_source=None):
         if platform.startswith('macos'):
             names.add('Constellation Computer.app/Contents/Info.plist')
         if distribution.get('signed_derivative'):
-            names.add('Constellation Computer.app/Contents/_CodeSignature/CodeResources')
+            names.add(aggregate.MAC_SEAL)
         with zipfile.ZipFile(archive) as bundle:
+            aggregate.validate_signed_members(bundle,platform,distribution)
+            if distribution.get('signed_derivative') and aggregate.MAC_TICKET in bundle.namelist():
+                names.add(aggregate.MAC_TICKET)
             if len(bundle.namelist()) != len(names) or set(bundle.namelist()) != names:
                 raise ValueError('Unexpected helper payload or embedded pairing setup')
             binary = bundle.getinfo(executable)

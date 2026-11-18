@@ -250,13 +250,13 @@ def validate_helpers(path, helper):
     for row in manifest['artifacts']:
         require(row.get('source') == helper['source'] and row.get('version') == helper['version'],
                 'Retained helpers do not share the reviewed source/version')
-        module('package-machine-helpers').distribution({**row, 'signed_or_notarized':bool(row.get('signed_derivative'))}, row['platform'])
+        packaging=module('package-machine-helpers')
+        distribution=packaging.distribution({**row, 'signed_or_notarized':bool(row.get('signed_derivative'))}, row['platform'])
         if row['platform'].startswith('macos-'):
             require(row.get('bootstrap_delivery') == 'separate_file' and row.get('signed_derivative') is not None,
                     'Mac helper is missing signed separate-file provenance')
             with zipfile.ZipFile(io.BytesIO(files[row['filename']])) as nested:
-                require('Constellation Computer.app/Contents/_CodeSignature/CodeResources' in nested.namelist(),
-                        'Signed helper resource seal is missing')
+                packaging.validate_signed_members(nested,row['platform'],distribution)
     return manifest
 
 
