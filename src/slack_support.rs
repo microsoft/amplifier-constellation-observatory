@@ -266,13 +266,13 @@ fn retain_with_release(
 /// Only the new private Observatory home receives support bytes. Never adopts,
 /// overwrites, repairs or removes an existing Slack support directory.
 pub(crate) fn retain(home: &Path, executable: &Path, manifest: &Value) -> Result<()> {
-    let root = executable.parent().context("Missing application folder")?;
+    let root = crate::package_layout::resource_root(executable)?;
     let Some(expected) = binding(manifest)? else {
         return Ok(());
     };
     let (release, _) = inventory(&root.join("support/slack"), &expected, false)?;
     compiled_release(&release)?;
-    retain_with_release(home, root, manifest, &release)
+    retain_with_release(home, &root, manifest, &release)
 }
 fn installed_with_release(home: &Path, release: &ReleaseDescriptor) -> Result<Option<PathBuf>> {
     let root = home.join("support/slack");

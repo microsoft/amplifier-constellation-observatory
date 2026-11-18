@@ -3,8 +3,10 @@ import hashlib
 import importlib.util
 import io
 import json
+import plistlib
 from pathlib import Path
 import tempfile
+import struct
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -13,6 +15,61 @@ spec=importlib.util.spec_from_file_location('release',Path(__file__).with_name('
 release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
 
 class ReleaseSet(unittest.TestCase):
+    def mac_fixture(self, root):
+        binary=root/'payload';binary.write_bytes(b'exact inert service')
+        launcher=root/'launcher';launcher.write_bytes(struct.pack('<8I',0xfeedfacf,0x01000007,0,2,0,0,0,0))
+        record=release.packaging.package(binary,'x86_64-apple-darwin','0.12.6',root/'artifacts',mac_launcher=launcher)
+        path=root/'artifacts'/record['filename']
+        with zipfile.ZipFile(path) as archive:members={name:archive.read(name) for name in archive.namelist()}
+        return path,record,members
+
+    def write_members(self,path,members):
+        with zipfile.ZipFile(path,'w') as archive:
+            for name,data in members.items():archive.writestr(name,data)
+
+    def test_new_mac_layout_keeps_payload_entry_and_audits_separate_gui(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path,row,members=self.mac_fixture(Path(temporary))
+            release.archive_support(path,row,{})
+            self.assertEqual(row['entry'],'Observatory.app/Contents/MacOS/agent-observatory')
+            members[row['gui_entry']]+=b'changed launcher'
+            self.write_members(path,members);row['sha256']=release.digest(path)
+            with self.assertRaisesRegex(ValueError,'launcher bytes'):
+                release.archive_support(path,row,{})
+
+    def test_flat_legacy_mac_layout_remains_explicitly_supported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path,row,members=self.mac_fixture(Path(temporary))
+            resource=release.packaging.MAC_RESOURCES+'/observatory-package.json'
+            old='Observatory.app/Contents/MacOS/observatory-package.json'
+            manifest=json.loads(members.pop(resource));del manifest['mac_bundle_layout']
+            members[old]=json.dumps(manifest).encode();del members[row['gui_entry']]
+            plist='Observatory.app/Contents/Info.plist';info=plistlib.loads(members[plist]);info['CFBundleExecutable']='agent-observatory';members[plist]=plistlib.dumps(info)
+            members['Observatory.app/Contents/Resources/unrelated.txt']=b'legacy resources may coexist'
+            for key in ('mac_bundle_layout','gui_entry','gui_sha256'):del row[key]
+            self.write_members(path,members)
+            release.archive_support(path,row,{})
+
+    def test_new_mac_layout_refuses_missing_invalid_or_mixed_markers_without_fallback(self):
+        for mutation in ['missing_external','boolean_external','wrong_external','missing_embedded','boolean_embedded','missing_resource_with_flat_fallback','wrong_cf_executable']:
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as temporary:
+                path,row,members=self.mac_fixture(Path(temporary))
+                resource=release.packaging.MAC_RESOURCES+'/observatory-package.json'
+                if mutation=='missing_external':del row['mac_bundle_layout']
+                elif mutation=='boolean_external':row['mac_bundle_layout']=True
+                elif mutation=='wrong_external':row['mac_bundle_layout']=2
+                elif mutation in ('missing_embedded','boolean_embedded'):
+                    manifest=json.loads(members[resource])
+                    if mutation=='missing_embedded':del manifest['mac_bundle_layout']
+                    else:manifest['mac_bundle_layout']=True
+                    members[resource]=json.dumps(manifest).encode()
+                elif mutation=='missing_resource_with_flat_fallback':
+                    members['Observatory.app/Contents/MacOS/observatory-package.json']=members.pop(resource)
+                elif mutation=='wrong_cf_executable':
+                    name='Observatory.app/Contents/Info.plist';info=plistlib.loads(members[name]);info['CFBundleExecutable']='agent-observatory';members[name]=plistlib.dumps(info)
+                self.write_members(path,members)
+                with self.assertRaises(ValueError):release.archive_support(path,row,{})
+
     def fixture(self, root, helper_source=None):
         source=root/'artifacts';source.mkdir();binary=root/'inert';binary.write_bytes(b'inert app, never executed')
         rows=[];files={}
@@ -27,11 +84,17 @@ class ReleaseSet(unittest.TestCase):
             z.writestr('manifest.json',json.dumps({'schema':1,'artifacts':rows,**({'source':helper_source} if helper_source else {})}))
         pin=release.digest(helper)
         for target in release.packaging.TARGETS:
-            release.packaging.package(binary,target,'0.11.1',source)
+            launcher_options={}
+            if 'apple' in target:
+                launcher=root/('inert-launcher-'+target)
+                cpu=0x01000007 if target.startswith('x86_64') else 0x0100000c
+                launcher.write_bytes(struct.pack('<8I',0xfeedfacf,cpu,0,2,0,0,0,0))
+                launcher_options['mac_launcher']=launcher
+            release.packaging.package(binary,target,'0.11.1',source,**launcher_options)
             instance=root/target;instance.mkdir();name='agent-instance.exe' if 'windows' in target else 'agent-instance'
             (instance/name).write_bytes(b'inert instance, never executed')
             (instance/'consumer-bundle.json').write_text(json.dumps({'schema':1,'kind':'instance-consumer-bundle','target':target,'version':'fixture','source':'0'*40,'binary':name,'native_runtime':{'version':'fixture'},'files':{name:release.digest(instance/name)}}))
-            release.packaging.package(binary,target,'0.11.1',source,instance,machine_helpers=helper,helpers_sha256=pin)
+            release.packaging.package(binary,target,'0.11.1',source,instance,machine_helpers=helper,helpers_sha256=pin,**launcher_options)
         (source/'constellation-machine-helper-0.2.1-linux-x86_64.zip').write_bytes(b'new rebuilt helper must not publish')
         return source,helper,pin
     def test_exact_38_assets_retain_pinned_helpers_and_exclude_rebuilds(self):

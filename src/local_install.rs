@@ -45,10 +45,8 @@ pub fn prepare(
 }
 
 pub fn bundled_path() -> Result<Option<PathBuf>> {
-    let root = std::env::current_exe()?
-        .parent()
-        .context("Missing application folder")?
-        .join("support/instance");
+    let root =
+        crate::package_layout::resource_root(&std::env::current_exe()?)?.join("support/instance");
     Ok(root.exists().then_some(root))
 }
 

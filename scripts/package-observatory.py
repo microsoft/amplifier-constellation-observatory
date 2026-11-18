@@ -11,6 +11,7 @@ import plistlib
 import re
 import stat
 import tarfile
+import tempfile
 import zipfile
 
 TARGETS = {
@@ -23,6 +24,20 @@ TARGETS = {
 }
 SLACK_LOCK = Path(__file__).with_name('slack-bundle-lock.json')
 MAX_SLACK_BYTES = 1024**3
+MAC_GUI_ENTRY = 'Observatory.app/Contents/MacOS/Observatory'
+MAC_RESOURCES = 'Observatory.app/Contents/Resources'
+
+
+def mac_launcher_bytes(target, supplied=None):
+    """Build tooling only; an explicitly supplied launcher remains unchanged."""
+    spec = importlib.util.spec_from_file_location('observatory_mac_launcher', Path(__file__).with_name('build-macos-launcher.py'))
+    launcher = importlib.util.module_from_spec(spec); spec.loader.exec_module(launcher)
+    if supplied is not None:
+        return launcher.read_launcher(supplied, target)
+    with tempfile.TemporaryDirectory(prefix='observatory-macos-launcher-') as temporary:
+        path = Path(temporary) / 'Observatory'
+        launcher.build(target, path)
+        return launcher.read_launcher(path, target)
 
 
 def slack_files(bundle, target, lock_path=None):
@@ -114,7 +129,7 @@ def helper_files(bundle, expected):
     return files
 
 
-def package(binary, target, version, output, instance_bundle=None, machine_helpers=None, helpers_sha256=None, slack_bundle=None):
+def package(binary, target, version, output, instance_bundle=None, machine_helpers=None, helpers_sha256=None, slack_bundle=None, mac_launcher=None):
     if target not in TARGETS or not re.fullmatch(r'\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?', version):
         raise ValueError('Invalid target or release version')
     if not binary.is_file() or binary.is_symlink():
@@ -124,10 +139,15 @@ def package(binary, target, version, output, instance_bundle=None, machine_helpe
     instance, bundled = instance_files(instance_bundle, target) if instance_bundle else (None, [])
     helpers = helper_files(machine_helpers, helpers_sha256) if machine_helpers else {}
     slack_binding, slack = slack_files(slack_bundle,target) if slack_bundle else (None,[])
+    if mac_launcher is not None and system != 'macos':
+        raise ValueError('A Mac launcher belongs only to a Mac package')
+    launcher_data = mac_launcher_bytes(target, mac_launcher) if system == 'macos' else None
     output.mkdir(parents=True, exist_ok=True)
     package_manifest = {'schema': 1, 'component': 'agent-observatory', 'version': version,
                         'target': target, 'binary': 'agent-observatory.exe' if system == 'windows' else 'agent-observatory',
                         'binary_sha256': hashlib.sha256(data).hexdigest()}
+    if system == 'macos':
+        package_manifest['mac_bundle_layout'] = 1
     if instance:
         package_manifest['instance_manifest_sha256'] = hashlib.sha256((instance_bundle / 'consumer-bundle.json').read_bytes()).hexdigest()
     if helpers:
@@ -165,20 +185,22 @@ def package(binary, target, version, output, instance_bundle=None, machine_helpe
             archive.writestr(info, content)
         with zipfile.ZipFile(destination, 'w') as archive:
             put(archive, entry, data, 0o755)
-            put(archive, str(PurePosixPath(entry).parent / 'observatory-package.json'), manifest_bytes)
-            prefix = 'support/instance/' if system == 'windows' else 'Observatory.app/Contents/MacOS/support/instance/'
+            resource_root = PurePosixPath(MAC_RESOURCES) if system == 'macos' else PurePosixPath(entry).parent
+            put(archive, str(resource_root / 'observatory-package.json'), manifest_bytes)
+            prefix = str(resource_root / 'support/instance') + '/'
             for name, content, mode in bundled:
                 put(archive, prefix + name, content, mode)
-            helper_prefix = str(PurePosixPath(entry).parent / 'support/machine-helpers') + '/'
+            helper_prefix = str(resource_root / 'support/machine-helpers') + '/'
             for name, content in sorted(helpers.items()):
                 put(archive, helper_prefix + name, content)
             for name, content, mode in slack:
-                put(archive, str(PurePosixPath(entry).parent / name),content,mode)
+                put(archive, str(resource_root / name),content,mode)
             if system == 'macos':
+                put(archive, MAC_GUI_ENTRY, launcher_data, 0o755)
                 put(archive, 'Observatory.app/Contents/Info.plist', plistlib.dumps({
                     'CFBundleName': 'Observatory', 'CFBundleDisplayName': 'Observatory',
                     'CFBundleIdentifier': 'com.microsoft.constellation.observatory',
-                    'CFBundleExecutable': 'agent-observatory', 'CFBundleVersion': version,
+                    'CFBundleExecutable': 'Observatory', 'CFBundleVersion': version,
                     'CFBundleShortVersionString': version, 'CFBundlePackageType': 'APPL',
                     'LSMinimumSystemVersion': '11.0', 'LSUIElement': True,
                 }))
@@ -197,6 +219,11 @@ def package(binary, target, version, output, instance_bundle=None, machine_helpe
               'os': system, 'architecture': architecture, 'filename': filename, 'entry': entry,
               'sha256': digest, 'binary_sha256': hashlib.sha256(data).hexdigest(),
               'signed_or_notarized': False, 'requires_developer_toolchain': False}
+    if system == 'macos':
+        # The outer app signature may change its launcher, but never this
+        # already-frozen service payload or its embedded checksum inventory.
+        record.update(mac_bundle_layout=1, gui_entry=MAC_GUI_ENTRY,
+                      gui_sha256=hashlib.sha256(launcher_data).hexdigest())
     record['includes_agent_setup'] = instance is not None
     record['includes_computer_setup'] = bool(helpers)
     record['includes_slack_setup'] = bool(slack)
@@ -219,5 +246,6 @@ if __name__ == '__main__':
     parser.add_argument('--machine-helpers', type=Path, help='Complete checksum-verified helper release bundle')
     parser.add_argument('--helpers-sha256', help='Expected SHA256 of the helper release bundle')
     parser.add_argument('--slack-bundle', type=Path, help='Unchanged target Slack archive matching the compiled reviewed Slack lock')
+    parser.add_argument('--mac-launcher', type=Path, help='Optional exact native Mac GUI launcher; no signing or byte rewriting is performed')
     args = parser.parse_args()
-    print(json.dumps(package(args.binary, args.target, args.version, args.output, args.instance_bundle, args.machine_helpers, args.helpers_sha256,args.slack_bundle), indent=2))
+    print(json.dumps(package(args.binary, args.target, args.version, args.output, args.instance_bundle, args.machine_helpers, args.helpers_sha256,args.slack_bundle,args.mac_launcher), indent=2))

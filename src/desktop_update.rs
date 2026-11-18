@@ -131,7 +131,7 @@ fn complete(value: &Value) -> bool {
 
 pub fn package(executable: &Path) -> Result<Value> {
     ordinary(executable)?;
-    let root = executable.parent().context("Missing application folder")?;
+    let root = crate::package_layout::resource_root(executable)?;
     let path = root.join("observatory-package.json");
     ordinary(&path)?;
     ensure!(
@@ -165,7 +165,7 @@ pub fn package(executable: &Path) -> Result<Value> {
             "Bundled computer setup inventory changed"
         );
     }
-    crate::slack_support::validate_package(root, &manifest)?;
+    crate::slack_support::validate_package(&root, &manifest)?;
     Ok(manifest)
 }
 
@@ -180,9 +180,7 @@ pub fn retain(state: &AppState) -> Result<()> {
         sha(&std::fs::read(&destination)?) == sha(&std::fs::read(&current)?),
         "Existing Observatory executable was preserved"
     );
-    let manifest = if current
-        .parent()
-        .unwrap()
+    let manifest = if crate::package_layout::resource_root(&current)?
         .join("observatory-package.json")
         .exists()
     {
@@ -451,7 +449,7 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
         && installed["recipe"].is_object()
         && package["instance_manifest_sha256"] != installed["instance_manifest_sha256"];
     if replace_support {
-        let root = executable.parent().unwrap().join("support/instance");
+        let root = crate::package_layout::resource_root(executable)?.join("support/instance");
         crate::local_install::copy_bundle(&root, &folder.join("candidate-instance"))?;
         let old_manifest = home.join("support/instance/consumer-bundle.json");
         ensure!(
@@ -471,7 +469,8 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
                 == installed["helpers_manifest_sha256"],
             "Installed computer setup changed; it was preserved"
         );
-        let root = executable.parent().unwrap().join("support/machine-helpers");
+        let root =
+            crate::package_layout::resource_root(executable)?.join("support/machine-helpers");
         candidate["helpers_manifest_sha256"] = json!(crate::helper_support::copy(
             &root,
             &folder.join("candidate-helpers")

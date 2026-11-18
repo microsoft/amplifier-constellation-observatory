@@ -16,6 +16,7 @@ pub mod intake;
 pub mod local_install;
 pub mod machine_network;
 pub mod machines;
+mod package_layout;
 pub mod paired_install;
 pub mod paired_protocol;
 pub mod permissions;
