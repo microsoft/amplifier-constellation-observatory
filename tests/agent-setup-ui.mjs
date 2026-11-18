@@ -1,0 +1,26 @@
+// Pure account boundary checks; no model/provider requests.
+import assert from 'node:assert/strict';
+import {accountLink, modelCandidate} from '../ui/agent-setup.js';
+const snapshot={revision:'a'.repeat(64),backend_sha256:'b'.repeat(64),config:{provider:{kind:'openai',model:'chosen-model',endpoint:'https://example.invalid/v1',auth:'auto',api_key_env:'MODEL_KEY',native:{tools:[{type:'original'}]}},mode:'ask',instructions:'keep these',limits:{turns:7}}};
+const original=structuredClone(snapshot);
+const candidate=modelCandidate(snapshot,null,'new-model','auto',null);
+assert.deepEqual(snapshot,original);
+assert.equal(candidate.expected_revision,snapshot.revision);
+assert.equal(candidate.expected_backend_sha256,snapshot.backend_sha256);
+assert.deepEqual(candidate.config,{...snapshot.config,provider:{...snapshot.config.provider,model:'new-model'}});
+assert.throws(()=>modelCandidate(snapshot,null,'','auto',null));
+assert.throws(()=>modelCandidate(snapshot,null,'chosen-model','chatgpt',{account:{connected:false}}));
+const account={account:{connected:true,credentials_file:'/private/account.json'}};
+const linked=modelCandidate(snapshot,null,'chosen-model','chatgpt',account);
+assert.equal(linked.config.provider.chatgpt_credentials_file,account.account.credentials_file);
+assert.equal(linked.config.provider.model,'chosen-model');
+assert.equal(linked.config.instructions,original.config.instructions);
+const callback='http://127.0.0.1:1455/auth/callback';
+const job={authorization_url:'https://auth.openai.com/api/accounts/authorize?redirect_uri='+encodeURIComponent(callback),callback};
+assert(accountLink(job));
+for(const url of ['https://evil.invalid/api/accounts/authorize','http://auth.openai.com/api/accounts/authorize','https://user@auth.openai.com/api/accounts/authorize','https://auth.openai.com:8443/api/accounts/authorize'])assert.equal(accountLink({...job,authorization_url:url}),null);
+assert.equal(accountLink({...job,callback:'http://192.168.1.2:1455/auth/callback'}),null);
+assert.equal(accountLink({...job,authorization_url:job.authorization_url+'&redirect_uri='+encodeURIComponent(callback)}),null);
+assert.equal(accountLink({verification_url:'https://auth.openai.com/codex/device'},false),'https://auth.openai.com/codex/device');
+assert.equal(accountLink({verification_url:'https://auth.openai.com/codex/device?secret=value'},false),null);
+console.log('PASS model changes preserve the saved engine/settings and exact CAS binding; account authorization links are constrained');

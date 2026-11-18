@@ -99,6 +99,7 @@ jobs:
           python scripts/test-native-packaging.py
           python scripts/test-native-launch-diagnostics.py
           python scripts/test-instance-bundle-download.py
+          python scripts/test-slack-bundle-download.py
       - name: Install prerequisites
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
@@ -126,7 +127,7 @@ jobs:
           cargo +1.93.0 build --manifest-path machine-helper/Cargo.toml --locked
           python machine-helper/tests/actual-server.py
       - uses: actions/setup-node@v4
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || runner.os == 'Windows' || runner.os == 'macOS'
         with:
           node-version: '22'
       - name: Check browser setup and conversation journeys
@@ -145,9 +146,34 @@ jobs:
           node tests/markdown.mjs
           node tests/world-model.mjs
           node tests/world-browser.mjs
+          node tests/agent-setup-ui.mjs
+          node tests/agent-setup-browser.mjs
+          node --test tests/agent-instance-start.test.mjs
+          node --test tests/slack-setup.test.mjs
+          node tests/slack-setup-browser.mjs
+          node tests/consumer-onboarding-browser.mjs
           node tests/approval-policy-ui.mjs
           node tests/approval-policy-browser.mjs
           node tests/machine-pairing-browser.mjs
+      - name: Check native Windows and Mac onboarding controls without consumer developer tools
+        if: runner.os == 'Windows' || runner.os == 'macOS'
+        env:
+          OBSERVATORY_BINARY: ${{ github.workspace }}/target/${{ matrix.target }}/release/${{ matrix.executable }}
+          OBSERVATORY_QA_DIR: ${{ runner.temp }}/observatory-consumer-browser
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install chromium
+          node tests/agent-setup-ui.mjs
+          node --test tests/agent-instance-start.test.mjs tests/slack-setup.test.mjs
+          node tests/agent-setup-browser.mjs
+          node tests/slack-setup-browser.mjs
+          node tests/consumer-onboarding-browser.mjs
+      - uses: actions/upload-artifact@v4
+        if: always() && (runner.os == 'Windows' || runner.os == 'macOS')
+        with:
+          name: consumer-browser-${{ matrix.target }}
+          path: ${{ runner.temp }}/observatory-consumer-browser
+          if-no-files-found: warn
       - name: Verify Windows does not require a separate VC++ runtime
         if: runner.os == 'Windows'
         run: python scripts/check-machine-helper-imports.py --binary "$OBSERVATORY_RELEASE_BINARY" --platform "${{ matrix.platform }}"
@@ -179,8 +205,13 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           python scripts/fetch-instance-bundle.py --target "$TARGET" --output "$RUNNER_TEMP/observatory-instance-bundle"
+          slack_args=()
+          if [[ "$TARGET" == *-pc-windows-msvc || "$TARGET" == *-apple-darwin ]]; then
+            python scripts/fetch-slack-bundle.py --target "$TARGET" --output "$RUNNER_TEMP/observatory-slack-bundle.zip"
+            slack_args=(--slack-bundle "$RUNNER_TEMP/observatory-slack-bundle.zip")
+          fi
           version=$("$OBSERVATORY_RELEASE_BINARY" --version | cut -d' ' -f2)
-          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$RUNNER_TEMP/observatory-instance-bundle" --machine-helpers "$RUNNER_TEMP/observatory-helper-closure/constellation-machine-helpers-${{ needs.helper-closure.outputs.version }}.zip" --helpers-sha256 "${{ needs.helper-closure.outputs.sha256 }}" --output dist
+          python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$RUNNER_TEMP/observatory-instance-bundle" --machine-helpers "$RUNNER_TEMP/observatory-helper-closure/constellation-machine-helpers-${{ needs.helper-closure.outputs.version }}.zip" --helpers-sha256 "${{ needs.helper-closure.outputs.sha256 }}" "${slack_args[@]}" --output dist
       - name: Verify packaged local browser and computer network setup
         if: runner.os == 'Linux' && runner.arch == 'X64'
         env:

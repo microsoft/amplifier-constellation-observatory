@@ -165,6 +165,7 @@ pub fn package(executable: &Path) -> Result<Value> {
             "Bundled computer setup inventory changed"
         );
     }
+    crate::slack_support::validate_package(root, &manifest)?;
     Ok(manifest)
 }
 
@@ -193,6 +194,9 @@ pub fn retain(state: &AppState) -> Result<()> {
         Some(manifest) => crate::helper_support::retain(&state.home, &current, manifest)?,
         None => crate::helper_support::installed(&state.home)?,
     };
+    if let Some(manifest) = manifest.as_ref() {
+        crate::slack_support::retain(&state.home, &current, manifest)?;
+    }
     let host = state
         .list("hosts")?
         .into_iter()

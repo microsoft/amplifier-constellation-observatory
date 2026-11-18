@@ -22,11 +22,21 @@ access limits and sign-in requirements still apply.
 3. The app opens in your browser. Choose a name and password for this local
    installation. You can also choose to start it when you sign in.
 4. Select your computer and choose **Create an agent**. Name it and confirm
-   installation, then connect its model account and any services you want to use.
+   installation. Choose **Continue setup** to connect its model account, review
+   the model, and choose **Start my agent**.
+5. On Windows or macOS, choose **Slack** to connect that agent to your workspace.
+   Observatory installs its bundled connector and guides you through Slack's
+   approval. Confirm the workspace shown before creating the connection. Your
+   workspace administrator may need to approve the app.
 
 Reopening the app returns to the same installation. Local setup does not require
 a certificate, remote account, GPU, or developer tools. Creating an agent does not
 prompt a model or install a Minecraft server.
+
+Keep setup open in Observatory while signing in to your model account or Slack.
+You can close the page and return to saved setup. An uncertain result is checked
+before any further action; installation and connection requests are not repeated
+automatically. Your existing agents, sessions and connections stay in place.
 
 Packages target Windows 11, macOS, and Linux on Intel/AMD and ARM processors.
 Windows and macOS downloads are unsigned previews; keep OS security protections
