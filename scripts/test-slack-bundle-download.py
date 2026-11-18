@@ -65,5 +65,42 @@ class DownloadTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 fetch.ReleaseRedirects().redirect_request(request, None, 302, '', {}, url)
 
+    def test_signed_derivative_is_local_only_and_never_falls_back_to_public_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); _, lock, row = self.fixture(root)
+            target = 'aarch64-apple-darwin'
+            row['url'] = None
+            row['release']['target'] = target
+            row['release']['files'] = {'Slack Connector.app/Contents/_CodeSignature/CodeResources': {}}
+            row['release']['signed_derivative'] = {
+                'schema': 1, 'origin_archive_sha256': '1' * 64,
+                'origin_native_bundle_sha256': '2' * 64,
+                'signing_receipt_sha256': '3' * 64, 'team_id': 'ABCDEFGHIJ'}
+            lock.write_text(json.dumps({'schema': 1, 'targets': {target: row}}))
+            opener = Mock(); output = root / 'out' / 'package.zip'
+            with self.assertRaisesRegex(ValueError, 'no public download fallback'):
+                fetch.fetch(target, output, lock, opener=opener)
+            self.assertFalse(output.parent.exists())
+            local = root / 'signed.zip'; local.write_bytes(b'wrong bytes')
+            with self.assertRaises(ValueError):
+                fetch.fetch(target, output, lock, opener=opener, local_archive=local)
+            self.assertFalse(output.exists())
+            local.write_bytes(b'exact owner archive')
+            fetch.fetch(target, output, lock, opener=opener, local_archive=local)
+            self.assertEqual(output.read_bytes(), local.read_bytes())
+            opener.open.assert_not_called()
+            row['url'] = 'https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.18.0/native.zip'
+            lock.write_text(json.dumps({'schema': 1, 'targets': {target: row}}))
+            with self.assertRaisesRegex(ValueError, 'bundled-only'):
+                fetch.selected(target, lock)
+            row['url'] = None
+            for field, invalid in [('schema', True), ('schema', 1.0), ('team_id', 1234567890)]:
+                original = row['release']['signed_derivative'][field]
+                row['release']['signed_derivative'][field] = invalid
+                lock.write_text(json.dumps({'schema': 1, 'targets': {target: row}}))
+                with self.assertRaisesRegex(ValueError, 'bundled-only'):
+                    fetch.selected(target, lock)
+                row['release']['signed_derivative'][field] = original
+
 
 if __name__ == '__main__': unittest.main()

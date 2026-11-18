@@ -35,7 +35,7 @@ type FutureResult<'a, T> = Pin<Box<dyn Future<Output = ApiResult<T>> + Send + 'a
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockedTarget {
-    pub url: String,
+    pub url: Option<String>,
     pub release: ReleaseDescriptor,
 }
 #[derive(Deserialize)]
@@ -80,7 +80,24 @@ pub(crate) fn selected_release() -> ApiResult<Option<LockedTarget>> {
     Ok(Some(selected.clone()))
 }
 fn validate_url(selected: &LockedTarget) -> ApiResult<()> {
-    let url = reqwest::Url::parse(&selected.url)
+    if selected.release.signed_derivative.is_some() {
+        selected
+            .release
+            .validate_for_target(&selected.release.target)
+            .map_err(|_| ApiError::bad("Invalid signed Slack distribution"))?;
+        return if selected.url.is_none() {
+            Ok(())
+        } else {
+            Err(ApiError::bad(
+                "Signed Slack distributions must be bundled without a download fallback",
+            ))
+        };
+    }
+    let address = selected
+        .url
+        .as_deref()
+        .ok_or_else(|| ApiError::bad("Missing official Slack release address"))?;
+    let url = reqwest::Url::parse(address)
         .map_err(|_| ApiError::bad("Invalid locked Slack release address"))?;
     let prefix = format!(
         "/microsoft/amplifier-acp-slack/releases/download/v{}/",
@@ -167,6 +184,11 @@ impl Backend for LocalBackend {
             })
             .await
             .map_err(|_| ApiError::bad("Bundled Slack package verification was not confirmed"))??;
+            if retained.is_none() && selected.release.signed_derivative.is_some() {
+                return Err(ApiError::bad(
+                    "The signed Slack setup package is missing. Reopen the complete Observatory application.",
+                ));
+            }
             if std::fs::symlink_metadata(cache).is_ok() {
                 return Err(ApiError::bad(
                     "This package cache already exists; it was preserved",
@@ -214,6 +236,12 @@ impl Backend for LocalBackend {
 }
 
 async fn download_archive(archive: &Path, selected: &LockedTarget) -> ApiResult<()> {
+    validate_url(selected)?;
+    let url = selected.url.as_deref().ok_or_else(|| {
+        ApiError::bad(
+            "Private signed Slack packages cannot be downloaded through the public release route",
+        )
+    })?;
     config::private_create(archive, &[])?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -242,7 +270,7 @@ async fn download_archive(archive: &Path, selected: &LockedTarget) -> ApiResult<
         .build()
         .map_err(|_| ApiError::bad("Could not prepare the reviewed package download"))?;
     let mut response = client
-        .get(&selected.url)
+        .get(url)
         .send()
         .await
         .map_err(|_| ApiError::bad("The Slack package download was not completed"))?;

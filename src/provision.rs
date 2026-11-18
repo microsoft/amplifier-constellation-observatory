@@ -264,6 +264,8 @@ async fn execute_inner(state: &AppState, id: &str, plan: &Value) -> ApiResult<i3
             "Host settings changed before installation; create a new plan",
         ));
     }
+    crate::local_install::validate_dispatch(state, &host, plan)
+        .map_err(|e| ApiError::bad(e.to_string()))?;
     let mut job = state.read("jobs", id)?;
     job["status"] = json!("running");
     state.save("jobs", job, None)?;

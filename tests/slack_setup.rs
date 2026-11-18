@@ -83,8 +83,10 @@ fn release() -> LockedTarget {
         },
     );
     LockedTarget {
-        url: "https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.0.0/inert.zip"
-            .into(),
+        url: Some(
+            "https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.0.0/inert.zip"
+                .into(),
+        ),
         release: ReleaseDescriptor {
             schema: 1,
             source: "b".repeat(40),
@@ -94,6 +96,7 @@ fn release() -> LockedTarget {
             archive_sha256: "c".repeat(64),
             entry,
             native_bundle_sha256: "d".repeat(64),
+            signed_derivative: None,
             files,
         },
     }

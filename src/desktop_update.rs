@@ -450,16 +450,33 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
         && package["instance_manifest_sha256"] != installed["instance_manifest_sha256"];
     if replace_support {
         let root = crate::package_layout::resource_root(executable)?.join("support/instance");
-        crate::local_install::copy_bundle(&root, &folder.join("candidate-instance"))?;
         let old_manifest = home.join("support/instance/consumer-bundle.json");
         ensure!(
             installed["instance_manifest_sha256"] == sha(&std::fs::read(&old_manifest)?),
             "Installed agent setup was changed; it was preserved"
         );
         crate::local_install::inventory(&home.join("support/instance"))?;
+        let next_recipe = crate::local_install::verified_recipe(&root, home)?;
+        if installed["recipe"].get("private_cohort").is_some()
+            || next_recipe.get("private_cohort").is_some()
+        {
+            ensure!(
+                crate::local_install::fixed_recipe_matches(
+                    home,
+                    &read(&old_manifest)?,
+                    &installed["recipe"],
+                )?,
+                "The saved agent setup recipe is customized; its settings were preserved"
+            );
+            // Only the owned future-install recipe changes. Existing agents'
+            // selected engines, sessions and settings are independent.
+            candidate["recipe"] = next_recipe;
+        } else {
+            // Preserve the established public-to-public recipe behavior.
+            candidate["recipe"]["version"] = next_recipe["version"].clone();
+        }
+        crate::local_install::copy_bundle(&root, &folder.join("candidate-instance"))?;
         candidate["instance_manifest_sha256"] = package["instance_manifest_sha256"].clone();
-        candidate["recipe"]["version"] =
-            read(&root.join("consumer-bundle.json"))?["version"].clone();
     }
     let replace_helpers = package["helpers_manifest_sha256"].is_string()
         && package["helpers_manifest_sha256"] != installed["helpers_manifest_sha256"];

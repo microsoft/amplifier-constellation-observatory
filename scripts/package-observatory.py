@@ -53,6 +53,11 @@ def slack_files(bundle, target, lock_path=None):
     if not isinstance(release, dict):
         raise ValueError('No reviewed Slack package is locked for this target')
     required = {'schema','source','version','target','archive_size','archive_sha256','entry','native_bundle_sha256','files'}
+    if 'signed_derivative' in release:
+        required.add('signed_derivative')
+        spec = importlib.util.spec_from_file_location('slack_distribution', Path(__file__).with_name('fetch-slack-bundle.py'))
+        distribution = importlib.util.module_from_spec(spec); spec.loader.exec_module(distribution)
+        distribution.selected(target, lock_path or SLACK_LOCK)
     entry = 'acp-slack-adapter.exe' if 'windows' in target else 'Slack Connector.app/Contents/MacOS/acp-slack-adapter'
     native = 'native-bundle.json' if 'windows' in target else 'Slack Connector.app/Contents/Resources/native-bundle.json'
     if (set(release) != required or release['schema'] != 1 or release['target'] != target

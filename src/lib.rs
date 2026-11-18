@@ -26,6 +26,7 @@ mod process_tree;
 pub mod provider;
 pub mod provision;
 pub mod server;
+pub mod signing_cohort;
 pub mod slack_local;
 pub mod slack_package;
 pub mod slack_setup;

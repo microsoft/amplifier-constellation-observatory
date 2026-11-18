@@ -30,6 +30,19 @@ pub struct LockedFile {
     pub mode: u32,
 }
 
+/// Release-owner audit binding for a separately signed Mac distribution.
+/// Final member hashes below remain authoritative; these are original inputs,
+/// never an assertion that signing left their bytes unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SignedDerivative {
+    pub schema: u8,
+    pub origin_archive_sha256: String,
+    pub origin_native_bundle_sha256: String,
+    pub signing_receipt_sha256: String,
+    pub team_id: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseDescriptor {
@@ -41,6 +54,8 @@ pub struct ReleaseDescriptor {
     pub archive_sha256: String,
     pub entry: String,
     pub native_bundle_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_derivative: Option<SignedDerivative>,
     pub files: BTreeMap<String, LockedFile>,
 }
 
@@ -130,6 +145,26 @@ fn member_name(name: &str) -> Result<()> {
 impl ReleaseDescriptor {
     pub fn validate_for_target(&self, expected_target: &str) -> Result<()> {
         let paths = layout(&self.target)?;
+        if let Some(signed) = &self.signed_derivative {
+            ensure!(
+                paths.plist.is_some()
+                    && signed.schema == 1
+                    && lowercase_hex(&signed.origin_archive_sha256, 64)
+                    && lowercase_hex(&signed.origin_native_bundle_sha256, 64)
+                    && lowercase_hex(&signed.signing_receipt_sha256, 64)
+                    && signed.team_id.len() == 10
+                    && signed
+                        .team_id
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()),
+                "Invalid signed Mac Slack distribution binding"
+            );
+            ensure!(
+                self.files
+                    .contains_key("Slack Connector.app/Contents/_CodeSignature/CodeResources"),
+                "Missing signed Mac Slack resource seal"
+            );
+        }
         ensure!(
             self.schema == 1
                 && self.target == expected_target
@@ -176,6 +211,8 @@ impl ReleaseDescriptor {
                     || name == paths.manifest
                     || matches!(name.as_str(), "START-HERE.txt" | "LICENSE")
                     || paths.plist == Some(name.as_str())
+                    || (self.signed_derivative.is_some()
+                        && name == "Slack Connector.app/Contents/_CodeSignature/CodeResources")
                     || name
                         .strip_prefix(paths.python)
                         .is_some_and(|tail| !tail.is_empty()),
@@ -230,6 +267,10 @@ impl ReleaseDescriptor {
     /// not make a network request or accept a browser-provided destination URL.
     pub fn download_url(&self) -> Result<String> {
         self.validate_for_target(&self.target)?;
+        ensure!(
+            self.signed_derivative.is_none(),
+            "Private signed Slack distributions are available only in the complete application"
+        );
         Ok(format!(
             "https://github.com/microsoft/amplifier-acp-slack/releases/download/v{}/acp-slack-adapter-{}-{}.zip",
             self.version, self.version, self.target
@@ -575,6 +616,7 @@ mod tests {
                     archive_sha256: String::new(),
                     entry: paths.entry.into(),
                     native_bundle_sha256: String::new(),
+                    signed_derivative: None,
                     files: BTreeMap::new(),
                 },
             };
@@ -664,6 +706,42 @@ mod tests {
             fixture.release.source = source.into();
             assert!(fixture.release.download_url().is_err());
         }
+    }
+
+    #[test]
+    fn signed_mac_resource_seal_requires_explicit_derivative_and_stages_exact_bytes() {
+        let mut fixture = Fixture::new(MAC);
+        let seal = "Slack Connector.app/Contents/_CodeSignature/CodeResources";
+        fixture.files.insert(
+            seal.into(),
+            (b"inert signature resource fixture".to_vec(), 0o644),
+        );
+        fixture.reseal();
+        assert!(fixture.stage().is_err());
+        assert!(!fixture.destination.exists());
+        fixture.release.signed_derivative = Some(SignedDerivative {
+            schema: 1,
+            origin_archive_sha256: "1".repeat(64),
+            origin_native_bundle_sha256: "2".repeat(64),
+            signing_receipt_sha256: "3".repeat(64),
+            team_id: "ABCDEFGHIJ".into(),
+        });
+        assert!(fixture.release.download_url().is_err());
+        fixture.stage().unwrap();
+        assert_eq!(
+            std::fs::read(fixture.destination.join(seal)).unwrap(),
+            fixture.files[seal].0
+        );
+        let mut invalid = fixture.release.clone();
+        invalid.files.remove(seal);
+        assert!(invalid.validate_for_target(MAC).is_err());
+        invalid = fixture.release.clone();
+        invalid.signed_derivative.as_mut().unwrap().team_id = "wrong".into();
+        assert!(invalid.validate_for_target(MAC).is_err());
+        let mut windows = Fixture::new(WINDOWS);
+        windows.release.signed_derivative = fixture.release.signed_derivative;
+        assert!(windows.stage().is_err());
+        assert!(!windows.destination.exists());
     }
 
     #[test]

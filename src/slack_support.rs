@@ -372,6 +372,7 @@ mod tests {
                 archive_sha256: sha(data),
                 entry: "acp-slack-adapter.exe".into(),
                 native_bundle_sha256: "a".repeat(64),
+                signed_derivative: None,
                 files,
             };
             let bytes = serde_json::to_vec_pretty(&release).unwrap();
