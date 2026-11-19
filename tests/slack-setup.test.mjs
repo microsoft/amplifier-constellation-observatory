@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createSlackSetupController,deriveSlackSetupState,publicSlackSetup,slackAuthorizationUrl} from '../ui/slack-setup.js';
+import {createSlackSetupController,deriveSlackSetupState,publicSlackSetup,slackAuthorizationUrl,mountSlackSetup} from '../ui/slack-setup.js';
 
 const endpoint={id:'e05391f6-97aa-4a4e-b1b9-68947e1299b4',revision:7,label:'Notebook'};
 const operationId='d994ef20-7f67-4fd3-b68f-183f45d5e598';
@@ -86,6 +86,26 @@ test('busy double click sends only one mutation',async()=>{
   const f=fixture(),wait=deferred();await f.controller.refresh();f.post(()=>wait.promise);
   const first=f.controller.act('prepare');await f.controller.act('prepare');assert.equal(f.calls.filter(c=>c.method==='POST').length,1);
   wait.resolve(prepared());await first;
+});
+
+test('confirmation entry is disabled during a pending read and reopens empty without dispatch',async()=>{
+  const current=prepared({setup:{authorization_pending:true,next_action:'confirm'},capabilities:{can_confirm:true}});
+  const waiting=deferred(),calls=[];
+  const container={innerHTML:'',addEventListener(){},removeEventListener(){},querySelectorAll(){return[];},querySelector(){return null;}};
+  const mounted=mountSlackSetup(container,{endpoint,api:async(_path,method)=>{
+    calls.push(method);assert.equal(method,'GET');return calls.length===1?clone(current):waiting.promise;
+  }});
+  try {
+    await new Promise(resolve=>setImmediate(resolve));
+    const input=()=>container.innerHTML.match(/<input name="challenge"[^>]*>/)?.[0];
+    assert(input());assert(!/\sdisabled(?:\s|>)/.test(input()));
+    const refresh=mounted.refresh();
+    assert.match(input(),/\sdisabled(?:\s|>)/);
+    assert.deepEqual(calls,['GET','GET']);
+    waiting.resolve(clone(current));await refresh;
+    assert(input());assert(!/\sdisabled(?:\s|>)/.test(input()));
+    assert(!/\svalue=/.test(input()));assert.deepEqual(calls,['GET','GET']);
+  } finally {mounted.dispose();}
 });
 
 test('undeclared workspace approval waits for explicit exact confirmation',async()=>{

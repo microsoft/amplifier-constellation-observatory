@@ -4,12 +4,51 @@
 The second executable differs only by fixture bytes (an ad-hoc signature
 identifier on macOS, inert trailing bytes elsewhere). This checks
 process identity/hash, update and preserved state; it is not release lineage proof.
+Mac uses the exact selected signed Instance cohort unchanged in every app fixture;
+its support checks prove retention, not an Instance version or cohort transition.
 """
 import argparse, hashlib, json, os, shutil, sqlite3, subprocess, tempfile, time, urllib.request, urllib.parse, uuid
 from pathlib import Path
 from contextlib import closing
 
 def digest(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+
+def selected_instance_support(source, target, lock):
+    """Bind Mac fixture support to the same explicit cohort as the compiled app."""
+    if not target.endswith('-apple-darwin'):
+        if source is not None:
+            raise ValueError('Explicit signed support is only for the Mac fixture')
+        return None
+    if source is None:
+        raise ValueError('Mac replacement fixture requires the selected signed Instance bundle')
+    source=source.resolve(strict=True)
+    manifest_file=source/'consumer-bundle.json'
+    if manifest_file.is_symlink() or not manifest_file.is_file() or manifest_file.stat().st_size>4*1024*1024:
+        raise ValueError('Missing ordinary selected Instance manifest')
+    raw=manifest_file.read_bytes();manifest=json.loads(raw)
+    selected=lock.get('targets',{}).get(target)
+    if (lock.get('schema')!=1 or not selected
+        or hashlib.sha256(raw).hexdigest()!=selected['manifest_sha256']
+        or manifest.get('target')!=target
+        or manifest.get('private_derivative')!={'schema':1,'kind':'signed_macos_instance','cohort_id':selected['cohort_id']}
+        or manifest.get('native_runtime',{}).get('kind')!='private_derivative'):
+        raise ValueError('Fixture support does not match the selected signed cohort')
+    assert_retained_instance(source, raw)
+    return source,raw
+
+def assert_retained_instance(root, manifest_bytes):
+    assert (root/'consumer-bundle.json').read_bytes()==manifest_bytes, 'Retained Instance manifest changed'
+    for relative, expected in json.loads(manifest_bytes)['files'].items():
+        # The manifest hash is selected before this reader receives it. Keep the
+        # fixture path boundary explicit even for reviewed immutable inputs.
+        if not relative or '\\' in relative or ':' in relative or any(p in ('','..','.') for p in relative.split('/')) or relative.startswith('/'):
+            raise ValueError('Invalid selected Instance member')
+        member=root
+        for part in relative.split('/'):
+            member=member/part
+            if member.is_symlink():raise ValueError('Selected Instance member is a link')
+        assert member.is_file() and digest(member)==expected, 'Retained Instance member changed: '+relative
+
 def fixture_binary(source, executable, marker):
     mac = os.name!='nt' and os.uname().sysname=='Darwin'
     executable.write_bytes(source.read_bytes() + (b'' if mac else marker))
@@ -61,17 +100,26 @@ class WindowsJournalSnapshot:
             self.handle=None
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',required=True,type=Path);a=p.parse_args();binary=a.binary.resolve()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',required=True,type=Path)
+    p.add_argument('--instance-bundle',type=Path,help='Mac only: exact already-validated signed Instance support; no download or fallback')
+    a=p.parse_args();binary=a.binary.resolve()
     target=('aarch64' if os.uname().machine in ('aarch64','arm64') else 'x86_64') if os.name!='nt' else ('aarch64' if os.environ.get('PROCESSOR_ARCHITECTURE','').lower()=='arm64' else 'x86_64')
     target+='-pc-windows-msvc' if os.name=='nt' else '-apple-darwin' if os.uname().sysname=='Darwin' else '-unknown-linux-gnu'
+    lock=json.loads((Path(__file__).resolve().parents[1]/'scripts/signed-instance-cohort-lock.json').read_bytes())
+    signed_support=selected_instance_support(a.instance_bundle,target,lock)
     version=subprocess.check_output([str(binary),'--version'],text=True).strip().split()[-1];name=binary.name
     checks=[];processes=[];offers=[];offer_handles=[];home=None;origin=None;control=None;exit_handle=None;journal_reader=None;update_worker=None;worker_log=None
     instance_name='agent-instance.exe' if os.name=='nt' else 'agent-instance'
     def package(directory,executable,support_version):
-        support=directory/'support/instance';support.mkdir(parents=True)
-        (support/instance_name).write_bytes(('inert setup '+support_version).encode())
-        manifest={'schema':1,'kind':'instance-consumer-bundle','version':support_version,'target':target,'binary':instance_name,'native_runtime':{},'files':{instance_name:digest(support/instance_name)}}
-        (support/'consumer-bundle.json').write_text(json.dumps(manifest,indent=2)+'\n')
+        support=directory/'support/instance'
+        if signed_support:
+            shutil.copytree(signed_support[0],support,symlinks=True)
+            assert_retained_instance(support,signed_support[1])
+        else:
+            support.mkdir(parents=True)
+            (support/instance_name).write_bytes(('inert setup '+support_version).encode())
+            manifest={'schema':1,'kind':'instance-consumer-bundle','version':support_version,'target':target,'binary':instance_name,'native_runtime':{},'files':{instance_name:digest(support/instance_name)}}
+            (support/'consumer-bundle.json').write_text(json.dumps(manifest,indent=2)+'\n')
         helpers=directory/'support/machine-helpers';helpers.mkdir()
         rows=[]
         for platform in ('windows-x86_64','windows-aarch64','macos-x86_64','macos-aarch64','linux-x86_64','linux-aarch64'):
@@ -144,6 +192,7 @@ def main():
             checks.append('valid legacy helper inventory captured and complete prior tree retained while new helper inventory is installed')
             actual=request(origin,control,'/api/v1/status');assert actual['id']==initial['id'];assert actual['binary_sha256']==digest(new/name);assert actual['pid']!=previous.pid
             assert (home/'support/instance/consumer-bundle.json').read_bytes()==(new/'support/instance/consumer-bundle.json').read_bytes()
+            if signed_support:assert_retained_instance(home/'support/instance',signed_support[1])
             previous.wait(timeout=15);checks.append('new actual process PID and exact binary confirmed at same authenticated installation')
             # Replay only the same update receipt: no replacement or process restart.
             first_pid=actual['pid'];request(update_url,update_token,'/apply',{});time.sleep(.3)
@@ -174,8 +223,9 @@ def main():
             checks.append('actual rejected candidate exits before previous executable restarts; unknown receipt remains unchanged')
             bad_offer.terminate();bad_offer.wait(timeout=15)
             assert (home/'support/instance/consumer-bundle.json').read_bytes()==(new/'support/instance/consumer-bundle.json').read_bytes()
+            if signed_support:assert_retained_instance(home/'support/instance',signed_support[1])
             assert (home/'machine-helper-artifacts/manifest.json').read_bytes()==(new/'support/machine-helpers/manifest.json').read_bytes()
-            checks.append('Instance recipe and all computer-helper setup files update and roll back together; both inventories preserved')
+            checks.append('Selected signed Instance cohort remains byte-exact through app update and rollback; computer-helper inventory updates and rolls back' if signed_support else 'Instance recipe and all computer-helper setup files update and roll back together; both inventories preserved')
             if os.name=='nt':
                 # A separate regression leaves the successful HTTP /apply and
                 # actual rejected-startup rollback above unchanged on Windows.
@@ -266,5 +316,9 @@ def main():
                 finally:kernel.CloseHandle(exit_handle)
             else:time.sleep(.5)
             if worker_log is not None:worker_log.close()
-    print(json.dumps({'checks':checks,'model_calls':0,'production_operations':0,'binary_sha256':digest(binary),'condition':'real native binaries, same version; distinct ad-hoc signature identifier on macOS or inert trailing bytes elsewhere; inert Instance setup inventory never executed; bad candidate version injected after staging to test actual child rejection and rollback'},indent=2))
+    print(json.dumps({'checks':checks,'model_calls':0,'production_operations':0,'binary_sha256':digest(binary),
+        'instance_support':{'kind':'selected-signed-cohort-retention' if signed_support else 'inert-public-support-replacement',
+            'manifest_sha256':hashlib.sha256(signed_support[1]).hexdigest() if signed_support else None,
+            'instance_version_transition':False if signed_support else 'synthetic fixture versions only'},
+        'condition':'real native binaries, same version; distinct ad-hoc signature identifier on macOS or inert trailing bytes elsewhere; Instance installer never executed, selected signed Mac support retained unchanged (not a cohort transition) or inert public support elsewhere; bad candidate version injected after staging to test actual child rejection and rollback'},indent=2))
 if __name__=='__main__':main()

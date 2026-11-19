@@ -212,8 +212,6 @@ jobs:
           for metadata in dist/agent-observatory-*-"$TARGET".*.json; do
             python scripts/check-native-launch.py --metadata "$metadata"
           done
-      - name: Verify native application replacement and recovery
-        run: python tests/desktop_update_live.py --binary "$OBSERVATORY_RELEASE_BINARY"
       - uses: actions/download-artifact@v4
         with:
           name: qualified-machine-helpers
@@ -240,6 +238,13 @@ jobs:
           fi
           version=$("$OBSERVATORY_RELEASE_BINARY" --version | cut -d' ' -f2)
           python scripts/package-observatory.py --binary "$OBSERVATORY_RELEASE_BINARY" --target "$TARGET" --version "$version" --instance-bundle "$instance_bundle" --machine-helpers "$RUNNER_TEMP/observatory-helper-closure/constellation-machine-helpers-${{ needs.helper-closure.outputs.version }}.zip" --helpers-sha256 "${{ needs.helper-closure.outputs.sha256 }}" "${slack_args[@]}" --output dist
+      - name: Verify native application replacement and recovery
+        run: |
+          support_args=()
+          if [[ "${{ matrix.target }}" == *-apple-darwin ]]; then
+            support_args=(--instance-bundle "$RUNNER_TEMP/observatory-signed-owner-inputs/instance")
+          fi
+          python tests/desktop_update_live.py --binary "$OBSERVATORY_RELEASE_BINARY" "${support_args[@]}"
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'macOS'
         with:

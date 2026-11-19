@@ -567,7 +567,12 @@ if '--body-file' in sys.argv:
     body=json.loads(filename.read_text())
     assert filename.stat().st_mode & 0o077 == 0
 if mode=='timeout': time.sleep(60)
-if mode=='slow': time.sleep(.15)
+if mode=='held':
+    marker.with_suffix('.ready').write_text('ready')
+    deadline=time.monotonic()+10
+    while not marker.with_suffix('.release').exists():
+        if time.monotonic()>=deadline: sys.exit(4)
+        time.sleep(.005)
 if mode=='exit': print('xoxb-private-value',file=sys.stderr); sys.exit(3)
 if mode=='bad': print('xoxb-private-invalid-json'); sys.exit(0)
 if mode=='oversize': print('x'*(1024*1024+1)); time.sleep(60)
@@ -726,7 +731,7 @@ print(json.dumps({{'ok':True,'arguments':sys.argv[1:],'body_action':None if body
 
         #[tokio::test]
         async fn cancelled_observer_does_not_abandon_owned_child_cleanup_or_repeat_call() {
-            let fixture = Fixture::new("slow");
+            let fixture = Fixture::new("held");
             let executable = fixture.executable.clone();
             let digest = fixture.digest.clone();
             let home = fixture.home.clone();
@@ -740,15 +745,25 @@ print(json.dumps({{'ok':True,'arguments':sys.argv[1:],'body_action':None if body
                 )
                 .await
             });
-            tokio::time::timeout(Duration::from_secs(3), async {
-                while !fixture.marker.exists() {
+            // This is interpreter/fixture readiness, not the product deadline
+            // or cleanup allowance. Keep the child held after it has read its
+            // protected request so cancellation cannot race a short sleep.
+            let ready = tokio::time::timeout(Duration::from_secs(30), async {
+                while !fixture.marker.with_extension("ready").exists() {
+                    assert!(!observer.is_finished(), "Fixture returned before readiness");
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             })
-            .await
-            .unwrap();
+            .await;
+            if ready.is_err() {
+                std::fs::write(fixture.marker.with_extension("release"), b"release").unwrap();
+            }
+            ready.expect("Fixture did not reach its controlled readiness checkpoint");
+            assert_eq!(fixture.body_count(), 1);
             observer.abort();
-            let _ = observer.await;
+            assert!(observer.await.unwrap_err().is_cancelled());
+            assert_eq!(fixture.body_count(), 1);
+            std::fs::write(fixture.marker.with_extension("release"), b"release").unwrap();
             tokio::time::timeout(Duration::from_secs(3), async {
                 while fixture.body_count() != 0 {
                     tokio::time::sleep(Duration::from_millis(5)).await;

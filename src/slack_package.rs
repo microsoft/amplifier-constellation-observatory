@@ -544,7 +544,7 @@ fn validate_native_manifest(root: &Path, release: &ReleaseDescriptor) -> Result<
 mod tests {
     use super::*;
     use serde_json::json;
-    use zip::{ZipWriter, write::SimpleFileOptions};
+    use zip::{HasZipMetadata, System, ZipWriter, write::SimpleFileOptions};
 
     const WINDOWS: &str = "x86_64-pc-windows-msvc";
     const MAC: &str = "aarch64-apple-darwin";
@@ -559,10 +559,23 @@ mod tests {
         format!("{:x}", Sha256::digest(bytes))
     }
     fn write_zip(path: &Path, files: &BTreeMap<String, (Vec<u8>, u32)>) {
+        // Match package-native.py's explicit create_system=3 on every host.
+        write_zip_with_system(path, files, System::Unix);
+    }
+    fn write_zip_with_system(
+        path: &Path,
+        files: &BTreeMap<String, (Vec<u8>, u32)>,
+        system: System,
+    ) {
         let mut writer = ZipWriter::new(File::create(path).unwrap());
         for (name, (bytes, mode)) in files {
             writer
-                .start_file(name, SimpleFileOptions::default().unix_permissions(*mode))
+                .start_file(
+                    name,
+                    SimpleFileOptions::default()
+                        .system(system)
+                        .unix_permissions(*mode),
+                )
                 .unwrap();
             writer.write_all(bytes).unwrap();
         }
@@ -672,6 +685,47 @@ mod tests {
                 &self.release,
                 &self.release.target,
             )
+        }
+    }
+
+    #[test]
+    fn explicit_unix_archive_modes_match_owner_packages_and_dos_metadata_refuses() {
+        for target in [WINDOWS, MAC] {
+            let mut fixture = Fixture::new(target);
+            {
+                let mut archive =
+                    zip::ZipArchive::new(File::open(&fixture.archive).unwrap()).unwrap();
+                for (name, (bytes, mode)) in &fixture.files {
+                    let member = archive.by_name(name).unwrap();
+                    assert_eq!(member.get_metadata().system, System::Unix);
+                    assert_eq!(member.unix_mode(), Some(0o100000 | *mode));
+                    assert_eq!(member.size(), bytes.len() as u64);
+                }
+            }
+
+            // Reproduce the Windows writer default explicitly on every test host.
+            // DOS metadata ignores the upper Unix bits, projecting both modes as 0664.
+            write_zip_with_system(&fixture.archive, &fixture.files, System::Dos);
+            let bytes = std::fs::read(&fixture.archive).unwrap();
+            fixture.release.archive_size = bytes.len() as u64;
+            fixture.release.archive_sha256 = sha(&bytes);
+            {
+                let mut archive =
+                    zip::ZipArchive::new(File::open(&fixture.archive).unwrap()).unwrap();
+                for name in ["LICENSE", fixture.release.entry.as_str()] {
+                    let member = archive.by_name(name).unwrap();
+                    assert_eq!(member.get_metadata().system, System::Dos);
+                    assert_eq!(member.unix_mode(), Some(0o100664));
+                }
+            }
+            assert_eq!(
+                fixture.stage().unwrap_err().to_string(),
+                "Slack archive contains a link, duplicate, mode or size mismatch"
+            );
+            assert!(!fixture.destination.exists());
+
+            fixture.reseal();
+            fixture.stage().unwrap();
         }
     }
 
@@ -867,7 +921,12 @@ mod tests {
                     .unwrap();
             } else {
                 writer
-                    .start_file(name, SimpleFileOptions::default().unix_permissions(*mode))
+                    .start_file(
+                        name,
+                        SimpleFileOptions::default()
+                            .system(System::Unix)
+                            .unix_permissions(*mode),
+                    )
                     .unwrap();
                 writer.write_all(bytes).unwrap();
             }
