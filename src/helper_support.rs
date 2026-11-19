@@ -126,10 +126,7 @@ pub(crate) fn retain(home: &Path, executable: &Path, manifest: &Value) -> Result
     let Some(expected) = manifest["helpers_manifest_sha256"].as_str() else {
         return Ok(existing);
     };
-    let root = executable
-        .parent()
-        .context("Missing application folder")?
-        .join("support/machine-helpers");
+    let root = crate::package_layout::resource_root(executable)?.join("support/machine-helpers");
     ensure!(
         inventory(&root, true)?.0 == expected,
         "Packaged computer setup inventory changed"

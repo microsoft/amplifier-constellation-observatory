@@ -86,6 +86,33 @@ class HelperReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'embedded pairing'):
             release.prepare(self.source, self.root / 'bootstrap', '0.2.1')
 
+    def test_signed_mac_cohort_is_retained_with_separate_setup_and_exact_final_bytes(self):
+        originals={}
+        for archive in self.source.glob('*macos-*.zip'):
+            metadata=archive.with_suffix('.zip.json');record=json.loads(metadata.read_text())
+            origin=record['sha256'];originals[archive.name]=archive.read_bytes()
+            with zipfile.ZipFile(archive,'a') as zipped:
+                zipped.writestr('Constellation Computer.app/Contents/_CodeSignature/CodeResources',b'inert test seal, no signing claim')
+                ticket=zipfile.ZipInfo(release.aggregate.MAC_TICKET);ticket.create_system=3;ticket.external_attr=0o100644<<16
+                zipped.writestr(ticket,b'inert staple ticket, no notary claim')
+            record.update(sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),signed_or_notarized=True,
+                          signed_derivative={'schema':1,'origin_archive_sha256':origin,'origin_binary_sha256':record['binary_sha256'],
+                                             'signing_receipt_sha256':'c'*64,'team_id':'ABCDEFGHIJ'})
+            metadata.write_text(json.dumps(record));archive.with_suffix('.zip.sha256').write_text(record['sha256']+'  '+archive.name+'\n')
+        result=release.prepare(self.source,self.root/'signed','0.2.1')
+        self.assertEqual(len(result),20)
+        for name in originals:self.assertEqual((self.root/'signed'/name).read_bytes(),(self.source/name).read_bytes())
+        aggregate=self.root/'signed/constellation-machine-helpers-0.2.1.zip'
+        with zipfile.ZipFile(aggregate) as zipped:manifest=json.loads(zipped.read('manifest.json'))
+        for row in manifest['artifacts']:
+            if row['platform'].startswith('macos-'):
+                self.assertEqual(row['bootstrap_delivery'],'separate_file');self.assertIn('signed_derivative',row)
+            else:self.assertNotIn('signed_derivative',row)
+        metadata=next(self.source.glob('*macos-aarch64.zip.json'));record=json.loads(metadata.read_text())
+        record.pop('bootstrap_delivery');metadata.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError,'separate setup'):
+            release.prepare(self.source,self.root/'invalid-signed','0.2.1')
+
 
 if __name__ == '__main__':
     unittest.main()

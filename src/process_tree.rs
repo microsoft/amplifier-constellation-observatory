@@ -10,7 +10,13 @@ pub(crate) struct ProcessJob(usize);
 impl ProcessJob {
     /// Establish ownership before the installer or ACP process can execute.
     pub(crate) async fn spawn(command: &mut Command) -> Result<(Child, Self)> {
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+        // Installer and ACP children communicate through redirected streams;
+        // opening the desktop app must not also open a console window. Keep the
+        // initial thread suspended until the cleanup job owns the child.
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_SUSPENDED
+                | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+        );
         let mut child = command.spawn()?;
         let result = Self::attach(&child).and_then(|job| {
             resume_suspended(&child)?;
@@ -106,5 +112,52 @@ impl Drop for ProcessJob {
         unsafe {
             CloseHandle(self.0 as _);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{process::Stdio, time::Duration};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    async fn console_child_has_no_window_and_remains_owned_by_cleanup_job() {
+        // The native CI Python is a console executable. Its kernel observation
+        // distinguishes no console from a merely hidden inherited window.
+        let mut command = Command::new("python");
+        command
+            .args([
+                "-c",
+                "import ctypes,time; get_console=ctypes.windll.kernel32.GetConsoleWindow; get_console.restype=ctypes.c_void_p; print(int(bool(get_console())),flush=True); time.sleep(60)",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let (mut child, job) = ProcessJob::spawn(&mut command).await.unwrap();
+        let mut line = String::new();
+        let observed = tokio::time::timeout(
+            Duration::from_secs(10),
+            BufReader::new(child.stdout.take().unwrap()).read_line(&mut line),
+        )
+        .await;
+        let mut in_owned_job = 0;
+        // SAFETY: the child and job retain both borrowed handles through this
+        // query. The output points to an initialized BOOL.
+        let membership = unsafe {
+            IsProcessInJob(
+                child.raw_handle().unwrap() as _,
+                job.0 as _,
+                &mut in_owned_job,
+            )
+        };
+        drop(job);
+        let stopped = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        observed.unwrap().unwrap();
+        assert_eq!(line.trim(), "0", "Child acquired a console");
+        assert_ne!(membership, 0, "Cannot inspect the child job");
+        assert_ne!(in_owned_job, 0, "Child escaped the owned cleanup job");
+        assert!(stopped.unwrap().unwrap().code().is_some());
     }
 }

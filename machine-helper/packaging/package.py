@@ -19,13 +19,17 @@ def package(binary,platform,version,output,source=None):
         put(z,prefix+('MacOS/' if prefix else '')+executable,binary.read_bytes(),0o755)
         if prefix:
             put(z,prefix+'Info.plist',plistlib.dumps({'CFBundleName':'Constellation Computer','CFBundleDisplayName':'Constellation Computer','CFBundleIdentifier':'com.microsoft.constellation.machine-helper','CFBundleExecutable':executable,'CFBundleVersion':version,'CFBundleShortVersionString':version,'CFBundlePackageType':'APPL','LSMinimumSystemVersion':'11.0','LSUIElement':True}))
-        put(z,'START-HERE.txt',b'Open Constellation Computer.app on Mac, or constellation-machine-helper on Windows/Linux.\nUse the setup download from your Observatory; it supplies observatory-pairing.json.\nThe base package alone has no pairing destination, code or credential.\n')
+        instructions=b'Open Constellation Computer.app on Mac, or constellation-machine-helper on Windows/Linux.\nUse the setup download from your Observatory; it supplies observatory-pairing.json.\n'
+        if prefix:instructions+=b'On Mac, if asked, choose observatory-pairing.json from the folder you extracted. Then enter the pairing code shown in Observatory.\n'
+        instructions+=b'The base package alone has no pairing destination, code or credential.\n'
+        put(z,'START-HERE.txt',instructions)
         root=Path(__file__).resolve().parents[2]
         put(z,'LICENSE', (root/'LICENSE').read_bytes())
         put(z,'NUNITO-LICENSE.txt',(Path(__file__).resolve().parents[1]/'ui/NUNITO-LICENSE.txt').read_bytes())
     digest=hashlib.sha256(archive.read_bytes()).hexdigest()
     (output/(filename+'.sha256')).write_text(digest+'  '+filename+'\n')
     record={'platform':platform,'version':version,'filename':filename,'sha256':digest,'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'bootstrap_path':'observatory-pairing.json','bootstrap_included':False,'signed_or_notarized':False,'installation_protocol':1}
+    if platform.startswith('macos'):record['bootstrap_delivery']='separate_file'
     if source is not None:record['source']=source
     (output/(filename+'.json')).write_text(json.dumps(record,indent=2)+'\n')
     return record

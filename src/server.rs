@@ -49,6 +49,15 @@ pub fn router(s: Arc<AppState>) -> Router {
         .route("/world.js", get(world_script))
         .route("/world-model.js", get(world_model))
         .route("/world.css", get(world_styles))
+        .route("/agent-setup.js", get(agent_setup_script))
+        .route("/agent-setup.css", get(agent_setup_styles))
+        .route("/slack-setup.js", get(slack_setup_script))
+        .route("/slack-setup.css", get(slack_setup_styles))
+        .route(
+            "/api/v1/endpoints/{id}/slack-setup",
+            get(slack_setup_get).post(slack_setup_command),
+        )
+        .route("/api/v1/slack-setups", get(slack_setup_list))
         .route("/world-assets/{name}", get(world_asset))
         .route("/api/v1/places", get(places).post(add_place))
         .route("/api/v1/places/{id}", put(edit_place).delete(delete_place))
@@ -151,6 +160,55 @@ async fn world_model() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("../ui/world-model.js"),
+    )
+}
+async fn slack_setup_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../ui/slack-setup.js"),
+    )
+}
+async fn slack_setup_styles() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../ui/slack-setup.css"),
+    )
+}
+async fn slack_setup_get(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let actor = auth::check(&s, &h, "admin", false)?;
+    Ok(Json(crate::slack_setup::get(&s, &id, &actor.actor).await?))
+}
+async fn slack_setup_list(State(s): State<Arc<AppState>>, h: HeaderMap) -> ApiResult<Json<Value>> {
+    let actor = auth::check(&s, &h, "admin", false)?;
+    Ok(Json(
+        json!({"slack_setups":crate::slack_setup::list_saved(&s, &actor.actor)?}),
+    ))
+}
+async fn slack_setup_command(
+    State(s): State<Arc<AppState>>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let actor = auth::check(&s, &h, "admin", true)?;
+    Ok(Json(
+        crate::slack_setup::command(&s, &id, &actor.actor, body).await?,
+    ))
+}
+async fn agent_setup_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../ui/agent-setup.js"),
+    )
+}
+async fn agent_setup_styles() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../ui/agent-setup.css"),
     )
 }
 async fn world_styles() -> impl IntoResponse {
@@ -527,6 +585,37 @@ async fn probe(
     )?;
     Ok(Json(result?))
 }
+// A setup view stays bound to the installation it displayed. The envelope is
+// Observatory-owned and must never be forwarded into an installation's schema.
+fn bound_operation_body(endpoint: &Value, name: &str, mut body: Value) -> ApiResult<Value> {
+    let required = matches!(
+        name,
+        "native-account"
+            | "native-login"
+            | "start-native-login"
+            | "cancel-native-login"
+            | "native-models"
+            | "native-credential"
+            | "backend-account"
+            | "backend-login"
+            | "start-backend-login"
+            | "cancel-backend-login"
+    );
+    let supplied = body
+        .as_object_mut()
+        .and_then(|value| value.remove("_observatory_endpoint_revision"));
+    if required || supplied.is_some() {
+        let revision = supplied.and_then(|value| value.as_u64());
+        if revision.is_none() || revision != endpoint["revision"].as_u64() {
+            return Err(ApiError(
+                axum::http::StatusCode::CONFLICT,
+                "This agent connection changed. Reopen its setup before continuing.".into(),
+            ));
+        }
+    }
+    Ok(body)
+}
+
 async fn operation(
     State(s): State<Arc<AppState>>,
     h: HeaderMap,
@@ -549,6 +638,7 @@ async fn operation(
         .clone()
         .try_acquire_owned()
         .map_err(|_| ApiError::busy())?;
+    let body = bound_operation_body(&e, &name, body)?;
     let result = provider::call(&s, &e, &name, Some(&body)).await?;
     if selected.method != "GET" {
         s.audit(
@@ -1225,4 +1315,46 @@ async fn delete_place(
     s.remove("places", &id, revision(&body)?)?;
     s.audit("place.removed", Some(&id), json!({"actor":principal.actor}))?;
     Ok(Json(json!({"removed":true,"connections_unchanged":true})))
+}
+
+#[cfg(test)]
+mod setup_revision_tests {
+    use super::*;
+    #[test]
+    fn setup_is_bound_to_the_displayed_endpoint_and_envelope_stays_local() {
+        let endpoint = json!({"id":"agent","revision":7});
+        for name in [
+            "native-account",
+            "start-native-login",
+            "native-credential",
+            "backend-login",
+        ] {
+            for body in [
+                json!({}),
+                json!({"_observatory_endpoint_revision":6}),
+                json!({"_observatory_endpoint_revision":"7"}),
+            ] {
+                assert!(bound_operation_body(&endpoint, name, body).is_err());
+            }
+            let body = bound_operation_body(
+                &endpoint,
+                name,
+                json!({"_observatory_endpoint_revision":7,"value":"private fixture"}),
+            )
+            .unwrap();
+            assert_eq!(body, json!({"value":"private fixture"}));
+        }
+        assert_eq!(
+            bound_operation_body(&endpoint, "native-config", json!({})).unwrap(),
+            json!({})
+        );
+        assert!(
+            bound_operation_body(
+                &endpoint,
+                "apply-native-config",
+                json!({"_observatory_endpoint_revision":6})
+            )
+            .is_err()
+        );
+    }
 }

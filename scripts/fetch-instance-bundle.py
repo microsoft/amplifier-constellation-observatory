@@ -11,6 +11,8 @@ import tempfile
 import urllib.request
 import zipfile
 
+DEFAULT_LOCK = Path(__file__).with_name('bundled-instance-lock.json')
+
 
 def unpack(archive, output, *, case_sensitive=False):
     if output.exists():
@@ -40,10 +42,15 @@ def unpack(archive, output, *, case_sensitive=False):
 
 
 def fetch(target, output, lock_path=None):
-    lock = json.loads((lock_path or Path(__file__).with_name('instance-bundle-lock.json')).read_text())
+    # Local desktop composition evolves independently of the already compiled
+    # Computer helper's fixed remote-install recipe in instance-bundle-lock.json.
+    lock = json.loads((lock_path or DEFAULT_LOCK).read_text())
     if lock.get('repository') != 'microsoft/amplifier-constellation-instance':
         raise ValueError('Unexpected package owner')
-    version = lock['version']; asset = lock['targets'][target]
+    version = lock['version']
+    if target not in lock.get('targets', {}):
+        raise ValueError('No public local bundle is locked for this target')
+    asset = lock['targets'][target]
     filename = f'agent-instance-consumer-{target}.zip'
     if not re.fullmatch(r'\d+\.\d+\.\d+', version) or not re.fullmatch(r'[a-f0-9]{64}', asset['sha256']):
         raise ValueError('Invalid package pin')

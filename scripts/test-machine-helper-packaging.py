@@ -153,6 +153,57 @@ class PackagingTests(unittest.TestCase):
             packaging.package(bundle.parent)
         self.assertEqual(bundle.read_bytes(), before)
 
+    def test_separate_file_capability_is_independent_of_signed_provenance(self):
+        record={'bootstrap_delivery':'separate_file','signed_or_notarized':False}
+        self.assertEqual(packaging.distribution(record,'macos-aarch64'),{'bootstrap_delivery':'separate_file'})
+        signed={'schema':1,'origin_archive_sha256':'a'*64,'origin_binary_sha256':'b'*64,
+                'signing_receipt_sha256':'c'*64,'team_id':'ABCDEFGHIJ'}
+        record.update(signed_or_notarized=True,signed_derivative=signed)
+        self.assertEqual(packaging.distribution(record,'macos-aarch64')['signed_derivative'],signed)
+        invalid=[{**record,'bootstrap_delivery':None},{**record,'signed_or_notarized':False},
+                 {**record,'signed_derivative':{**signed,'schema':True}},
+                 {**record,'signed_derivative':{**signed,'team_id':1234567890}},
+                 {**record,'signed_derivative':{**signed,'origin_archive_sha256':'A'*64}},
+                 {**record,'signed_derivative':{**signed,'extra':True}}]
+        for row in invalid:
+            with self.subTest(row=row),self.assertRaises(ValueError):packaging.distribution(row,'macos-aarch64')
+        with self.assertRaises(ValueError):packaging.distribution(record,'windows-x86_64')
+
+    def test_signed_staple_ticket_has_one_bounded_regular_exact_path(self):
+        import stat
+        base={'Constellation Computer.app/Contents/MacOS/constellation-machine-helper':b'executable',
+              'Constellation Computer.app/Contents/Info.plist':b'plist',packaging.MAC_SEAL:b'seal',
+              'START-HERE.txt':b'notice','LICENSE':b'license','NUNITO-LICENSE.txt':b'font'}
+        extra={'bootstrap_delivery':'separate_file','signed_derivative':{'schema':1}}
+        def check(data=b'ticket',name=packaging.MAC_TICKET,mode=stat.S_IFREG|0o644,dist=extra,platform='macos-aarch64',duplicate=False):
+            out=io.BytesIO()
+            with zipfile.ZipFile(out,'w')as z:
+                for key,value in base.items():z.writestr(key,value)
+                if data is not None:
+                    info=zipfile.ZipInfo(name);info.create_system=3;info.external_attr=mode<<16;z.writestr(info,data)
+                    if duplicate:z.writestr(info,data)
+            with zipfile.ZipFile(io.BytesIO(out.getvalue()))as z:packaging.validate_signed_members(z,platform,dist)
+        check();check(None);check(b'x'*packaging.MAX_STAPLE_TICKET)
+        invalid=[{'data':b''},{'data':b'x'*(packaging.MAX_STAPLE_TICKET+1)},
+                 {'mode':stat.S_IFLNK|0o644},{'mode':stat.S_IFREG|0o755},
+                 {'dist':{}},{'platform':'windows-x86_64'},
+                 {'name':'Constellation Computer.app/Contents/OtherTicket'},
+                 {'name':'Constellation Computer.app/Contents/coderesources'},
+                 {'name':'outside-ticket'}]
+        for row in invalid:
+            with self.subTest(row=list(row)),self.assertRaises(ValueError):check(**row)
+        with self.assertWarns(UserWarning),self.assertRaises(ValueError):check(duplicate=True)
+
+    def test_signed_archive_requires_resource_seal_before_aggregate_is_written(self):
+        folder=self.root/'signed';bundle=self.inputs(folder);before=bundle.read_bytes()
+        path=next(folder.glob('*macos-aarch64.zip.json'));record=json.loads(path.read_text())
+        record.update(bootstrap_delivery='separate_file',signed_or_notarized=True,
+                      signed_derivative={'schema':1,'origin_archive_sha256':'a'*64,'origin_binary_sha256':'b'*64,
+                                         'signing_receipt_sha256':'c'*64,'team_id':'ABCDEFGHIJ'})
+        path.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError,'seal is missing'):packaging.package(folder)
+        self.assertEqual(bundle.read_bytes(),before)
+
     def test_unreviewed_outer_digest_preserves_every_staged_and_installation_file(self):
         bundle = self.bundle()
         self.stage(bundle)

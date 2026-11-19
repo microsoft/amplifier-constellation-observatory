@@ -123,6 +123,94 @@ fn mac_app_finds_bootstrap_outside_app_without_embedding_a_code() {
     std::fs::write(&expected, "{}").unwrap();
     assert_eq!(platform::bootstrap_path(&exe), Some(expected));
 }
+
+#[test]
+fn native_file_choice_preserves_existing_and_noninteractive_paths_and_cancels_cleanly() {
+    use platform::BootstrapChoice;
+    let existing = Path::new("/explicit/or/discovered/observatory.json").to_path_buf();
+    for interactive in [false, true] {
+        assert_eq!(
+            platform::choose_initial_bootstrap(Some(existing.clone()), interactive, || panic!(
+                "Existing explicit/home/discovered input must not prompt"
+            ))
+            .unwrap(),
+            BootstrapChoice::Existing(existing.clone())
+        );
+    }
+    assert_eq!(
+        platform::choose_initial_bootstrap(None, false, || panic!(
+            "Background and no-browser paths must not prompt"
+        ))
+        .unwrap(),
+        BootstrapChoice::Missing
+    );
+    let temporary = tempfile::tempdir().unwrap();
+    assert_eq!(
+        platform::choose_initial_bootstrap(None, true, || Ok(None)).unwrap(),
+        BootstrapChoice::Cancelled
+    );
+    assert!(
+        std::fs::read_dir(temporary.path())
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        platform::choose_initial_bootstrap(None, true, || Ok(Some(existing.clone()))).unwrap(),
+        BootstrapChoice::Selected(existing)
+    );
+    assert!(
+        platform::choose_initial_bootstrap(None, true, || anyhow::bail!("picker unavailable"))
+            .is_err()
+    );
+}
+
+#[test]
+fn selected_setup_file_is_bounded_and_still_uses_original_bootstrap_validation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let path = root.join("observatory-pairing.json");
+    let valid = serde_json::to_vec(&bootstrap()).unwrap();
+    std::fs::write(&path, &valid).unwrap();
+    let read = platform::read_selected_bootstrap(&path).unwrap();
+    assert_eq!(read, valid);
+    serde_json::from_slice::<Bootstrap>(&read)
+        .unwrap()
+        .validate()
+        .unwrap();
+    for invalid in [
+        json!({"schema":1,"observatory_url":"http://untrusted.example"}),
+        {
+            let mut v = serde_json::to_value(bootstrap()).unwrap();
+            v["extra_authority"] = json!(true);
+            v
+        },
+    ] {
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let bytes = platform::read_selected_bootstrap(&path).unwrap();
+        assert!(
+            serde_json::from_slice::<Bootstrap>(&bytes)
+                .and_then(|v| v.validate().map(|_| v).map_err(serde::de::Error::custom))
+                .is_err()
+        );
+    }
+    std::fs::write(&path, vec![b' '; 131073]).unwrap();
+    assert!(platform::read_selected_bootstrap(&path).is_err());
+    assert!(platform::read_selected_bootstrap(&root).is_err());
+    #[cfg(unix)]
+    {
+        std::fs::write(&path, &valid).unwrap();
+        let alias = root.join("alias.json");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(platform::read_selected_bootstrap(&alias).is_err());
+        let folder_alias = root.join("folder-link");
+        std::os::unix::fs::symlink(&root, &folder_alias).unwrap();
+        assert!(
+            platform::read_selected_bootstrap(&folder_alias.join("observatory-pairing.json"))
+                .is_err()
+        );
+    }
+}
 #[tokio::test]
 async fn local_capability_host_origin_and_private_response_boundaries() {
     let temp = tempfile::tempdir().unwrap();

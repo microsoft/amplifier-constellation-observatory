@@ -15,6 +15,11 @@ node tests/delayed-view-browser.mjs
 node tests/management-browser.mjs
 node tests/intake-browser.mjs
 node tests/markdown.mjs
+node tests/agent-setup-ui.mjs
+node --test tests/agent-instance-start.test.mjs tests/slack-setup.test.mjs
+node tests/agent-setup-browser.mjs
+node tests/slack-setup-browser.mjs
+node tests/consumer-onboarding-browser.mjs
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
@@ -28,6 +33,13 @@ The [Actions page](https://github.com/microsoft/amplifier-constellation-observat
 against the published source. Earlier private deployment reports and their
 transcripts are excluded. A passing fixture verifies its tested boundary, not
 general agent quality, human approval, or live tenant compatibility.
+
+The [local Slack setup](local-slack-setup.md) guide distinguishes the combined
+browser fixture from actual native installation and authorized external-account
+qualification. The combined fixture verifies the served UI bytes against its
+checkout and gives the app an OS-only PATH. Its completed agent installation and
+Instance/Slack responses are explicitly synthetic; its actual desktop account,
+browser controls, intent recovery and saved view are not a live Slack connection.
 
 The input-continuity suite uses real asynchronous ACP subprocesses and disposable
 HTTPS services. It checks ordered/repeated intake, stable request IDs, final-turn

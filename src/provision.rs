@@ -264,6 +264,8 @@ async fn execute_inner(state: &AppState, id: &str, plan: &Value) -> ApiResult<i3
             "Host settings changed before installation; create a new plan",
         ));
     }
+    crate::local_install::validate_dispatch(state, &host, plan)
+        .map_err(|e| ApiError::bad(e.to_string()))?;
     let mut job = state.read("jobs", id)?;
     job["status"] = json!("running");
     state.save("jobs", job, None)?;
@@ -536,24 +538,41 @@ time.sleep(60 if sys.argv[2]=='timeout' else 0.1)
         }
     }
     #[cfg(unix)]
-    #[test]
-    fn remote_timeout_and_connection_loss_stop_descendants() {
-        for disconnect in [false, true] {
-            let folder = tempfile::tempdir().unwrap();
-            let marker = folder.path().join("completed");
-            let work = format!(
-                "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',{}]);time.sleep(10)",
-                serde_json::to_string(&format!(
-                    "import time,pathlib;time.sleep(.7);pathlib.Path({}).write_text('unexpected')",
-                    serde_json::to_string(marker.to_str().unwrap()).unwrap()
-                ))
-                .unwrap()
-            );
-            // A second signal after the parent is reaped can target a vanished
-            // or reused process group (EPERM on macOS). Only successful cleanup
-            // is memoized; a genuine first-attempt failure must still surface.
-            let remote = format!(
-                r#"import os
+    fn remote_cleanup_marker(disconnect: bool, escaped_control: bool) -> bool {
+        let folder = tempfile::tempdir().unwrap();
+        let marker = folder.path().join("completed");
+        let ready = folder.path().join("ready");
+        let release = folder.path().join("release");
+        let descendant = format!(
+            r#"import pathlib,time
+ready=pathlib.Path({ready})
+release=pathlib.Path({release})
+marker=pathlib.Path({marker})
+pending=ready.with_suffix('.pending')
+with pending.open('x') as out:out.write('ready')
+pending.replace(ready)
+deadline=time.monotonic()+10
+while not release.exists():
+ if time.monotonic()>=deadline:raise TimeoutError('fixture release absent')
+ time.sleep(.005)
+pending=marker.with_suffix('.pending')
+with pending.open('x') as out:out.write('survived')
+pending.replace(marker)
+"#,
+            ready = serde_json::to_string(ready.to_str().unwrap()).unwrap(),
+            release = serde_json::to_string(release.to_str().unwrap()).unwrap(),
+            marker = serde_json::to_string(marker.to_str().unwrap()).unwrap(),
+        );
+        let work = format!(
+            "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',{}],start_new_session={},stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);time.sleep(10)",
+            serde_json::to_string(&descendant).unwrap(),
+            if escaped_control { "True" } else { "False" },
+        );
+        // Fixture interpreter readiness precedes REMOTE's unchanged .15-second
+        // deadline. The descendant cannot publish before REMOTE has returned.
+        // A second cleanup after reaping still fails the original guard.
+        let remote = format!(
+            r#"import os,pathlib,signal,subprocess,time
 original_killpg=os.killpg
 cleanup_calls=0
 def once(group, sig):
@@ -562,40 +581,85 @@ def once(group, sig):
  if cleanup_calls>1:raise PermissionError('cleanup repeated after settlement')
  return original_killpg(group,sig)
 os.killpg=once
-{REMOTE}"#
-            );
-            let mut process = std::process::Command::new("python3")
-                .args(["-c", &remote])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let mut input = process.stdin.take().unwrap();
-            writeln!(
-                input,
-                "{}",
-                json!({"argv":["python3","-c",work],"timeout_seconds":0.15})
-            )
+original_popen=subprocess.Popen
+def prepared(*args,**kwargs):
+ p=original_popen(*args,**kwargs)
+ ready=pathlib.Path({ready})
+ deadline=time.monotonic()+30
+ while not ready.exists():
+  if p.poll() is not None:raise AssertionError('fixture parent exited before readiness')
+  if time.monotonic()>=deadline:
+   original_killpg(p.pid,signal.SIGKILL);p.wait(timeout=3)
+   raise TimeoutError('fixture descendant readiness absent')
+  time.sleep(.005)
+ if ready.read_text()!='ready':raise AssertionError('incomplete fixture readiness')
+ return p
+subprocess.Popen=prepared
+{REMOTE}"#,
+            ready = serde_json::to_string(ready.to_str().unwrap()).unwrap()
+        );
+        let mut process = std::process::Command::new("python3")
+            .args(["-c", &remote])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .unwrap();
-            if disconnect {
-                drop(input);
-            } else {
-                std::thread::sleep(Duration::from_millis(400));
-                drop(input);
-            }
-            let output = process.wait_with_output().unwrap();
+        let mut input = process.stdin.take().unwrap();
+        writeln!(
+            input,
+            "{}",
+            json!({"argv":["python3","-c",work],"timeout_seconds":0.15})
+        )
+        .unwrap();
+        // Keep the transport open for the timeout case; EOF is a separate case,
+        // not an overloaded-host substitute for the actual timeout branch.
+        let input = if disconnect {
+            drop(input);
+            None
+        } else {
+            Some(input)
+        };
+        let output = process.wait_with_output().unwrap();
+        drop(input);
+        assert_eq!(
+            output.status.code(),
+            Some(if disconnect { 125 } else { 124 }),
+            "Remote fixture exited {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(ready).unwrap(), "ready");
+        assert!(
+            !marker.exists(),
+            "Fixture published before its explicit release"
+        );
+        std::fs::write(release, b"release").unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        if marker.exists() {
+            assert_eq!(std::fs::read_to_string(marker).unwrap(), "survived");
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_timeout_and_connection_loss_stop_descendants() {
+        for disconnect in [false, true] {
             assert!(
-                [Some(124), Some(125)].contains(&output.status.code()),
-                "Remote fixture exited {:?}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            );
-            std::thread::sleep(Duration::from_millis(800));
-            assert!(
-                !marker.exists(),
+                !remote_cleanup_marker(disconnect, false),
                 "Remote descendant survived installer termination"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_marker_detects_a_finite_survivor_after_settlement() {
+        // Deliberately outside the owned group: this finite negative control
+        // demonstrates the marker can detect survival only after settlement.
+        assert!(remote_cleanup_marker(false, true));
     }
 }

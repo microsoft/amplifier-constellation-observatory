@@ -131,7 +131,7 @@ fn complete(value: &Value) -> bool {
 
 pub fn package(executable: &Path) -> Result<Value> {
     ordinary(executable)?;
-    let root = executable.parent().context("Missing application folder")?;
+    let root = crate::package_layout::resource_root(executable)?;
     let path = root.join("observatory-package.json");
     ordinary(&path)?;
     ensure!(
@@ -165,6 +165,7 @@ pub fn package(executable: &Path) -> Result<Value> {
             "Bundled computer setup inventory changed"
         );
     }
+    crate::slack_support::validate_package(&root, &manifest)?;
     Ok(manifest)
 }
 
@@ -179,9 +180,7 @@ pub fn retain(state: &AppState) -> Result<()> {
         sha(&std::fs::read(&destination)?) == sha(&std::fs::read(&current)?),
         "Existing Observatory executable was preserved"
     );
-    let manifest = if current
-        .parent()
-        .unwrap()
+    let manifest = if crate::package_layout::resource_root(&current)?
         .join("observatory-package.json")
         .exists()
     {
@@ -193,6 +192,9 @@ pub fn retain(state: &AppState) -> Result<()> {
         Some(manifest) => crate::helper_support::retain(&state.home, &current, manifest)?,
         None => crate::helper_support::installed(&state.home)?,
     };
+    if let Some(manifest) = manifest.as_ref() {
+        crate::slack_support::retain(&state.home, &current, manifest)?;
+    }
     let host = state
         .list("hosts")?
         .into_iter()
@@ -447,17 +449,34 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
         && installed["recipe"].is_object()
         && package["instance_manifest_sha256"] != installed["instance_manifest_sha256"];
     if replace_support {
-        let root = executable.parent().unwrap().join("support/instance");
-        crate::local_install::copy_bundle(&root, &folder.join("candidate-instance"))?;
+        let root = crate::package_layout::resource_root(executable)?.join("support/instance");
         let old_manifest = home.join("support/instance/consumer-bundle.json");
         ensure!(
             installed["instance_manifest_sha256"] == sha(&std::fs::read(&old_manifest)?),
             "Installed agent setup was changed; it was preserved"
         );
         crate::local_install::inventory(&home.join("support/instance"))?;
+        let next_recipe = crate::local_install::verified_recipe(&root, home)?;
+        if installed["recipe"].get("private_cohort").is_some()
+            || next_recipe.get("private_cohort").is_some()
+        {
+            ensure!(
+                crate::local_install::fixed_recipe_matches(
+                    home,
+                    &read(&old_manifest)?,
+                    &installed["recipe"],
+                )?,
+                "The saved agent setup recipe is customized; its settings were preserved"
+            );
+            // Only the owned future-install recipe changes. Existing agents'
+            // selected engines, sessions and settings are independent.
+            candidate["recipe"] = next_recipe;
+        } else {
+            // Preserve the established public-to-public recipe behavior.
+            candidate["recipe"]["version"] = next_recipe["version"].clone();
+        }
+        crate::local_install::copy_bundle(&root, &folder.join("candidate-instance"))?;
         candidate["instance_manifest_sha256"] = package["instance_manifest_sha256"].clone();
-        candidate["recipe"]["version"] =
-            read(&root.join("consumer-bundle.json"))?["version"].clone();
     }
     let replace_helpers = package["helpers_manifest_sha256"].is_string()
         && package["helpers_manifest_sha256"] != installed["helpers_manifest_sha256"];
@@ -467,7 +486,8 @@ pub fn stage(home: &Path, executable: &Path) -> Result<Value> {
                 == installed["helpers_manifest_sha256"],
             "Installed computer setup changed; it was preserved"
         );
-        let root = executable.parent().unwrap().join("support/machine-helpers");
+        let root =
+            crate::package_layout::resource_root(executable)?.join("support/machine-helpers");
         candidate["helpers_manifest_sha256"] = json!(crate::helper_support::copy(
             &root,
             &folder.join("candidate-helpers")

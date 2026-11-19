@@ -21,6 +21,22 @@ const INSTANCE: platform::Application = platform::Application {
 use crate::instance_package::ordinary;
 pub(crate) use crate::instance_package::{copy_bundle, inventory};
 
+// The fresh setup owns this parent before either Instance or Slack retention.
+// A nested private_dir call protects its leaf, not implicitly created parents.
+// Existing entries must already be private; never adopt or repair their policy.
+fn prepare_support_parent(home: &Path) -> Result<PathBuf> {
+    platform::validate_private_directory(home)?;
+    let support = home.join("support");
+    match std::fs::symlink_metadata(&support) {
+        Ok(_) => platform::validate_private_directory(&support)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            platform::private_create_dir(&support)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(support)
+}
+
 /// Called only during explicit new desktop setup. Existing registries are never
 /// rewritten by opening an application or replacing a downloaded executable.
 pub fn prepare(
@@ -33,22 +49,159 @@ pub fn prepare(
     let id = uuid::Uuid::new_v4().to_string();
     let mut recipes = Vec::new();
     if let Some(source) = bundle {
-        let destination = state.home.join("support/instance");
+        // A private derivative is authorized by compiled cohort data, not by a
+        // browser path or a self-asserted package manifest. Refuse before copy.
+        crate::signing_cohort::runtime(source)?;
+        let destination = prepare_support_parent(&state.home)?.join("instance");
         let manifest = copy_bundle(source, &destination)?;
-        let binary = final_home
-            .join("support/instance")
-            .join(manifest["binary"].as_str().unwrap());
-        recipes.push(json!({"id":"bundled-instance","version":manifest["version"].as_str().unwrap_or("packaged"),"argv":[binary,"setup","install","--home","{home}","--name","{name}","--bind","127.0.0.1","--port","0","--no-browser"],"timeout_seconds":300}));
+        let runtime = crate::signing_cohort::runtime(&destination)?;
+        recipes.push(recipe(final_home, &manifest, runtime.as_ref()));
     }
     state.save("hosts", json!({"id":id,"label":platform::hostname(),"transport":"local","native_local":true,"install_roots":[agent_root],"recipes":recipes}), Some(0))?;
     Ok(())
 }
 
+pub(crate) fn verified_recipe(bundle_root: &Path, final_home: &Path) -> Result<Value> {
+    let (manifest, _) = inventory(bundle_root)?;
+    let runtime = crate::signing_cohort::runtime(bundle_root)?;
+    Ok(recipe(final_home, &manifest, runtime.as_ref()))
+}
+
+/// Recognize only the exact earlier owned recipe shape, without authorizing an
+/// old derivative under this executable's new cohort lock. The caller retains
+/// its existing installed-manifest and registry revision checks.
+pub(crate) fn fixed_recipe_matches(home: &Path, manifest: &Value, saved: &Value) -> Result<bool> {
+    let root = home.join("support/instance");
+    let (actual, manifest_sha) = crate::signing_cohort::manifest(&root)?;
+    ensure!(actual == *manifest, "The retained agent inventory changed");
+    ensure!(
+        manifest["binary"].as_str().is_some(),
+        "Missing retained installer identity"
+    );
+    let runtime = if let Some(marker) = manifest.get("private_derivative") {
+        let cohort = marker["cohort_id"]
+            .as_str()
+            .context("Missing previous signed cohort")?;
+        ensure!(
+            uuid::Uuid::parse_str(cohort)?.to_string() == cohort
+                && marker == &json!({"schema":1,"kind":"signed_macos_instance","cohort_id":cohort})
+                && manifest["native_runtime"]["kind"] == "private_derivative"
+                && manifest["native_runtime"]["binary"] == "engine/native/agent-runtime"
+                && manifest["native_runtime"]["binary_sha256"]
+                    == manifest["files"]["engine/native/agent-runtime"],
+            "Previous signed package identity differs"
+        );
+        Some(crate::signing_cohort::RuntimeBinding {
+            path: root.join("engine/native/agent-runtime"),
+            cohort_id: cohort.into(),
+            manifest_sha256: manifest_sha,
+        })
+    } else {
+        ensure!(
+            manifest["native_runtime"]["kind"] != "private_derivative",
+            "Previous signed marker is missing"
+        );
+        None
+    };
+    Ok(saved == &recipe(home, manifest, runtime.as_ref()))
+}
+
+fn recipe(
+    home: &Path,
+    manifest: &Value,
+    runtime: Option<&crate::signing_cohort::RuntimeBinding>,
+) -> Value {
+    let support = home.join("support/instance");
+    let binary = support.join(manifest["binary"].as_str().unwrap());
+    let mut value = json!({"id":"bundled-instance","version":manifest["version"].as_str().unwrap_or("packaged"),"argv":[binary,"setup","install","--home","{home}","--name","{name}","--bind","127.0.0.1","--port","0","--no-browser"],"timeout_seconds":300});
+    if let Some(runtime) = runtime {
+        value["argv"].as_array_mut().unwrap().extend([
+            json!("--runtime-binary"),
+            json!(support.join("engine/native/agent-runtime")),
+        ]);
+        value["private_cohort"] =
+            json!({"id":runtime.cohort_id,"manifest_sha256":runtime.manifest_sha256});
+    }
+    value
+}
+
+/// Called immediately before a fresh owned installer is dispatched. A private
+/// signed package must still match the compiled lock, all retained member bytes
+/// and the exact saved fixed recipe. Existing public recipes remain unchanged.
+pub(crate) fn validate_dispatch(state: &AppState, host: &Value, plan: &Value) -> Result<()> {
+    if host["native_local"] != true || plan["recipe_id"] != "bundled-instance" {
+        return Ok(());
+    }
+    let root = state.home.join("support/instance");
+    let runtime = crate::signing_cohort::runtime(&root)?;
+    let saved = host["recipes"]
+        .as_array()
+        .context("Missing local recipe")?
+        .iter()
+        .find(|r| r["id"] == "bundled-instance")
+        .context("Missing local recipe")?;
+    let Some(runtime) = runtime else {
+        ensure!(
+            saved.get("private_cohort").is_none()
+                && !plan["argv"]
+                    .as_array()
+                    .context("Missing installer arguments")?
+                    .iter()
+                    .any(|v| v == "--runtime-binary"),
+            "Private package binding is missing"
+        );
+        return Ok(());
+    };
+    let (manifest, manifest_sha) = crate::signing_cohort::manifest(&root)?;
+    ensure!(
+        manifest_sha == runtime.manifest_sha256,
+        "The signed inventory changed before dispatch"
+    );
+    let expected = recipe(&state.home, &manifest, Some(&runtime));
+    ensure!(
+        saved == &expected
+            && host["transport"] == "local"
+            && plan["transport"] == "local"
+            && host["id"] == plan["host_id"]
+            && plan["version"] == expected["version"]
+            && plan["timeout_seconds"] == 300
+            && plan["cwd"].is_null(),
+        "The signed installer recipe changed"
+    );
+    let mut argv = Vec::new();
+    for value in expected["argv"].as_array().unwrap() {
+        argv.push(
+            value
+                .as_str()
+                .unwrap()
+                .replace(
+                    "{name}",
+                    plan["name"].as_str().context("Missing installation name")?,
+                )
+                .replace(
+                    "{home}",
+                    plan["home"].as_str().context("Missing installation home")?,
+                )
+                .replace(
+                    "{port}",
+                    &plan["port"]
+                        .as_u64()
+                        .context("Missing installation port")?
+                        .to_string(),
+                )
+                .replace("{version}", expected["version"].as_str().unwrap()),
+        );
+    }
+    ensure!(
+        plan["argv"] == json!(argv),
+        "The signed installer arguments changed"
+    );
+    Ok(())
+}
+
 pub fn bundled_path() -> Result<Option<PathBuf>> {
-    let root = std::env::current_exe()?
-        .parent()
-        .context("Missing application folder")?
-        .join("support/instance");
+    let root =
+        crate::package_layout::resource_root(&std::env::current_exe()?)?.join("support/instance");
     Ok(root.exists().then_some(root))
 }
 
@@ -196,6 +349,29 @@ pub async fn attach(state: &AppState, job: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture_target() -> String {
+        format!(
+            "{}-{}",
+            if cfg!(target_arch = "aarch64") {
+                "aarch64"
+            } else {
+                "x86_64"
+            },
+            if cfg!(windows) {
+                "pc-windows-msvc"
+            } else if cfg!(target_os = "macos") {
+                "apple-darwin"
+            } else {
+                "unknown-linux-gnu"
+            }
+        )
+    }
+    fn signed_target_selected() -> bool {
+        let lock: Value =
+            serde_json::from_str(include_str!("../scripts/signed-instance-cohort-lock.json"))
+                .unwrap();
+        lock["targets"].get(fixture_target()).is_some()
+    }
     fn fixture_bundle(root: &Path) -> String {
         std::fs::create_dir_all(root).unwrap();
         let binary = if cfg!(windows) {
@@ -205,13 +381,110 @@ mod tests {
         };
         let bytes = b"inert fixture, never executed";
         std::fs::write(root.join(binary), bytes).unwrap();
-        std::fs::write(root.join("consumer-bundle.json"), json!({"schema":1,"kind":"instance-consumer-bundle","version":"fixture","binary":binary,"target":format!("{}-{}",if cfg!(target_arch="aarch64"){"aarch64"}else{"x86_64"},if cfg!(windows){"pc-windows-msvc"}else if cfg!(target_os="macos"){"apple-darwin"}else{"unknown-linux-gnu"}),"native_runtime":{},"files":{binary:format!("{:x}",Sha256::digest(bytes))}}).to_string()).unwrap();
+        std::fs::write(root.join("consumer-bundle.json"), json!({"schema":1,"kind":"instance-consumer-bundle","version":"fixture","binary":binary,"target":fixture_target(),"native_runtime":{},"files":{binary:format!("{:x}",Sha256::digest(bytes))}}).to_string()).unwrap();
         binary.into()
     }
     fn state(root: &Path) -> std::sync::Arc<AppState> {
         let c: config::Config = serde_json::from_value(json!({"id":uuid::Uuid::new_v4(),"owner":"fixture","bind":"127.0.0.1","port":0,"public_url":"","pam_service":"unused","tls_cert":"","tls_key":"","tls_ca":null})).unwrap();
         c.save(root).unwrap();
         AppState::open(root.into()).unwrap()
+    }
+    #[test]
+    fn fresh_support_parent_is_private_and_existing_private_parent_is_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        platform::private_create_dir(&home).unwrap();
+        let support = prepare_support_parent(&home).unwrap();
+        platform::validate_private_directory(&support).unwrap();
+        assert_eq!(support, home.join("support"));
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
+        let note = support.join("retained-owner-note");
+        platform::private_create(&note, b"preserve existing private parent").unwrap();
+        let before = std::fs::symlink_metadata(&support).unwrap();
+        assert_eq!(prepare_support_parent(&home).unwrap(), support);
+        let after = std::fs::symlink_metadata(&support).unwrap();
+        assert_eq!(before.created().ok(), after.created().ok());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(
+            before.permissions().readonly(),
+            after.permissions().readonly()
+        );
+        platform::validate_private_directory(&support).unwrap();
+        assert_eq!(
+            std::fs::read(&note).unwrap(),
+            b"preserve existing private parent"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                (before.dev(), before.ino(), before.uid(), before.mode()),
+                (after.dev(), after.ino(), after.uid(), after.mode())
+            );
+        }
+    }
+    #[test]
+    fn existing_support_file_is_refused_without_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        platform::private_create_dir(&home).unwrap();
+        let support = home.join("support");
+        platform::private_create(&support, b"preserve conflicting file").unwrap();
+        let before = std::fs::symlink_metadata(&support).unwrap();
+        assert!(prepare_support_parent(&home).is_err());
+        let after = std::fs::symlink_metadata(&support).unwrap();
+        assert!(after.is_file());
+        assert_eq!(before.created().ok(), after.created().ok());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(
+            std::fs::read(support).unwrap(),
+            b"preserve conflicting file"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn public_support_and_foreign_link_refuse_without_policy_or_identity_repair() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        platform::private_create_dir(&home).unwrap();
+        let support = home.join("support");
+        std::fs::create_dir(&support).unwrap();
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = std::fs::symlink_metadata(&support).unwrap();
+        assert!(prepare_support_parent(&home).is_err());
+        let after = std::fs::symlink_metadata(&support).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino(), before.uid(), before.mode()),
+            (after.dev(), after.ino(), after.uid(), after.mode())
+        );
+        assert_eq!(std::fs::read_dir(&support).unwrap().count(), 0);
+        // Test-owned fixture cleanup only; no production removal or repair.
+        std::fs::remove_dir(&support).unwrap();
+        let other = temp.path().join("outside-owned-home");
+        platform::private_create_dir(&other).unwrap();
+        platform::private_create(&other.join("keep"), b"unchanged").unwrap();
+        symlink(&other, &support).unwrap();
+        let before = std::fs::symlink_metadata(&support).unwrap();
+        let target_before = std::fs::symlink_metadata(&other).unwrap();
+        assert!(prepare_support_parent(&home).is_err());
+        let after = std::fs::symlink_metadata(&support).unwrap();
+        let target_after = std::fs::symlink_metadata(&other).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino(), before.mode()),
+            (after.dev(), after.ino(), after.mode())
+        );
+        assert_eq!(
+            (
+                target_before.dev(),
+                target_before.ino(),
+                target_before.mode()
+            ),
+            (target_after.dev(), target_after.ino(), target_after.mode())
+        );
+        assert_eq!(std::fs::read_link(&support).unwrap(), other);
+        assert_eq!(std::fs::read(other.join("keep")).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read_dir(&other).unwrap().count(), 1);
     }
     #[test]
     fn copy_preserves_exact_inventory_bytes_used_by_package_identity() {
@@ -235,6 +508,9 @@ mod tests {
         let source = temp.path().join("download");
         let binary = fixture_bundle(&source);
         std::fs::write(source.join(binary), b"changed bytes").unwrap();
+        // On selected Mac targets the marker refusal is earlier than copying;
+        // also prove the changed-byte inventory failure independently.
+        assert!(inventory(&source).is_err());
         let state = state(&temp.path().join("observatory"));
         assert!(
             prepare(
@@ -249,27 +525,198 @@ mod tests {
         assert!(!state.home.join("support/instance").exists());
     }
     #[test]
-    fn copied_package_survives_download_removal_and_uses_final_home() {
+    fn copied_inventory_survives_download_removal_and_recipe_uses_final_home() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("download");
         fixture_bundle(&source);
-        let state = state(&temp.path().join("staging"));
+        let staging = temp.path().join("staging");
         let final_home = temp.path().join("installed");
-        prepare(
+        // Inventory retention and fixed recipe construction are independent of
+        // compiled signed-cohort admission, which is tested separately below.
+        let retained = staging.join("support/instance");
+        let manifest = copy_bundle(&source, &retained).unwrap();
+        let saved_recipe = recipe(&final_home, &manifest, None);
+        std::fs::remove_dir_all(source).unwrap();
+        assert_eq!(inventory(&retained).unwrap().0, manifest);
+        let executable = PathBuf::from(saved_recipe["argv"][0].as_str().unwrap());
+        assert!(executable.starts_with(&final_home));
+        assert!(!executable.starts_with(&staging));
+    }
+    #[test]
+    fn fresh_public_prepare_follows_compiled_target_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("download");
+        fixture_bundle(&source);
+        let before = std::fs::read(source.join("consumer-bundle.json")).unwrap();
+        let state = state(&temp.path().join("observatory"));
+        let result = prepare(
             &state,
-            &final_home,
+            &state.home,
             Some(&source),
             &temp.path().join("agents"),
-        )
-        .unwrap();
-        std::fs::remove_dir_all(source).unwrap();
-        inventory(&state.home.join("support/instance")).unwrap();
-        let hosts = state.list("hosts").unwrap();
-        assert_eq!(hosts.len(), 1);
-        let executable = PathBuf::from(hosts[0]["recipes"][0]["argv"][0].as_str().unwrap());
-        assert!(executable.starts_with(&final_home));
-        assert!(!executable.starts_with(&state.home));
-        assert_eq!(hosts[0]["native_local"], true);
+        );
+        if signed_target_selected() {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "The expected signed package is missing or changed"
+            );
+            assert!(state.list("hosts").unwrap().is_empty());
+            assert!(!state.home.join("support").exists());
+            assert!(!state.home.join("support/instance").exists());
+        } else {
+            result.unwrap();
+            platform::validate_private_directory(&state.home.join("support")).unwrap();
+            let hosts = state.list("hosts").unwrap();
+            assert_eq!(hosts.len(), 1);
+            assert_eq!(hosts[0]["native_local"], true);
+            let (manifest, _) = inventory(&state.home.join("support/instance")).unwrap();
+            assert_eq!(hosts[0]["recipes"][0], recipe(&state.home, &manifest, None));
+        }
+        assert_eq!(
+            std::fs::read(source.join("consumer-bundle.json")).unwrap(),
+            before
+        );
+    }
+    #[test]
+    fn retained_public_recipe_is_recognized_but_dispatch_obeys_current_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = state(&temp.path().join("observatory"));
+        let retained = state.home.join("support/instance");
+        let binary = fixture_bundle(&retained);
+        let before = std::fs::read(retained.join("consumer-bundle.json")).unwrap();
+        let manifest: Value = serde_json::from_slice(&before).unwrap();
+        let expected = json!({"id":"bundled-instance","version":"fixture","argv":[state.home.join("support/instance").join(binary),"setup","install","--home","{home}","--name","{name}","--bind","127.0.0.1","--port","0","--no-browser"],"timeout_seconds":300});
+        assert_eq!(recipe(&state.home, &manifest, None), expected);
+        assert!(fixed_recipe_matches(&state.home, &manifest, &expected).unwrap());
+        // A retained historical recipe is not a fresh setup under today's lock.
+        let host = state.save("hosts", json!({"id":uuid::Uuid::new_v4(),"label":"Retained fixture","transport":"local","native_local":true,"install_roots":[temp.path().join("agents")],"recipes":[expected.clone()]}), Some(0)).unwrap();
+        let plan = crate::provision::plan(&state, &json!({"host_id":host["id"],"recipe_id":"bundled-instance","request_id":uuid::Uuid::new_v4(),"name":"Fresh agent"})).unwrap();
+        if signed_target_selected() {
+            assert_eq!(
+                verified_recipe(&retained, &state.home)
+                    .unwrap_err()
+                    .to_string(),
+                "The expected signed package is missing or changed"
+            );
+            assert_eq!(
+                validate_dispatch(&state, &host, &plan)
+                    .unwrap_err()
+                    .to_string(),
+                "The expected signed package is missing or changed"
+            );
+        } else {
+            assert_eq!(verified_recipe(&retained, &state.home).unwrap(), expected);
+            validate_dispatch(&state, &host, &plan).unwrap();
+        }
+        assert_eq!(
+            state.read("hosts", host["id"].as_str().unwrap()).unwrap(),
+            host
+        );
+        assert_eq!(
+            std::fs::read(retained.join("consumer-bundle.json")).unwrap(),
+            before
+        );
+        let mut changed = plan.clone();
+        changed["argv"]
+            .as_array_mut()
+            .unwrap()
+            .extend([json!("--runtime-binary"), json!("/unreviewed")]);
+        assert!(validate_dispatch(&state, &host, &changed).is_err());
+        let mut marked = host;
+        marked["recipes"][0]["private_cohort"] = json!({"id":"removed lock"});
+        assert!(validate_dispatch(&state, &marked, &plan).is_err());
+    }
+    #[test]
+    fn private_recipe_uses_only_final_retained_runtime_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let final_home = temp.path().join("final");
+        let manifest = json!({"binary":"agent-instance","version":"fixture"});
+        let bound = crate::signing_cohort::RuntimeBinding {
+            path: temp.path().join("source/engine/native/agent-runtime"),
+            cohort_id: uuid::Uuid::new_v4().to_string(),
+            manifest_sha256: "a".repeat(64),
+        };
+        let value = recipe(&final_home, &manifest, Some(&bound));
+        let argv = value["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 2], "--runtime-binary");
+        assert_eq!(
+            Path::new(argv.last().unwrap().as_str().unwrap()),
+            final_home
+                .join("support")
+                .join("instance")
+                .join("engine")
+                .join("native")
+                .join("agent-runtime")
+        );
+        assert_eq!(
+            value["private_cohort"],
+            json!({"id":bound.cohort_id,"manifest_sha256":bound.manifest_sha256})
+        );
+        assert!(!value.to_string().contains("source/engine"));
+    }
+    #[test]
+    fn old_fixed_recipe_shape_is_not_new_cohort_authority_or_custom_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let root = home.join("support/instance");
+        fixture_bundle(&root);
+        let file = root.join("consumer-bundle.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let public = recipe(home, &manifest, None);
+        assert!(fixed_recipe_matches(home, &manifest, &public).unwrap());
+        let mut custom = public;
+        custom["argv"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("--no-service"));
+        assert!(!fixed_recipe_matches(home, &manifest, &custom).unwrap());
+        let id = uuid::Uuid::new_v4().to_string();
+        manifest["private_derivative"] =
+            json!({"schema":1,"kind":"signed_macos_instance","cohort_id":id});
+        manifest["native_runtime"] = json!({"kind":"private_derivative","binary":"engine/native/agent-runtime","binary_sha256":"a".repeat(64)});
+        manifest["files"]["engine/native/agent-runtime"] = json!("a".repeat(64));
+        let raw = serde_json::to_vec(&manifest).unwrap();
+        std::fs::write(file, &raw).unwrap();
+        let binding = crate::signing_cohort::RuntimeBinding {
+            path: root.join("engine/native/agent-runtime"),
+            cohort_id: id,
+            manifest_sha256: format!("{:x}", Sha256::digest(&raw)),
+        };
+        let old = recipe(home, &manifest, Some(&binding));
+        assert!(fixed_recipe_matches(home, &manifest, &old).unwrap());
+        // Old shape recognition cannot authorize setup under the current lock.
+        assert!(crate::signing_cohort::runtime(&root).is_err());
+        let mut wrong = old;
+        wrong["private_cohort"]["manifest_sha256"] = json!("b".repeat(64));
+        assert!(!fixed_recipe_matches(home, &manifest, &wrong).unwrap());
+    }
+    #[test]
+    fn unreviewed_derivative_refuses_before_copy_or_host_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("download");
+        fixture_bundle(&source);
+        let file = source.join("consumer-bundle.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        manifest["private_derivative"] =
+            json!({"schema":1,"kind":"signed_macos_instance","cohort_id":uuid::Uuid::new_v4()});
+        std::fs::write(&file, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let state = state(&temp.path().join("observatory"));
+        assert!(
+            prepare(
+                &state,
+                &state.home,
+                Some(&source),
+                &temp.path().join("agents")
+            )
+            .is_err()
+        );
+        assert!(!state.home.join("support/instance").exists());
+        assert!(!state.home.join("support").exists());
+        assert!(state.list("hosts").unwrap().is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap(),
+            manifest
+        );
     }
     #[test]
     fn limited_download_shows_local_computer_without_inventing_installer() {

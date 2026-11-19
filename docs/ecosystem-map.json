@@ -3,15 +3,21 @@
   "citations": [
     {
       "path": "README.md",
-      "ref": "56dfdbe715aab2b0340fb91437103ed884156b9f",
-      "sha256": "cb06daf8f74ada6c53e7cc49f779cac327c57d43e4a06832a8ec94b5d03c1edc",
-      "url": "https://github.com/microsoft/amplifier-constellation-observatory/blob/56dfdbe715aab2b0340fb91437103ed884156b9f/README.md"
+      "ref": "9527d9a9f6d864f0921ef05eaf92acbbe179286d",
+      "sha256": "94b746b017f6da26a99f6098c528016ac1dd73df1019e8f438a9da8c76dab418",
+      "url": "https://github.com/microsoft/amplifier-constellation-observatory/blob/9527d9a9f6d864f0921ef05eaf92acbbe179286d/README.md"
     },
     {
       "path": "docs/contracts.md",
-      "ref": "56dfdbe715aab2b0340fb91437103ed884156b9f",
-      "sha256": "0086da61c450009bee0564a9e62a54545f41d70f9b31c23b81ba4c6f35f9fb37",
-      "url": "https://github.com/microsoft/amplifier-constellation-observatory/blob/56dfdbe715aab2b0340fb91437103ed884156b9f/docs/contracts.md"
+      "ref": "9527d9a9f6d864f0921ef05eaf92acbbe179286d",
+      "sha256": "337dc23d31f7c8504249fa039b977f63e7336a5f02ecb181b2941d413ce4da28",
+      "url": "https://github.com/microsoft/amplifier-constellation-observatory/blob/9527d9a9f6d864f0921ef05eaf92acbbe179286d/docs/contracts.md"
+    },
+    {
+      "path": "docs/local-slack-setup.md",
+      "ref": "9527d9a9f6d864f0921ef05eaf92acbbe179286d",
+      "sha256": "d0bfbbb69bef161ee4fe0e4c8cdaac31ff32244b9931e4f8b9b7f857d77d03ad",
+      "url": "https://github.com/microsoft/amplifier-constellation-observatory/blob/9527d9a9f6d864f0921ef05eaf92acbbe179286d/docs/local-slack-setup.md"
     }
   ],
   "display_name": "Agent Observatory",
@@ -40,6 +46,11 @@
       "from": "providers",
       "relation": "uses",
       "to": "connectors"
+    },
+    {
+      "from": "self",
+      "relation": "contains",
+      "to": "local-setup"
     }
   ],
   "nodes": [
@@ -65,6 +76,11 @@
       "label": "Computer helper"
     },
     {
+      "id": "local-setup",
+      "kind": "internal",
+      "label": "Local agent and Slack setup"
+    },
+    {
       "id": "agents",
       "kind": "external",
       "label": "Managed or ACP-only agents"
@@ -78,11 +94,12 @@
   "notes": [
     "Computer helper is part of this product; it is optional for connecting an existing agent.",
     "Observatory is not a required fleet supervisor, identity service or agent owner.",
-    "Management access, ACP access, machine placement and conversation participation are distinct."
+    "Management access, ACP access, machine placement and conversation participation are distinct.",
+    "Windows and macOS onboarding uses bundled, independently owned agent and Slack installations. Authorization and credentials remain with those installations; no required provisioning service is introduced."
   ],
   "page_kind": "user-facing app",
   "purpose": "See your computers, create or connect agents, and manage their connections in one place.",
-  "ref": "56dfdbe715aab2b0340fb91437103ed884156b9f",
+  "ref": "9527d9a9f6d864f0921ef05eaf92acbbe179286d",
   "repository": "microsoft/amplifier-constellation-observatory",
   "roles": [
     "Experience"

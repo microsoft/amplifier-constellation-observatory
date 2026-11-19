@@ -101,6 +101,41 @@ pub fn operations(endpoint: &Value) -> Vec<Operation> {
                 "manage",
             ),
             op("apply-native-config", "PUT", "native-config", "manage"),
+            op("native-account", "GET", "native-account", "admin"),
+            op("native-login", "GET", "native-account/login", "admin"),
+            op(
+                "start-native-login",
+                "POST",
+                "native-account/login",
+                "admin",
+            ),
+            op(
+                "cancel-native-login",
+                "DELETE",
+                "native-account/login",
+                "admin",
+            ),
+            op("native-models", "POST", "native-account/models", "admin"),
+            op(
+                "native-credential",
+                "POST",
+                "native-config/credential",
+                "admin",
+            ),
+            op("backend-account", "GET", "backend/account", "admin"),
+            op("backend-login", "GET", "backend/account/login", "admin"),
+            op(
+                "start-backend-login",
+                "POST",
+                "backend/account/login",
+                "admin",
+            ),
+            op(
+                "cancel-backend-login",
+                "DELETE",
+                "backend/account/login",
+                "admin",
+            ),
         ]),
         "slack-adapter" => ops.extend([
             op("activity", "GET", "activity", "observe"),
@@ -272,7 +307,21 @@ async fn request(
     if let Some(v) = body {
         req = req.json(v);
     }
-    if method == "PUT" && path == "approval-policy" {
+    let setup_write = endpoint["management"]["provider"] == "agent-instance"
+        && method != "GET"
+        && matches!(
+            path,
+            "native-account/login"
+                | "native-account/models"
+                | "native-config/credential"
+                | "native-config"
+                | "native-config/validate"
+                | "backend/account/login"
+                | "config"
+                | "config/validate"
+                | "lifecycle"
+        );
+    if (method == "PUT" && path == "approval-policy") || setup_write {
         // Identity discovery above can await the network. Admit this dispatch
         // against the current registry only after that wait and request setup.
         // Registry edits serialize with admission, not with the network request.
@@ -283,7 +332,12 @@ async fn request(
         if current.as_ref() != Some(endpoint) {
             return Err(ApiError(
                 axum::http::StatusCode::CONFLICT,
-                "The saved connection changed before dispatch; no policy request was sent".into(),
+                if setup_write {
+                    "The saved connection changed before dispatch; no setup request was sent"
+                } else {
+                    "The saved connection changed before dispatch; no policy request was sent"
+                }
+                .into(),
             ));
         }
     }
@@ -450,6 +504,14 @@ pub fn available_operations(endpoint: &Value, descriptor: &Value) -> Vec<Operati
                                 .iter()
                                 .any(|c| c == "constellation.service-connections/1")
                         }))
+                && (!native_account_operation(&op.id)
+                    || descriptor["capabilities"]
+                        .as_array()
+                        .is_some_and(|capabilities| {
+                            capabilities
+                                .iter()
+                                .any(|c| c == "agent-instance.native-account/1")
+                        }))
                 && (["descriptor", "status"].contains(&op.id.as_str())
                     || advertised.iter().any(|a| {
                         a["path"] == op.path
@@ -481,6 +543,16 @@ fn optional_operation(id: &str) -> bool {
         "native-schema",
         "validate-native-config",
         "apply-native-config",
+        "native-account",
+        "native-login",
+        "start-native-login",
+        "cancel-native-login",
+        "native-models",
+        "native-credential",
+        "backend-account",
+        "backend-login",
+        "start-backend-login",
+        "cancel-backend-login",
         "service-connections",
         "service-connection-action",
     ]
@@ -488,6 +560,16 @@ fn optional_operation(id: &str) -> bool {
 }
 fn approval_operation(id: &str) -> bool {
     matches!(id, "approval-policy" | "apply-approval-policy")
+}
+fn native_account_operation(id: &str) -> bool {
+    matches!(
+        id,
+        "native-account"
+            | "native-login"
+            | "start-native-login"
+            | "cancel-native-login"
+            | "native-models"
+    )
 }
 fn service_operation(id: &str) -> bool {
     matches!(id, "service-connections" | "service-connection-action")
@@ -563,6 +645,69 @@ pub fn operation_request(
     selected: &Operation,
     body: Option<&Value>,
 ) -> ApiResult<(String, Option<Value>)> {
+    if native_account_operation(&selected.id)
+        || matches!(
+            selected.id.as_str(),
+            "native-credential"
+                | "backend-account"
+                | "backend-login"
+                | "start-backend-login"
+                | "cancel-backend-login"
+        )
+    {
+        let empty = json!({});
+        let value = body.filter(|v| !v.is_null()).unwrap_or(&empty);
+        let fields: &[&str] = match selected.id.as_str() {
+            "start-native-login" => &["expected_backend_sha256", "callback_port"],
+            "cancel-native-login" => &["job_id"],
+            "native-credential" => &["expected_backend_sha256", "value"],
+            _ => &[],
+        };
+        if value
+            .as_object()
+            .is_none_or(|o| o.keys().any(|k| !fields.contains(&k.as_str())))
+        {
+            return Err(ApiError::bad(
+                "Use this installation's fixed account setup fields",
+            ));
+        }
+        if matches!(
+            selected.id.as_str(),
+            "start-native-login" | "native-credential"
+        ) && !value["expected_backend_sha256"]
+            .as_str()
+            .is_some_and(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(ApiError::bad(
+                "Read the current engine identity before changing account access",
+            ));
+        }
+        if selected.id == "start-native-login" && value["callback_port"] != 0 {
+            return Err(ApiError::bad(
+                "Let this installation choose its sign-in callback port",
+            ));
+        }
+        if selected.id == "cancel-native-login"
+            && !value["job_id"].as_str().is_some_and(canonical_uuid)
+        {
+            return Err(ApiError::bad("Select the exact pending sign-in"));
+        }
+        if selected.id == "native-credential"
+            && !value["value"]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty() && s.len() <= 64 * 1024)
+        {
+            return Err(ApiError::bad("Enter a provider API key"));
+        }
+        return Ok((
+            selected.path.clone(),
+            if selected.method == "GET" {
+                None
+            } else {
+                Some(value.clone())
+            },
+        ));
+    }
     if selected.id == "service-connections" && selected.path == "service-connections" {
         if body.is_some_and(|value| {
             !value.is_null() && value.as_object().is_none_or(|o| !o.is_empty())

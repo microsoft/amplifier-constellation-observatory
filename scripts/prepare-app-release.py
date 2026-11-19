@@ -10,6 +10,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import plistlib
 import shutil
 import tarfile
 import zipfile
@@ -63,9 +64,37 @@ def archive_support(path, metadata, expected):
         binary = read(metadata['entry'], 256 * 1024 * 1024)
         if hashlib.sha256(binary).hexdigest() != metadata['binary_sha256']:
             raise ValueError('Packaged application bytes differ')
+        if metadata['os'] == 'macos':
+            names = archive.namelist()
+            resources = packaging.MAC_RESOURCES + '/'
+            new_manifest = resources + 'observatory-package.json'
+            if 'mac_bundle_layout' in metadata:
+                if (type(metadata['mac_bundle_layout']) is not int or metadata['mac_bundle_layout'] != 1
+                        or metadata.get('gui_entry') != packaging.MAC_GUI_ENTRY
+                        or not re.fullmatch(r'[0-9a-f]{64}', metadata.get('gui_sha256', ''))):
+                    raise ValueError('Invalid Mac launcher layout metadata')
+                if prefix + 'observatory-package.json' in names or any(name.startswith(prefix + 'support/') for name in names):
+                    raise ValueError('Mac package mixes old and new resource layouts')
+                gui = read(packaging.MAC_GUI_ENTRY, 120 * 1024 * 1024)
+                if hashlib.sha256(gui).hexdigest() != metadata['gui_sha256']:
+                    raise ValueError('Mac launcher bytes differ')
+                prefix = resources
+                info = plistlib.loads(read('Observatory.app/Contents/Info.plist', 65536))
+                if info.get('CFBundleExecutable') != 'Observatory':
+                    raise ValueError('Mac bundle does not launch its fixed GUI entry point')
+            elif (new_manifest in names or packaging.MAC_GUI_ENTRY in names
+                  or 'gui_entry' in metadata or 'gui_sha256' in metadata):
+                raise ValueError('New Mac layout is missing its explicit marker')
+        elif any(name in metadata for name in ('mac_bundle_layout', 'gui_entry', 'gui_sha256')):
+            raise ValueError('Mac launcher metadata on a non-Mac package')
         manifest = json.loads(read(prefix + 'observatory-package.json', 65536))
         if manifest['binary_sha256'] != metadata['binary_sha256'] or manifest['target'] != metadata['target'] or manifest['version'] != metadata['version']:
             raise ValueError('Package inventory differs from release metadata')
+        if 'mac_bundle_layout' in metadata:
+            if type(manifest.get('mac_bundle_layout')) is not int or manifest['mac_bundle_layout'] != 1:
+                raise ValueError('Mac resource manifest has a different layout')
+        elif 'mac_bundle_layout' in manifest:
+            raise ValueError('Unannounced Mac resource layout')
         if metadata['includes_agent_setup']:
             if manifest.get('helpers_manifest_sha256') != hashlib.sha256(expected['manifest.json']).hexdigest():
                 raise ValueError('Desktop helper inventory differs from the published pin')

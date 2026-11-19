@@ -679,6 +679,15 @@ pub fn edit_label(s: &AppState, id: &str, body: &Value) -> ApiResult<Value> {
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SignedHelper {
+    schema: u8,
+    origin_archive_sha256: String,
+    origin_binary_sha256: String,
+    signing_receipt_sha256: String,
+    team_id: String,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Artifact {
     platform: String,
     label: String,
@@ -690,10 +699,42 @@ struct Artifact {
     installation_protocol: Option<u8>,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    bootstrap_delivery: Option<String>,
+    #[serde(default)]
+    signed_derivative: Option<SignedHelper>,
 }
 impl Artifact {
     fn descriptor(&self, id: Option<&str>) -> Value {
-        json!({"platform":self.platform,"label":self.label,"architecture":self.architecture,"url":id.map(|id|format!("/api/v1/machine-pairings/{id}/setup/{}",self.platform)),"filename":format!("Constellation-Computer-{}.zip",self.platform),"version":self.version,"installation_protocol":self.installation_protocol})
+        json!({"platform":self.platform,"label":self.label,"architecture":self.architecture,"url":id.map(|id|format!("/api/v1/machine-pairings/{id}/setup/{}",self.platform)),"filename":format!("Constellation-Computer-{}.zip",self.platform),"version":self.version,"installation_protocol":self.installation_protocol,"bootstrap_delivery":self.bootstrap_delivery,"signed_distribution":self.signed_derivative.is_some()})
+    }
+    fn valid_distribution(&self) -> bool {
+        let mac = self.platform.starts_with("macos-");
+        if self
+            .bootstrap_delivery
+            .as_deref()
+            .is_some_and(|v| v != "separate_file" || !mac)
+        {
+            return false;
+        }
+        self.signed_derivative.as_ref().is_none_or(|signed| {
+            let sha = |value: &str| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            };
+            mac && self.bootstrap_delivery.as_deref() == Some("separate_file")
+                && signed.schema == 1
+                && sha(&signed.origin_archive_sha256)
+                && sha(&signed.origin_binary_sha256)
+                && sha(&signed.signing_receipt_sha256)
+                && signed.team_id.len() == 10
+                && signed
+                    .team_id
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        })
     }
 }
 fn artifact_path(s: &AppState, a: &Artifact) -> PathBuf {
@@ -746,6 +787,7 @@ fn artifacts(s: &AppState) -> ApiResult<Vec<Artifact>> {
             || a.label.len() > 80
             || a.architecture.len() > 80
             || a.source.as_deref() != source
+            || !a.valid_distribution()
         {
             return Err(ApiError::bad("Invalid helper download"));
         }
@@ -783,7 +825,14 @@ async fn download(
     let file = artifact_path(&s, &a);
     let filename = format!("attachment; filename=\"Constellation-Computer-{platform}.zip\"");
     let data = tokio::task::spawn_blocking(move || {
-        setup_archive(file, &a.sha256, &a.platform, &bootstrap)
+        setup_archive(
+            file,
+            &a.sha256,
+            &a.platform,
+            &bootstrap,
+            a.bootstrap_delivery.as_deref() == Some("separate_file"),
+            a.signed_derivative.is_some(),
+        )
     })
     .await
     .map_err(|_| ApiError::bad("Could not prepare setup"))??;
@@ -801,6 +850,8 @@ fn setup_archive(
     expected: &str,
     platform: &str,
     bootstrap: &Value,
+    separate_file: bool,
+    signed_derivative: bool,
 ) -> ApiResult<Vec<u8>> {
     use sha2::{Digest, Sha256};
     if std::fs::metadata(&file)?.len() > 80 * 1024 * 1024 {
@@ -815,13 +866,31 @@ fn setup_archive(
     if archive.len() > 50 {
         return Err(ApiError::bad("Invalid helper archive"));
     }
+    let mut has_resource_seal = false;
+    let mut names = std::collections::BTreeSet::new();
+    let ticket = "Constellation Computer.app/Contents/CodeResources";
     for i in 0..archive.len() {
         let f = archive
             .by_index(i)
             .map_err(|_| ApiError::bad("Invalid helper archive"))?;
         let name = f
             .name()
-            .map_err(|_| ApiError::bad("Invalid helper archive name"))?;
+            .map_err(|_| ApiError::bad("Invalid helper archive name"))?
+            .into_owned();
+        has_resource_seal |=
+            name == "Constellation Computer.app/Contents/_CodeSignature/CodeResources";
+        names.insert(name.clone());
+        if name == ticket
+            && (!signed_derivative
+                || !separate_file
+                || !platform.starts_with("macos-")
+                || !(1..=64 * 1024).contains(&f.size())
+                || !f
+                    .unix_mode()
+                    .is_some_and(|m| m & 0o170000 == 0o100000 && m & 0o7777 == 0o644))
+        {
+            return Err(ApiError::bad("Invalid signed Mac helper staple ticket"));
+        }
         if f.enclosed_name().is_none()
             || name.contains(['\\', ':'])
             || name
@@ -834,6 +903,31 @@ fn setup_archive(
             return Err(ApiError::bad("Unsafe helper archive"));
         }
     }
+    if signed_derivative {
+        let required = [
+            "Constellation Computer.app/Contents/MacOS/constellation-machine-helper",
+            "Constellation Computer.app/Contents/Info.plist",
+            "Constellation Computer.app/Contents/_CodeSignature/CodeResources",
+            "START-HERE.txt",
+            "LICENSE",
+            "NUNITO-LICENSE.txt",
+        ];
+        if names.len() != archive.len()
+            || !required.iter().all(|name| names.contains(*name))
+            || names
+                .iter()
+                .any(|name| !required.contains(&name.as_str()) && name != ticket)
+        {
+            return Err(ApiError::bad("Unexpected signed Mac helper inventory"));
+        }
+    }
+    if (platform.starts_with("macos-") && has_resource_seal && !separate_file)
+        || (signed_derivative && !has_resource_seal)
+    {
+        return Err(ApiError::bad(
+            "The sealed Mac helper requires its separately selected setup file",
+        ));
+    }
     drop(archive);
     let mut zip = zip::ZipWriter::new_append(Cursor::new(data))
         .map_err(|_| ApiError::bad("Invalid helper archive"))?;
@@ -843,7 +937,7 @@ fn setup_archive(
     )
     .map_err(|_| ApiError::bad("Could not prepare setup"))?;
     zip.write_all(serde_json::to_string_pretty(bootstrap).unwrap().as_bytes())?;
-    if platform.starts_with("macos-") {
+    if platform.starts_with("macos-") && !separate_file {
         // The current unsigned preview must survive Finder app translocation,
         // which does not preserve a sibling config file. Signed distribution
         // needs a separately opened setup file; never rewrite a signed bundle.

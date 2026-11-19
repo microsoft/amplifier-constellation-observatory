@@ -1,0 +1,15 @@
+#observatory-world .ow-agent-setup{max-width:65ch;margin-inline:auto}
+#observatory-world .ow-agent-setup h3{font-size:20px;line-height:1.3;margin:0 0 10px}
+#observatory-world .ow-agent-setup p{line-height:1.55;margin:8px 0 14px}
+#observatory-world .ow-agent-setup .ow-setup-note{font-size:13px;color:#705139}
+#observatory-world .ow-model-form{margin:22px 0}
+#observatory-world .ow-setup-section{margin-top:26px;padding-top:20px;border-top:1px solid #c6a981}
+#observatory-world .ow-setup-section .ow-button{margin:4px 8px 4px 0}
+#observatory-world .ow-setup-key{display:grid;gap:6px;font-size:13px;font-weight:800}
+#observatory-world .ow-setup-key input{width:100%;min-height:44px;padding:9px 12px;border:1px solid #c6a981;border-radius:10px;background:#fffbf1;caret-color:#315b47}
+#observatory-world .ow-setup-code{font-size:24px;letter-spacing:.04em;font-variant-numeric:tabular-nums;user-select:all}
+#observatory-world .ow-setup-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}
+#observatory-world .ow-agent-setup :focus-visible{outline:2px solid #315b47;outline-offset:3px}
+#observatory-world .ow-agent-setup a{text-underline-offset:.2em}
+#observatory-world .ow-agent-setup input::selection{background:#d4e1c3;color:#244632}
+#observatory-world .ow-setup-feedback:empty{display:none}

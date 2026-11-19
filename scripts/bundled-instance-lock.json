@@ -1,0 +1,19 @@
+{
+  "repository": "microsoft/amplifier-constellation-instance",
+  "source": "f2885db3f5046b01cf92f5405c32d609d3703b26",
+  "targets": {
+    "aarch64-pc-windows-msvc": {
+      "sha256": "b4e15e793842733007238ae17f4f4b8c5e6ef7f39ee751beb6c4fc300d95e7cb"
+    },
+    "aarch64-unknown-linux-gnu": {
+      "sha256": "adf9f2519fe8d9c28a389b3d117a2afe36f6c6ffa9b9a1d19f2765da3c26b850"
+    },
+    "x86_64-pc-windows-msvc": {
+      "sha256": "744440e63e902fefed1a48cad3570f02968c84b0f75de10fc1789c9b9f4970ca"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "sha256": "e134f946450082234e2d88e5e842f72abe3b5325ce6cf685f181908c2a409228"
+    }
+  },
+  "version": "0.22.14"
+}

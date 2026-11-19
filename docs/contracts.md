@@ -87,6 +87,11 @@ commitment does not advertise an unimplemented interface.
 
 ## Shared promises and exact interfaces
 
+The [local agent-to-Slack setup](local-slack-setup.md) uses the installations'
+owned account, configuration and lifecycle controls. A saved canvas connection
+does not imply workspace consent or a successful model conversation. Lost replies
+retain their original operation and are reconciled without another installation.
+
 Fleet approval mode is an explicit, optional batch operation over the registered
 agents' own policy APIs. Each agent remains authoritative across its chats; losing
 Observatory does not remove or change its policy. Report the full cohort and

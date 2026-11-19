@@ -1,0 +1,125 @@
+import hashlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import Mock
+import urllib.request
+
+spec = importlib.util.spec_from_file_location('fetch', Path(__file__).with_name('fetch-slack-bundle.py'))
+fetch = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fetch)
+
+
+class DownloadTests(unittest.TestCase):
+    def fixture(self, root, data=b'exact owner archive'):
+        target = 'x86_64-pc-windows-msvc'
+        row = {'url': 'https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.18.0/native.zip',
+               'release': {'target': target, 'version': '0.18.0', 'source': 'a' * 40,
+                           'archive_size': len(data), 'archive_sha256': hashlib.sha256(data).hexdigest()}}
+        lock = root / 'lock.json'
+        lock.write_text(json.dumps({'schema': 1, 'targets': {target: row}}))
+        return target, lock, row
+
+    def test_exact_bytes_publish_once_and_existing_destination_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target, lock, row = self.fixture(root)
+            opener = Mock(); opener.open.return_value = io.BytesIO(b'exact owner archive')
+            output = root / 'native.zip'
+            result = fetch.fetch(target, output, lock, opener=opener)
+            self.assertEqual(result['archive_sha256'], row['release']['archive_sha256'])
+            self.assertEqual(output.read_bytes(), b'exact owner archive')
+            with self.assertRaisesRegex(ValueError, 'preserved'):
+                fetch.fetch(target, output, lock, opener=opener)
+            opener.open.assert_called_once_with(row['url'], timeout=60)
+
+    def test_truncated_changed_and_excessive_downloads_never_publish(self):
+        for data in (b'short', b'wrong owner archive', b'exact owner archive plus extra'):
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); target, lock, _ = self.fixture(root)
+                opener = Mock(); opener.open.return_value = io.BytesIO(data)
+                with self.assertRaises(ValueError):
+                    fetch.fetch(target, root / 'native.zip', lock, opener=opener)
+                self.assertFalse((root / 'native.zip').exists())
+                self.assertEqual(list(root.glob('slack-download-*')), [])
+
+    def test_wrong_owner_target_or_url_refuses_before_network(self):
+        changes = [{'url': 'http://github.com/microsoft/amplifier-acp-slack/releases/download/v0.18.0/native.zip'},
+                   {'url': 'https://github.com/other/repository/releases/download/v0.18.0/native.zip'},
+                   {'url': 'https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.18.0/native.zip?x=1'},
+                   {'release': {'target': 'aarch64-apple-darwin'}}]
+        for change in changes:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); target, lock, row = self.fixture(root)
+                row.update(change); lock.write_text(json.dumps({'schema': 1, 'targets': {target: row}}))
+                opener = Mock()
+                with self.assertRaises(ValueError): fetch.fetch(target, root / 'out', lock, opener=opener)
+                opener.open.assert_not_called()
+
+    def test_unexpected_redirect_never_fetches_another_host_or_downgrades_tls(self):
+        request = urllib.request.Request('https://github.com/locked')
+        for url in ('http://release-assets.githubusercontent.com/a', 'https://example.com/a',
+                    'https://user:secret@github.com/a', 'https://github.com:444/a'):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                fetch.ReleaseRedirects().redirect_request(request, None, 302, '', {}, url)
+
+    def test_signed_derivative_is_local_only_and_never_falls_back_to_public_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); _, lock, row = self.fixture(root)
+            target = 'aarch64-apple-darwin'
+            row['url'] = None
+            row['release']['target'] = target
+            row['release']['files'] = {'Slack Connector.app/Contents/_CodeSignature/CodeResources': {}}
+            row['release']['signed_derivative'] = {
+                'schema': 1, 'origin_archive_sha256': '1' * 64,
+                'origin_native_bundle_sha256': '2' * 64,
+                'signing_receipt_sha256': '3' * 64, 'team_id': 'ABCDEFGHIJ'}
+            lock.write_text(json.dumps({'schema': 1, 'targets': {target: row}}))
+            opener = Mock(); output = root / 'out' / 'package.zip'
+            with self.assertRaisesRegex(ValueError, 'no public download fallback'):
+                fetch.fetch(target, output, lock, opener=opener)
+            self.assertFalse(output.parent.exists())
+            local = root / 'signed.zip'; local.write_bytes(b'wrong bytes')
+            with self.assertRaises(ValueError):
+                fetch.fetch(target, output, lock, opener=opener, local_archive=local)
+            self.assertFalse(output.exists())
+            local.write_bytes(b'exact owner archive')
+            fetch.fetch(target, output, lock, opener=opener, local_archive=local)
+            self.assertEqual(output.read_bytes(), local.read_bytes())
+            opener.open.assert_not_called()
+            row['url'] = 'https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.18.0/native.zip'
+            lock.write_text(json.dumps({'schema': 1, 'targets': {target: row}}))
+            with self.assertRaisesRegex(ValueError, 'bundled-only'):
+                fetch.selected(target, lock)
+            row['url'] = None
+            for field, invalid in [('schema', True), ('schema', 1.0), ('team_id', 1234567890)]:
+                original = row['release']['signed_derivative'][field]
+                row['release']['signed_derivative'][field] = invalid
+                lock.write_text(json.dumps({'schema': 1, 'targets': {target: row}}))
+                with self.assertRaisesRegex(ValueError, 'bundled-only'):
+                    fetch.selected(target, lock)
+                row['release']['signed_derivative'][field] = original
+
+
+    def test_staple_descriptor_only_accepts_signed_mac_fixed_bounded_ticket(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);_,lock,row=self.fixture(root);target='aarch64-apple-darwin'
+            row['url']=None;row['release']['target']=target
+            row['release']['signed_derivative']={'schema':1,'origin_archive_sha256':'1'*64,
+                'origin_native_bundle_sha256':'2'*64,'signing_receipt_sha256':'3'*64,'team_id':'ABCDEFGHIJ'}
+            files={'Slack Connector.app/Contents/_CodeSignature/CodeResources':{}}
+            row['release']['files']=files
+            good={'size':1653,'mode':0o644,'sha256':'4'*64}
+            def selected(ticket):
+                files[fetch.STAPLE_TICKET]=ticket;lock.write_text(json.dumps({'schema':1,'targets':{target:row}}))
+                return fetch.selected(target,lock)
+            selected(good);selected({**good,'size':fetch.MAX_STAPLE_TICKET})
+            for bad in (None,{**good,'size':0},{**good,'size':True},{**good,'size':fetch.MAX_STAPLE_TICKET+1},
+                        {**good,'mode':0o755},{**good,'sha256':'A'*64},{**good,'extra':True}):
+                with self.subTest(bad=bad),self.assertRaises(ValueError):selected(bad)
+            row['release'].pop('signed_derivative')
+            with self.assertRaises(ValueError):selected(good)
+
+if __name__ == '__main__': unittest.main()

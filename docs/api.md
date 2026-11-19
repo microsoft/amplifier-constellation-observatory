@@ -8,7 +8,13 @@ All routes below are relative to `/api/v1`. Browser sessions use the installatio
 The browser opens the systems map at `/`. Detailed administration screens remain
 at `/advanced`; both use this API and the same authentication.
 
-### Native local launch
+Local onboarding's administrator-only routes and fixed CLI boundary are described
+in [Local agent and Slack setup](local-slack-setup.md). Its endpoint operations
+carry `_observatory_endpoint_revision`; the bridge removes that envelope before
+calling the installed agent. New account/credential operations require it, and
+all offered setup mutations recheck the current endpoint immediately before dispatch.
+
+## Native local launch
 
 Opening the native application without a subcommand creates or opens its own
 installation. First setup requires a short-lived capability delivered in the

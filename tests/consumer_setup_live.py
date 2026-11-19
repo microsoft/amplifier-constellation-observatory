@@ -1,0 +1,1657 @@
+#!/usr/bin/env python3
+"""Packaged Windows/macOS onboarding controller; no external account authorization.
+
+This is intentionally separate from consumer-onboarding-browser.mjs: that test
+uses synthetic installation boundaries. This controller verifies the actual
+desktop archive and bundled Instance/Slack bytes before the real-browser driver.
+The test driver may have Python/Node/Playwright; application children receive an
+OS-only PATH. No developer tool is part of the consumer installation.
+
+Package inspection and --self-test are offline checks, not a native onboarding
+pass. --run requires exact packages and qualification tools. Slack cleanup uses
+its finite checked retirement; Instance uses the existing fixture-owned OS
+cleanup with exact profile and process-generation checks, not a product API.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import plistlib
+import signal
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import unicodedata
+import uuid
+import xml.etree.ElementTree as ET
+import zipfile
+
+
+MAX_ARCHIVE_BYTES = 2 * 1024**3
+MAX_UNPACKED_BYTES = 3 * 1024**3
+MAX_MEMBERS = 100_000
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+LIVE_LIMITS = [
+    "Actual browser and local installation controls; no provider/model request",
+    "No Slack ticket, workspace consent, app deployment, or first reply",
+    "CI account; not clean retail OS, signing/notarization, or accessibility proof",
+    "No claim that an API-key canary authenticates to a provider",
+]
+
+
+class FixtureBlocked(RuntimeError):
+    """A required supported control is missing; no native dispatch is permitted."""
+
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as source:
+        for part in iter(lambda: source.read(1024 * 1024), b""):
+            value.update(part)
+    return value.hexdigest()
+
+
+def ordinary(path: Path, *, directory: bool = False) -> Path:
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        raise ValueError("Fixture input must not be a link or reparse point")
+    if not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
+        raise ValueError("Fixture input has the wrong file type")
+    return path
+
+
+def member_path(name: str) -> PurePosixPath:
+    # Reject normalization aliases, Windows drive/ADS syntax, and extraction
+    # traversal even when inspection is performed on a different platform.
+    part = PurePosixPath(name)
+    if (not name or "\\" in name or ":" in name or part.is_absolute()
+            or any(p in ("", ".", "..") for p in name.split("/"))
+            or str(part) != name):
+        raise ValueError("Unsafe or aliased archive member")
+    return part
+
+
+def checked_hash(value: str) -> str:
+    if not isinstance(value, str) or SHA256.fullmatch(value) is None:
+        raise ValueError("Expected an exact lowercase SHA256")
+    return value
+
+
+def snapshot(path: Path) -> dict:
+    """Read-only preservation evidence; never repair or traverse foreign links."""
+    ordinary(path, directory=path.is_dir())
+    info = path.stat()
+    value = {"path": str(path), "device": info.st_dev, "inode": info.st_ino,
+             "mode": stat.S_IMODE(info.st_mode), "directory": path.is_dir()}
+    if path.is_file():
+        value.update(size=info.st_size, sha256=digest(path))
+    else:
+        value["entries"] = sorted(p.name for p in path.iterdir())
+    return value
+
+
+def directory_identity(path: Path) -> dict:
+    if os.name == 'nt':
+        return windows_directory_identity(path)
+    ordinary(path,directory=True);info=path.stat()
+    return {'device':str(info.st_dev),'inode':str(info.st_ino)}
+
+
+def windows_directory_identity(path: Path) -> dict:
+    """Capture the complete Windows volume and file ID from one ordinary directory handle."""
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+
+    class AttributeTag(ctypes.Structure):
+        _fields_ = [('attributes', w.DWORD), ('tag', w.DWORD)]
+
+    class FileId(ctypes.Structure):
+        _fields_ = [('volume', ctypes.c_uint64), ('file_id', ctypes.c_ubyte * 16)]
+
+    kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE]
+    kernel.CreateFileW.restype = w.HANDLE
+    kernel.GetFileInformationByHandleEx.argtypes = [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]
+    kernel.GetFileInformationByHandleEx.restype = w.BOOL
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.CloseHandle.restype = w.BOOL
+    # Open an existing directory for attribute reads, including the reparse point itself.
+    # Share existing readers, writers and deleters without locking the installation.
+    handle = kernel.CreateFileW(str(path), 0x80, 7, None, 3, 0x02000000 | 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        attributes = AttributeTag()
+        if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not attributes.attributes & 0x10 or attributes.attributes & 0x400:
+            raise ValueError('An ordinary directory handle is required')
+        identity = FileId()
+        if not kernel.GetFileInformationByHandleEx(handle, 18, ctypes.byref(identity), ctypes.sizeof(identity)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return {'volume_serial_64': f'{identity.volume:016x}', 'file_id_128': bytes(identity.file_id).hex()}
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def require_preserved(before: list[dict]) -> list[dict]:
+    after = [snapshot(Path(item["path"])) for item in before]
+    if after != before:
+        raise AssertionError("A retained sentinel identity, inventory, or byte digest changed")
+    return after
+
+
+def inspect_package(metadata_path: Path, expected_metadata_sha256: str) -> dict:
+    ordinary(metadata_path)
+    if digest(metadata_path) != checked_hash(expected_metadata_sha256):
+        raise ValueError("The frozen package metadata changed")
+    record = json.loads(metadata_path.read_bytes())
+    if (record.get("schema") != 1 or record.get("component") != "agent-observatory"
+            or record.get("os") not in ("windows", "macos")
+            or any(record.get(key) is not True for key in
+                   ("includes_agent_setup", "includes_computer_setup", "includes_slack_setup"))):
+        raise FixtureBlocked("Require a complete Windows/macOS desktop with Instance and Slack support")
+    name = member_path(record["filename"])
+    if len(name.parts) != 1 or not name.name.endswith(".zip"):
+        raise ValueError("Use the frozen normal desktop ZIP")
+    archive = ordinary(metadata_path.parent / name.name)
+    if archive.stat().st_size > MAX_ARCHIVE_BYTES or digest(archive) != checked_hash(record["sha256"]):
+        raise ValueError("Desktop archive size or SHA256 differs")
+    entry = member_path(record["entry"])
+    root = entry.parent
+    layout = record.get('mac_bundle_layout')
+    if 'mac_bundle_layout' in record:
+        if record['os'] != 'macos' or type(layout) is not int or layout != 1:
+            raise ValueError('Unsupported explicit Mac package layout')
+        if str(entry) != 'Observatory.app/Contents/MacOS/agent-observatory':
+            raise ValueError('Unexpected Mac service entry')
+        if record.get('gui_entry') != 'Observatory.app/Contents/MacOS/Observatory':
+            raise ValueError('Unexpected Mac GUI entry')
+        root = PurePosixPath('Observatory.app/Contents/Resources')
+    with zipfile.ZipFile(archive) as source:
+        infos = source.infolist()
+        if len(infos) > MAX_MEMBERS or sum(i.file_size for i in infos) > MAX_UNPACKED_BYTES:
+            raise ValueError("Desktop package exceeds the bounded fixture inventory")
+        seen = set()
+        for info in infos:
+            relative = member_path(info.filename)
+            if str(relative).casefold() in seen:
+                raise ValueError("Duplicate or case-aliased package member")
+            seen.add(str(relative).casefold())
+            mode = info.external_attr >> 16
+            if info.is_dir() or (stat.S_IFMT(mode) not in (0, stat.S_IFREG)) or info.flag_bits & 1:
+                raise ValueError("Package contains a nonordinary or encrypted member")
+        def read(name: PurePosixPath, limit: int = 8 * 1024**2) -> bytes:
+            info = source.getinfo(str(name))
+            if info.file_size > limit:
+                raise ValueError("Excessive package metadata")
+            return source.read(info)
+        def member_digest(name: PurePosixPath) -> str:
+            result = hashlib.sha256()
+            with source.open(str(name)) as incoming:
+                for block in iter(lambda: incoming.read(1024 * 1024), b""):
+                    result.update(block)
+            return result.hexdigest()
+        binary_sha = member_digest(entry)
+        if binary_sha != checked_hash(record["binary_sha256"]):
+            raise ValueError("Packaged Observatory executable differs")
+        if layout is not None and member_digest(member_path(record['gui_entry'])) != checked_hash(record['gui_sha256']):
+            raise ValueError('Packaged Mac GUI launcher differs')
+        package = json.loads(read(root / "observatory-package.json"))
+        if (('mac_bundle_layout' in package) != ('mac_bundle_layout' in record)
+                or package.get('mac_bundle_layout') != layout):
+            raise ValueError('External and embedded Mac layout markers differ')
+        if any(package.get(key) != record.get(key) for key in ("version", "target", "binary_sha256", "slack_bundle")):
+            raise ValueError("Desktop metadata and embedded package provenance differ")
+        instance_root = root / "support/instance"
+        instance_bytes = read(instance_root / "consumer-bundle.json")
+        if hashlib.sha256(instance_bytes).hexdigest() != checked_hash(package["instance_manifest_sha256"]):
+            raise ValueError("Bundled Instance manifest differs")
+        instance = json.loads(instance_bytes)
+        if (instance.get("kind") != "instance-consumer-bundle" or instance.get("target") != record["target"]
+                or instance.get("version") != record["instance_version"] or not instance.get("native_runtime")):
+            raise ValueError("Bundled Instance target/version/engine binding differs")
+        for relative, expected in instance["files"].items():
+            member_path(relative)
+            actual = member_digest(instance_root / relative)
+            if actual != checked_hash(expected):
+                raise ValueError("Bundled Instance inventory differs: " + relative)
+        slack = package["slack_bundle"]
+        slack_root = root / "support/slack"
+        descriptor_bytes = read(slack_root / "descriptor.json")
+        if hashlib.sha256(descriptor_bytes).hexdigest() != checked_hash(slack["descriptor_sha256"]):
+            raise ValueError("Bundled Slack descriptor differs")
+        descriptor = json.loads(descriptor_bytes)
+        if any(descriptor.get(k) != slack.get(k) for k in
+               ("source", "version", "target", "archive_size", "archive_sha256")):
+            raise ValueError("Bundled Slack archive descriptor differs")
+        embedded = slack_root / (record["target"] + ".zip")
+        if (source.getinfo(str(embedded)).file_size != slack["archive_size"]
+                or member_digest(embedded) != checked_hash(slack["archive_sha256"])):
+            raise ValueError("Bundled Slack archive differs")
+    return {"record": record, "archive": str(archive), "package": package,
+            "instance": instance, "slack": descriptor,
+            "metadata_sha256": expected_metadata_sha256}
+
+
+def require_live_owner_contract() -> None:
+    # Ordinary Slack controls are frozen. The Instance cleanup below remains
+    # fixture-owned, not a newly advertised product retirement API.
+    if not callable(checked_owned_cleanup):
+        raise FixtureBlocked("Required exact owned-profile cleanup is unavailable")
+
+
+def verify_tool(path: Path, expected: str) -> str:
+    if not path.is_absolute() or digest(ordinary(path)) != checked_hash(expected):
+        raise ValueError("Use the already supplied exact qualification tool")
+    return str(path)
+
+
+def os_only_environment() -> dict[str, str]:
+    # Copy OS login/location fields, not the developer shell's credential store.
+    allowed = {"SYSTEMROOT", "WINDIR", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+               "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR", "USERNAME",
+               "USERDOMAIN", "USER", "LOGNAME", "HOME", "LANG", "LC_ALL", "LC_CTYPE",
+               "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"}
+    env = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+    if os.name == "nt":
+        root = Path(os.environ["SystemRoot"])
+        env["PATH"] = os.pathsep.join(map(str,(root / "System32", root,
+                                                root / "System32/WindowsPowerShell/v1.0")))
+    else:
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    return env
+
+
+def windows_console_process(pid):
+    """One read-only handle observation; never grants control of a console host.
+
+    A window PID can be conhost/Terminal rather than the application that caused
+    the console. Parent PID and current parent generation are diagnostics only.
+    No process arguments, environment, memory, tokens or window text are read.
+    """
+    from ctypes import wintypes as w
+    if type(pid) is not int or not 0 < pid <= 0xffffffff:
+        return {'state':'unavailable','reason':'invalid_pid'}
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.OpenProcess.argtypes=[w.DWORD,w.BOOL,w.DWORD];kernel.OpenProcess.restype=w.HANDLE
+    kernel.CloseHandle.argtypes=[w.HANDLE];kernel.CloseHandle.restype=w.BOOL
+    kernel.GetProcessId.argtypes=[w.HANDLE];kernel.GetProcessId.restype=w.DWORD
+    kernel.QueryFullProcessImageNameW.argtypes=[w.HANDLE,w.DWORD,w.LPWSTR,ctypes.POINTER(w.DWORD)]
+    kernel.QueryFullProcessImageNameW.restype=w.BOOL
+    kernel.GetProcessTimes.argtypes=[w.HANDLE,*([ctypes.POINTER(w.FILETIME)]*4)]
+    kernel.GetProcessTimes.restype=w.BOOL
+    kernel.GetExitCodeProcess.argtypes=[w.HANDLE,ctypes.POINTER(w.DWORD)];kernel.GetExitCodeProcess.restype=w.BOOL
+
+    def observe(process_id, parent=False):
+        result={'pid':process_id,'state':'unavailable','errors':[]}
+        handle=kernel.OpenProcess(0x1000,False,process_id) # QUERY_LIMITED_INFORMATION only
+        if not handle:
+            result['errors'].append({'api':'OpenProcess','winerror':ctypes.get_last_error()})
+            return result
+        def creation():
+            values=[w.FILETIME() for _ in range(4)]
+            if not kernel.GetProcessTimes(handle,*map(ctypes.byref,values)):
+                result['errors'].append({'api':'GetProcessTimes','winerror':ctypes.get_last_error()})
+                return None
+            return str((values[0].dwHighDateTime<<32)|values[0].dwLowDateTime)
+        try:
+            if kernel.GetProcessId(handle)!=process_id:
+                result['errors'].append({'api':'GetProcessId','reason':'identity_mismatch'})
+                return result
+            result['creation_time_100ns']=creation()
+            path=ctypes.create_unicode_buffer(32768);length=w.DWORD(len(path))
+            if kernel.QueryFullProcessImageNameW(handle,0,path,ctypes.byref(length)):
+                result['image']=path.value
+            else: result['errors'].append({'api':'QueryFullProcessImageNameW','winerror':ctypes.get_last_error()})
+            exited=w.DWORD()
+            if kernel.GetExitCodeProcess(handle,ctypes.byref(exited)):
+                result['exit_code_observed']=exited.value
+            else: result['errors'].append({'api':'GetExitCodeProcess','winerror':ctypes.get_last_error()})
+            if parent:
+                # This documented native query may be unavailable. Its failure
+                # leaves the original console observation and image/birth intact.
+                try:
+                    class Basic(ctypes.Structure):
+                        _fields_=[('exit_status',w.LONG),('peb',w.LPVOID),('affinity',ctypes.c_size_t),
+                                  ('priority',w.LONG),('pid',ctypes.c_size_t),('parent_pid',ctypes.c_size_t)]
+                    ntdll=ctypes.WinDLL('ntdll',use_last_error=True)
+                    query=ntdll.NtQueryInformationProcess
+                    query.argtypes=[w.HANDLE,w.ULONG,w.LPVOID,w.ULONG,ctypes.POINTER(w.ULONG)]
+                    query.restype=w.LONG
+                    basic=Basic();returned=w.ULONG()
+                    status=query(handle,0,ctypes.byref(basic),ctypes.sizeof(basic),ctypes.byref(returned))
+                    if status==0 and returned.value==ctypes.sizeof(basic) and basic.pid==process_id:
+                        result['parent_pid_observed']=int(basic.parent_pid)
+                        if 0<basic.parent_pid<=0xffffffff and basic.parent_pid!=process_id:
+                            current=observe(int(basic.parent_pid))
+                            result['current_parent_process']=current
+                            child_birth=result.get('creation_time_100ns');parent_birth=current.get('creation_time_100ns')
+                            result['parent_creation_not_after_child']=(int(parent_birth)<=int(child_birth)
+                                if child_birth is not None and parent_birth is not None else None)
+                    else: result['errors'].append({'api':'NtQueryInformationProcess','ntstatus':f'{status&0xffffffff:08x}',
+                                                   'returned_bytes':returned.value})
+                except Exception as error:
+                    result['errors'].append({'api':'NtQueryInformationProcess','error_type':type(error).__name__})
+            result['rechecked_creation_time_100ns']=creation()
+            if (result.get('creation_time_100ns') is not None and result.get('image')
+                    and result['creation_time_100ns']==result['rechecked_creation_time_100ns']):
+                result['state']='same_handle_generation_observed'
+            return result
+        finally:
+            kernel.CloseHandle(handle)
+    return observe(pid,parent=True)
+
+
+def windows_console_visibility(window):
+    """Content-free, non-atomic window diagnostics, never an admission rule.
+
+    WS_VISIBLE can remain set for obscured or cloaked windows. The rectangle is
+    DPI-virtualized and can include invisible borders; its area is not a count
+    of displayed pixels. An HWND may disappear or be reused between queries.
+    """
+    from ctypes import wintypes as w
+    result={'is_window_visible':None,'rectangle':None,'dwm_cloaked':None,'errors':[]}
+    try:
+        user=ctypes.WinDLL('user32',use_last_error=True)
+        user.IsWindowVisible.argtypes=[w.HWND];user.IsWindowVisible.restype=w.BOOL
+        user.GetWindowRect.argtypes=[w.HWND,ctypes.POINTER(w.RECT)];user.GetWindowRect.restype=w.BOOL
+        result['is_window_visible']=bool(user.IsWindowVisible(window))
+        rectangle=w.RECT()
+        if user.GetWindowRect(window,ctypes.byref(rectangle)):
+            width=rectangle.right-rectangle.left;height=rectangle.bottom-rectangle.top
+            result['rectangle']={'width':width,'height':height,'positive_area':width>0 and height>0,
+                                 'area':max(0,width)*max(0,height)}
+        else:
+            result['errors'].append({'api':'GetWindowRect','winerror':ctypes.get_last_error()})
+    except Exception as error:
+        result['errors'].append({'api':'user32_visibility','error_type':type(error).__name__})
+    try:
+        dwm=ctypes.WinDLL('dwmapi',use_last_error=True)
+        query=dwm.DwmGetWindowAttribute
+        query.argtypes=[w.HWND,w.DWORD,w.LPVOID,w.DWORD];query.restype=ctypes.c_int32
+        flags=ctypes.c_uint32()
+        status=query(window,14,ctypes.byref(flags),ctypes.sizeof(flags)) # DWMWA_CLOAKED, DWORD
+        result['dwm_cloaked']={'hresult':f'{status&0xffffffff:08x}',
+                               'flags':flags.value if status==0 else None}
+    except Exception as error:
+        result['errors'].append({'api':'DwmGetWindowAttribute','error_type':type(error).__name__})
+    return result
+
+
+class MacTerminalWindows:
+    """Sample on-screen terminal windows using system frameworks, without reading window titles."""
+    owners = {"Terminal", "iTerm2", "iTerm", "Warp", "Ghostty", "Alacritty", "kitty", "WezTerm"}
+
+    def __init__(self):
+        frameworks = "/System/Library/Frameworks"
+        self.cg = ctypes.CDLL(frameworks + "/CoreGraphics.framework/CoreGraphics")
+        self.cf = ctypes.CDLL(frameworks + "/CoreFoundation.framework/CoreFoundation")
+        ptr, index, integer = ctypes.c_void_p, ctypes.c_long, ctypes.c_uint32
+        for lib, name, args, result in (
+            (self.cg, "CGWindowListCopyWindowInfo", [integer, integer], ptr),
+            (self.cf, "CFArrayGetCount", [ptr], index),
+            (self.cf, "CFArrayGetValueAtIndex", [ptr, index], ptr),
+            (self.cf, "CFDictionaryGetValue", [ptr, ptr], ptr),
+            (self.cf, "CFStringGetCString", [ptr, ptr, index, integer], ctypes.c_ubyte),
+            (self.cf, "CFNumberGetValue", [ptr, ctypes.c_int, ptr], ctypes.c_ubyte),
+            (self.cf, "CFRelease", [ptr], None),
+        ):
+            fn = getattr(lib, name)
+            fn.argtypes, fn.restype = args, result
+        self.keys = {key: ptr.in_dll(self.cg, "kCGWindow" + key).value
+                     for key in ("OwnerName", "OwnerPID", "Number", "Layer")}
+
+    def windows(self):
+        # kCGWindowListOptionOnScreenOnly; IDs, PIDs and application names only.
+        listing = self.cg.CGWindowListCopyWindowInfo(1, 0)
+        if not listing:
+            raise RuntimeError("The Mac window server is unavailable")
+        rows = []
+        try:
+            for index in range(self.cf.CFArrayGetCount(listing)):
+                window = self.cf.CFArrayGetValueAtIndex(listing, index)
+                owner = self.cf.CFDictionaryGetValue(window, self.keys["OwnerName"])
+                if not owner:
+                    continue
+                name = ctypes.create_string_buffer(256)
+                if not self.cf.CFStringGetCString(owner, name, len(name), 0x08000100):
+                    continue
+                app = name.value.decode("utf-8")
+                if app not in self.owners:
+                    continue
+                fields = {}
+                for key in ("Number", "OwnerPID", "Layer"):
+                    value = self.cf.CFDictionaryGetValue(window, self.keys[key])
+                    number = ctypes.c_int64()
+                    if not value or not self.cf.CFNumberGetValue(value, 4, ctypes.byref(number)):
+                        raise RuntimeError("Incomplete Mac terminal-window identity")
+                    fields[key] = number.value
+                if fields["Layer"] == 0:
+                    rows.append({"window": fields["Number"], "pid": fields["OwnerPID"], "class": app})
+            return sorted(rows, key=lambda row: row["window"])
+        finally:
+            self.cf.CFRelease(listing)
+
+
+class ConsoleMonitor:
+    """Bounded visible-console sampling, not a universal no-flash claim."""
+    def __init__(self):
+        self.stop_event=threading.Event();self.thread=None;self.error=None
+        self.baseline=[];self.unexpected=[];self.samples=0
+        self.baseline_details=[];self.unexpected_details=[]
+
+    @staticmethod
+    def detail(row):
+        # Keep timestamps/metadata out of the original comparison key. Each
+        # baseline/new row gets at most one observation, bounded to 32 per kind.
+        result={'window':row['window'],'pid':row['pid'],'class':row['class'],
+                'observed_unix_ns':str(time.time_ns()),'observed_monotonic_ns':str(time.monotonic_ns())}
+        if sys.platform == 'darwin' and row['class'] in MacTerminalWindows.owners:
+            return {**result, 'on_screen': True}
+        try:
+            result['window_visibility']=windows_console_visibility(row['window'])
+        except Exception as error:
+            result['window_visibility_error_type']=type(error).__name__
+        try:
+            result['process']=windows_console_process(row['pid'])
+            from ctypes import wintypes as w
+            user=ctypes.WinDLL('user32',use_last_error=True)
+            user.GetWindowThreadProcessId.argtypes=[w.HWND,ctypes.POINTER(w.DWORD)]
+            user.GetWindowThreadProcessId.restype=w.DWORD
+            pid=w.DWORD();thread=user.GetWindowThreadProcessId(row['window'],ctypes.byref(pid))
+            result['window_pid_matches_after']=bool(thread and pid.value==row['pid'])
+        except Exception as error:
+            result['metadata_error_type']=type(error).__name__
+        result['observation_completed_monotonic_ns']=str(time.monotonic_ns())
+        return result
+
+    def retain_new(self,row):
+        # The original failure predicate is unchanged, including its row cap.
+        if row not in self.baseline and row not in self.unexpected and len(self.unexpected)<32:
+            self.unexpected.append(row)
+            self.unexpected_details.append(self.detail(row))
+
+    @staticmethod
+    def windows():
+        from ctypes import wintypes as w
+        user=ctypes.WinDLL('user32',use_last_error=True)
+        callback_type=ctypes.WINFUNCTYPE(w.BOOL,w.HWND,w.LPARAM)
+        user.EnumWindows.argtypes=[callback_type,w.LPARAM];user.EnumWindows.restype=w.BOOL
+        user.IsWindowVisible.argtypes=[w.HWND];user.IsWindowVisible.restype=w.BOOL
+        user.GetClassNameW.argtypes=[w.HWND,w.LPWSTR,ctypes.c_int]
+        user.GetWindowThreadProcessId.argtypes=[w.HWND,ctypes.POINTER(w.DWORD)]
+        rows=[]
+        @callback_type
+        def observe(window,_):
+            if user.IsWindowVisible(window):
+                name=ctypes.create_unicode_buffer(256);user.GetClassNameW(window,name,len(name))
+                if name.value in {'ConsoleWindowClass','CASCADIA_HOSTING_WINDOW_CLASS'}:
+                    pid=w.DWORD();user.GetWindowThreadProcessId(window,ctypes.byref(pid))
+                    rows.append({'window':int(window),'pid':pid.value,'class':name.value})
+            return True
+        if not user.EnumWindows(observe,0):raise ctypes.WinError(ctypes.get_last_error())
+        return sorted(rows,key=lambda row:row['window'])
+
+    def start(self):
+        if sys.platform == "darwin":
+            snapshot = MacTerminalWindows().windows
+        elif os.name == "nt":
+            snapshot = self.windows
+        else:
+            return
+        self.baseline = snapshot()
+        self.baseline_details=[self.detail(row) for row in self.baseline[:32]]
+        def sample():
+            try:
+                while not self.stop_event.wait(.05):
+                    self.samples+=1
+                    for row in snapshot():
+                        self.retain_new(row)
+            except BaseException as error:self.error=type(error).__name__
+        self.thread=threading.Thread(target=sample,daemon=True);self.thread.start()
+
+    def finish(self):
+        self.stop_event.set()
+        if self.thread:self.thread.join(timeout=2)
+        return {'applicable':os.name=='nt' or sys.platform=='darwin','sample_interval_ms':50,'samples':self.samples,
+                'baseline_visible_consoles':self.baseline,'new_visible_consoles':self.unexpected,
+                'baseline_process_observations':self.baseline_details,'new_process_observations':self.unexpected_details,
+                'error':self.error or ('observer_did_not_stop' if self.thread and self.thread.is_alive() else None),
+                'mac_terminal_apps': sorted(MacTerminalWindows.owners) if sys.platform == 'darwin' else None,
+                'scope':'Visible console/window snapshots during actual packaged journey; sub-sample flashes and unrelated ambient UI remain outside attribution.',
+                'diagnostic_scope':'At most 32 baseline and 32 new rows, one limited read-only process/parent observation and one window visibility/rectangle/cloaking snapshot each. No title, arguments, environment or memory read; no wait, attach or control. Window snapshots are non-atomic; style/rectangle/cloaking and current parent metadata are not application causation, displayed-pixel proof or an exemption from the original console predicate.'}
+
+
+def run_packaged(args, inspected: dict) -> None:
+    # Must precede all creation, launch, manager mutation, and browser dispatch.
+    require_live_owner_contract()
+    if os.name != "nt" and sys.platform != "darwin":
+        raise FixtureBlocked("The live fixture is only for Windows and macOS")
+    expected_os = "windows" if os.name == "nt" else "macos"
+    if inspected["record"]["os"] != expected_os:
+        raise ValueError("Package belongs to another operating system")
+    node = verify_tool(args.node, args.node_sha256)
+    playwright = verify_tool(args.playwright_module, args.playwright_sha256)
+    browser = verify_tool(args.browser, args.browser_sha256)
+    mac_launch = bool(args.mac_launch_services)
+    if mac_launch and (sys.platform != 'darwin' or inspected['record'].get('mac_bundle_layout') != 1):
+        raise FixtureBlocked('LaunchServices requires the exact Mac GUI package layout')
+    before = [snapshot(p.absolute()) for p in args.preserve]
+    # This directory is deliberately not TemporaryDirectory: any failure retains
+    # all evidence and partial homes. Checked cleanup is only a successful phase.
+    root = Path(tempfile.mkdtemp(prefix="Observatory actual onboarding café ")).resolve()
+    evidence = args.evidence.resolve()
+    evidence.mkdir(parents=True, exist_ok=False)
+    if mac_launch:
+        help_result = os_command(['/usr/bin/open', '-h'], timeout=10)
+        help_bytes = help_result.stdout + help_result.stderr
+        (evidence/'launchservices-open-help.txt').write_bytes(help_bytes)
+        if help_result.returncode not in (0, 1):
+            raise FixtureBlocked('Installed open help was unavailable; no application dispatched')
+        require_open_options(help_bytes.decode('utf-8', errors='strict'))
+    extracted = root / "download"
+    extracted.mkdir()
+    with zipfile.ZipFile(inspected["archive"]) as source:
+        for info in source.infolist():
+            target = extracted.joinpath(*member_path(info.filename).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with source.open(info) as incoming, target.open("xb") as output:
+                for block in iter(lambda: incoming.read(1024 * 1024), b""):
+                    output.write(block)
+            target.chmod((info.external_attr >> 16) & 0o777 or 0o644)
+    binary = extracted.joinpath(*member_path(inspected["record"]["entry"]).parts)
+    if digest(binary) != inspected["record"]["binary_sha256"]:
+        raise AssertionError("Transport extraction changed the application")
+    sentinel = root / "retained-sentinel"
+    sentinel.mkdir()
+    (sentinel / "unchanged.txt").write_text("existing installation sentinel; not a real enrolled home\n")
+    before += [snapshot(sentinel), snapshot(sentinel / "unchanged.txt")]
+    inputs = {"schema": 1, "root": str(root), "home": str(root / "Observatory 日本"),
+              "binary": str(binary), "binary_sha256": inspected["record"]["binary_sha256"],
+              "evidence": str(evidence), "playwright_module": playwright, "browser": browser,
+              "instance": inspected["instance"], "slack": inspected["slack"],
+              "operation_id": str(uuid.uuid4()), "limits": LIVE_LIMITS,
+              "application_env": os_only_environment()}
+    inputs['launch_mode'] = 'mac_launch_services' if mac_launch else 'direct_payload'
+    if os.name == 'nt' or mac_launch:
+        inputs.update(fixture_python=str(Path(sys.executable).resolve()),
+                      fixture_python_sha256=digest(Path(sys.executable).resolve()),
+                      fixture_controller=str(Path(__file__).resolve()),
+                      fixture_controller_sha256=digest(Path(__file__).resolve()))
+    if mac_launch:
+        inputs.update(app=str(extracted/'Observatory.app'),
+                      gui=str(extracted.joinpath(*member_path(inspected['record']['gui_entry']).parts)),
+                      gui_sha256=inspected['record']['gui_sha256'])
+    input_path = root / "browser-inputs.json"
+    with input_path.open("x", encoding="utf-8") as output:
+        json.dump(inputs, output)
+    if os.name != "nt": input_path.chmod(0o600)
+    result = {"schema": 1, "status": "running", "root": str(root), "before": before,
+              "package": inspected["record"], "launch_mode":inputs['launch_mode'], "limits": LIVE_LIMITS}
+    outcome = evidence / "completion.json"
+    outcome.write_text(json.dumps(result, indent=2) + "\n")
+    console=ConsoleMonitor()
+    try:
+        console.start()
+        driver = Path(__file__).with_name("consumer-setup-live-browser.mjs")
+        controller = subprocess.Popen([node, str(driver), str(input_path)],
+                                      env=os_only_environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      creationflags=0x08000000 if os.name == "nt" else 0)
+        result["browser_controller_pid"] = controller.pid
+        try:
+            stdout, stderr = controller.communicate(timeout=900)
+        except subprocess.TimeoutExpired:
+            # Tell the fixture to stop before any subsequent browser mutation.
+            # Do not kill a controller mid-dispatch and then erase its children.
+            (root / "fixture-abort").write_text("outer observer deadline; no later action\n")
+            raise
+        (evidence / "browser.stdout").write_bytes(stdout)
+        (evidence / "browser.stderr").write_bytes(stderr)
+        if controller.returncode != 0:
+            raise AssertionError("Actual browser journey failed; partial homes are retained")
+        result["browser"] = json.loads((evidence / "browser-result.json").read_text())
+        if result["browser"].get("status") != "local_setup_ready":
+            raise AssertionError("Browser did not prove the complete local handoff")
+        result['console_observation']=console.finish()
+        if console.error or console.unexpected or console.thread and (console.thread.is_alive() or console.samples==0):
+            raise AssertionError('The actual journey has an unavailable observer or a new visible console')
+        # Filled only with the exact owner contract, never generic raw removal.
+        result["cleanup"] = {"state":"started", "audit":str(evidence/"owned-cleanup.json")}
+        outcome.write_text(json.dumps(result, indent=2) + "\n")
+        result["cleanup"] = checked_owned_cleanup(result["browser"], evidence)
+        result["after"] = require_preserved(before)
+        result["status"] = "passed"
+    except BaseException as error:
+        result["status"] = "failed_or_unknown_retained"
+        result["error_type"] = type(error).__name__
+        retain_cleanup_outcome(result, evidence)
+        try: result["after"] = require_preserved(before)
+        except Exception as changed: result["preservation_error"] = type(changed).__name__
+        raise
+    finally:
+        result.setdefault('console_observation',console.finish())
+        outcome.write_text(json.dumps(result, indent=2) + "\n")
+
+
+def os_command(argv, *, timeout=30):
+    return subprocess.run([str(a) for a in argv], stdin=subprocess.DEVNULL,
+                          capture_output=True, timeout=timeout, env=os_only_environment(),
+                          creationflags=0x08000000 if os.name == "nt" else 0)
+
+
+def powershell(script: str, data):
+    # Fixed source, separately encoded private fixture inputs; no shell expansion.
+    payload = base64.b64encode(json.dumps(data).encode()).decode()
+    source = ("$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';"
+              "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
+              "$d=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"
+              + payload + "')));" + script)
+    tool = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    result = os_command([tool, "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                         base64.b64encode(source.encode("utf-16-le")).decode()])
+    if result.returncode:
+        raise AssertionError("The exact owned-profile OS observation/action was refused")
+    return json.loads(result.stdout.decode("utf-8-sig"))
+
+
+def windows_arguments(value: str) -> list[str]:
+    from ctypes import wintypes as w
+    shell = ctypes.WinDLL("shell32", use_last_error=True)
+    shell.CommandLineToArgvW.argtypes = [w.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    shell.CommandLineToArgvW.restype = ctypes.POINTER(w.LPWSTR)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.LocalFree.argtypes = [w.HLOCAL]; kernel.LocalFree.restype = w.HLOCAL
+    count = ctypes.c_int(); argv = shell.CommandLineToArgvW(value, ctypes.byref(count))
+    if not argv: raise ctypes.WinError(ctypes.get_last_error())
+    try: return [argv[i] for i in range(count.value)]
+    finally: kernel.LocalFree(argv)
+
+
+def path_equal(first: str | Path, second: str | Path) -> bool:
+    # Resolve both typed paths and compare canonical spelling AND identity. Windows may
+    # report one spelling through DOS and another through the extended prefix;
+    # Mac APFS lookup may use canonically equivalent Unicode spelling. NFC only
+    # qualifies the spelling check: samefile still queries the original resolved
+    # paths, never normalized replacements. Different canonical names/directories
+    # and copies remain unequal; the resolved sealed interpreter symlink is equal.
+    a,b=Path(first).resolve(strict=True),Path(second).resolve(strict=True)
+    def key(path):
+        value=str(path)
+        if os.name=='nt':
+            if value.startswith('\\\\?\\UNC\\'): value='\\\\'+value[8:]
+            elif value.startswith('\\\\?\\'): value=value[4:]
+            value=os.path.normcase(value)
+        elif sys.platform=='darwin':
+            value=unicodedata.normalize('NFC',value)
+        return value
+    return key(a)==key(b) and os.path.samefile(a,b)
+
+
+def arguments_equal(actual: list[str], expected: list[str], path_indices: set[int]) -> bool:
+    if len(actual) != len(expected): return False
+    return all(path_equal(a, b) if index in path_indices else a == b
+               for index, (a, b) in enumerate(zip(actual, expected)))
+
+
+def retain_cleanup_outcome(result: dict, evidence: Path) -> None:
+    if 'cleanup' not in result:
+        result['cleanup'] = {'state':'not_attempted'}
+    elif isinstance(result['cleanup'],dict) and result['cleanup'].get('state') == 'started':
+        result['cleanup'] = {'state':'failed_or_unknown_after_start',
+                             'audit':str(evidence/'owned-cleanup.json')}
+
+
+def require_open_options(help_text: str) -> None:
+    # The actual host's installed tool is authoritative. Do not turn a missing
+    # LaunchServices feature into a direct-executable fallback.
+    for flag in ('-n', '-W', '--stdout', '--stderr', '--args'):
+        if re.search(r'(?<![\w-])' + re.escape(flag) + r'(?![\w-])', help_text) is None:
+            raise FixtureBlocked('Installed open does not advertise the required launch controls')
+
+
+def mac_arguments_bytes(raw: bytes) -> list[str]:
+    # KERN_PROCARGS2: argc, executable path, alignment NULs, then argc argv
+    # strings. Environment bytes are deliberately not decoded or returned.
+    if not 5 <= len(raw) <= 512 * 1024:
+        raise ValueError('Bounded Mac process arguments unavailable')
+    argc = int.from_bytes(raw[:4], sys.byteorder, signed=True)
+    if not 1 <= argc <= 32:
+        raise ValueError('Unexpected Mac argument count')
+    at = raw.index(b'\0', 4) + 1
+    while at < len(raw) and raw[at] == 0:
+        at += 1
+    result = []
+    for _ in range(argc):
+        end = raw.index(b'\0', at)
+        result.append(os.fsdecode(raw[at:end])); at = end + 1
+    return result
+
+
+def mac_arguments(pid: int) -> list[str]:
+    libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint,
+                           ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                           ctypes.c_void_p, ctypes.c_size_t]
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, exact PID
+    size = ctypes.c_size_t(512 * 1024)
+    buf = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        raise OSError('Exact Mac process arguments unavailable')
+    return mac_arguments_bytes(buf.raw[:size.value])
+
+
+def validate_desktop_runtime(runtime: dict, expected_hash: str) -> int:
+    pid = runtime.get('pid')
+    if type(pid) is not int or pid <= 0 or runtime.get('binary_sha256') != checked_hash(expected_hash):
+        raise AssertionError('Fresh desktop runtime does not identify the selected service')
+    return pid
+
+
+def private_read_json(path: Path, limit: int = 1024 * 1024) -> tuple[dict, bytes]:
+    ordinary(path)
+    info = path.stat()
+    if info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > limit:
+        raise AssertionError('Fixture observation is not private and bounded')
+    raw = path.read_bytes()
+    if len(raw) > limit:
+        raise AssertionError('Fixture observation grew beyond its limit')
+    return json.loads(raw), raw
+
+
+def private_create_json(path: Path, value: dict) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w') as output:
+        json.dump(value, output, indent=2); output.write('\n'); output.flush(); os.fsync(output.fileno())
+
+
+def mac_desktop_argument_check(actual: list[str], expected: list[str]) -> tuple[bool, dict]:
+    """Preserve exact argument comparison; retain content-free failure context.
+
+    Path comparison uses platform canonical spelling AND actual samefile. The
+    separately reported Unicode equality never authorizes another path or process.
+    The same length-first/short-circuit checks as arguments_equal are retained.
+    """
+    def field(value):
+        raw=os.fsencode(value)
+        return {'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
+    detail={'actual_count':len(actual),'expected_count':len(expected),
+            'actual_fields':[field(value) for value in actual],
+            'expected_fields':[field(value) for value in expected],'comparisons':[]}
+    if len(actual)!=len(expected): return False,detail
+    for index,(value,wanted) in enumerate(zip(actual,expected)):
+        same=path_equal(value,wanted) if index in {0,2} else value==wanted
+        detail['comparisons'].append({'index':index,'typed_path':index in {0,2},
+            'exact_check_passed':same,'raw_spelling_equal':value==wanted,
+            'nfc_spelling_equal':unicodedata.normalize('NFC',value)==unicodedata.normalize('NFC',wanted)})
+        if not same:return False,detail
+    return True,detail
+
+
+def retain_mac_observation_failure(witness_path: Path, value: dict, *, stop: bool) -> None:
+    """One private diagnostic write; diagnostic failure never replaces refusal."""
+    # Stderr is already retained by the existing browser controller on both
+    # success/failure. No environment, raw argv, capability or transcript data.
+    try:
+        path=witness_path.with_suffix('.stop-observation-failed.json' if stop else '.observation-failed.json')
+        private_create_json(path,value)
+    except BaseException as error:
+        value={**value,'diagnostic_write_error_type':type(error).__name__}
+    try:
+        raw=json.dumps(value,sort_keys=True)
+        if len(raw.encode('utf-8'))<=32768:
+            print('OBSERVATORY_MAC_OWNERSHIP '+raw,file=sys.stderr,flush=True)
+    except BaseException:
+        pass
+
+
+def mac_desktop_control(input_path: Path, witness_path: Path, *, stop: bool) -> dict:
+    """Fixture-only, exact fresh app observation/stop. Never target open's PID."""
+    if sys.platform != 'darwin':
+        raise FixtureBlocked('Mac desktop observer is not applicable')
+    inputs, input_bytes = private_read_json(input_path)
+    root = ordinary(Path(inputs['root']), directory=True).resolve(strict=True)
+    if (inputs.get('schema') != 1 or inputs.get('launch_mode') != 'mac_launch_services'
+            or root != input_path.parent.resolve(strict=True)
+            or root != witness_path.parent.resolve(strict=True)
+            or not re.fullmatch(r'mac-desktop-[12]\.json', witness_path.name)):
+        raise AssertionError('Exact fixture root/witness scope differs')
+    home = Path(inputs['home']); executable = Path(inputs['binary'])
+    if (home.parent != root or executable != root/'download/Observatory.app/Contents/MacOS/agent-observatory'
+            or digest(ordinary(executable)) != inputs['binary_sha256']):
+        raise AssertionError('Exact disposable home or service bytes differ')
+    expected_arguments = [str(executable), '--home', str(home), '--no-browser']
+    runtime, runtime_bytes = private_read_json(home/'runtime.json')
+    pid = validate_desktop_runtime(runtime, inputs['binary_sha256'])
+    process = OwnedProcess(pid, executable)
+    try:
+        if process.identity.get('uid') != os.getuid():
+            raise AssertionError('Desktop process belongs to another user')
+        actual_arguments=mac_arguments(pid)
+        arguments_match,argument_observation=mac_desktop_argument_check(actual_arguments,expected_arguments)
+        # Preserve the original short-circuit: no additional process query when
+        # argv already differs. A sampled mismatch does not permit stop/cleanup.
+        absent=process.absent() if arguments_match else None
+        if not arguments_match or absent:
+            retain_mac_observation_failure(witness_path,{
+                'schema':1,'phase':'initial_desktop_binding','stop_requested':stop,
+                'observed_unix_ns':str(time.time_ns()),'observed_monotonic_ns':str(time.monotonic_ns()),
+                'input_sha256':hashlib.sha256(input_bytes).hexdigest(),
+                'runtime_sha256':hashlib.sha256(runtime_bytes).hexdigest(),
+                'initial_process_identity':process.identity,'arguments_match':arguments_match,
+                'generation_absence_checked':arguments_match,'generation_absent':absent,
+                'argument_observation':argument_observation,
+                'scope':'Already-read arguments and typed-path identity comparison only; hashes/lengths, no raw arguments. Initial process identity is not a later generation query. No retry.'},stop=stop)
+            raise AssertionError('Desktop process home, arguments or generation differs')
+        observed = {'schema':1, 'input_sha256':hashlib.sha256(input_bytes).hexdigest(),
+                    'home':str(home), 'home_identity':directory_identity(home),
+                    'executable':str(executable), 'binary_sha256':inputs['binary_sha256'],
+                    'process_identity':process.identity, 'arguments':expected_arguments,
+                    'runtime_sha256':hashlib.sha256(runtime_bytes).hexdigest(),
+                    'proof':'runtime_record_and_same_user_exact_image_home_arguments_and_birth'}
+        if not stop:
+            private_create_json(witness_path, observed)
+            return observed
+        saved, _ = private_read_json(witness_path)
+        if saved != observed:
+            raise AssertionError('Captured desktop ownership changed; no stop dispatched')
+        intent = witness_path.with_suffix('.stop-intent.json')
+        private_create_json(intent, {'schema':1, 'witness_sha256':digest(witness_path),
+                                     'process_identity':process.identity, 'effect':'one_SIGTERM'})
+        # Same-generation, image and typed argv are rechecked after persistence.
+        if (process.absent() or not arguments_equal(mac_arguments(pid), expected_arguments, {0, 2})
+                or digest(executable) != inputs['binary_sha256'] or process.absent()):
+            raise AssertionError('Captured desktop changed before stop; intent preserved')
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 10
+        while not process.absent():
+            if time.monotonic() >= deadline:
+                raise AssertionError('Captured desktop stop outcome is unknown')
+            time.sleep(.1)
+        result = {'schema':1,'process_identity':process.identity,'same_generation_absent':True,
+                  'stop_dispatches':1,'proof':observed['proof']}
+        private_create_json(witness_path.with_suffix('.stopped.json'), result)
+        return result
+    finally:
+        process.close()
+
+
+class OwnedProcess:
+    """Observer handle/generation only; never grants a kill or replacement."""
+    def __init__(self, pid: int, executable: Path):
+        if type(pid) is not int or pid <= 0: raise AssertionError("Missing exact owned PID")
+        self.pid = pid; self.handle = None
+        if os.name == "nt":
+            from ctypes import wintypes as w
+            self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            self.kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]; self.kernel.OpenProcess.restype = w.HANDLE
+            self.kernel.QueryFullProcessImageNameW.argtypes = [w.HANDLE,w.DWORD,w.LPWSTR,ctypes.POINTER(w.DWORD)]
+            self.kernel.GetProcessTimes.argtypes = [w.HANDLE,*([ctypes.POINTER(w.FILETIME)]*4)]
+            self.kernel.WaitForSingleObject.argtypes = [w.HANDLE,w.DWORD]
+            self.kernel.CloseHandle.argtypes = [w.HANDLE]
+            self.handle = self.kernel.OpenProcess(0x100000 | 0x1000, False, pid)
+            if not self.handle: raise ctypes.WinError(ctypes.get_last_error())
+            name = ctypes.create_unicode_buffer(32768); size = w.DWORD(32768)
+            if not self.kernel.QueryFullProcessImageNameW(self.handle,0,name,ctypes.byref(size)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not path_equal(name.value,executable): raise AssertionError("Owned executable changed")
+            created, exited, kernel, user = (w.FILETIME() for _ in range(4))
+            if not self.kernel.GetProcessTimes(self.handle,*map(ctypes.byref,(created,exited,kernel,user))):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.identity = {"pid":pid,"creation_time_100ns":str((created.dwHighDateTime << 32) | created.dwLowDateTime)}
+            if self.kernel.WaitForSingleObject(self.handle,0) != 258:
+                raise AssertionError("Expected owned generation is no longer running")
+        else:
+            self.identity = self.mac_identity(pid)
+            if self.identity is None: raise AssertionError("Expected owned generation is absent")
+            lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            lib.proc_pidpath.argtypes = [ctypes.c_int,ctypes.c_void_p,ctypes.c_uint32]
+            name = ctypes.create_string_buffer(4096)
+            if lib.proc_pidpath(pid,name,len(name)) <= 0: raise OSError("Process executable unavailable")
+            if not path_equal(os.fsdecode(name.value),executable) or self.mac_identity(pid) != self.identity:
+                raise AssertionError("Owned process identity changed")
+
+    @staticmethod
+    def mac_identity(pid):
+        c = ctypes
+        class Info(c.Structure):
+            _fields_ = [(n,c.c_uint32) for n in ('flags','status','xstatus','pid','ppid','uid','gid','ruid','rgid','svuid','svgid','rfu')] + [('comm',c.c_char*16),('name',c.c_char*32)] + [(n,c.c_uint32) for n in ('nfiles','pgid','pjobc','e_tdev','e_tpgid')] + [('nice',c.c_int32),('seconds',c.c_uint64),('microseconds',c.c_uint64)]
+        lib = c.CDLL('/usr/lib/libproc.dylib',use_errno=True)
+        lib.proc_pidinfo.argtypes = [c.c_int,c.c_int,c.c_uint64,c.c_void_p,c.c_int]
+        value = Info(); n = lib.proc_pidinfo(pid,3,0,c.byref(value),c.sizeof(value))
+        if n == 0 and c.get_errno() == 3: return None
+        if n != c.sizeof(value) or value.pid != pid: raise OSError('Process generation unavailable')
+        if value.status == 5: return None
+        return {'pid':pid,'start_seconds':str(value.seconds),'start_microseconds':str(value.microseconds),'uid':value.uid}
+
+    def absent(self):
+        if os.name == 'nt':
+            result = self.kernel.WaitForSingleObject(self.handle,0)
+            if result not in (0,258): raise OSError('Process exit observation unavailable')
+            return result == 0
+        return self.mac_identity(self.pid) != self.identity
+
+    def close(self):
+        if self.handle: self.kernel.CloseHandle(self.handle); self.handle = None
+
+
+def task_profile(name: str):
+    return powershell(r"""
+        $scheduler=New-Object -ComObject Schedule.Service
+        $scheduler.Connect()
+        $folder=$scheduler.GetFolder('\')
+        try { $task=$folder.GetTask($d[0]) } catch {
+            $e=$_.Exception
+            while ($null -ne $e) {
+                if ($e.HResult -eq -2147024894) { @{absent=$true}|ConvertTo-Json -Compress; exit }
+                $e=$e.InnerException
+            }
+            throw
+        }
+        $definition=$task.Definition
+        $principal=$definition.Principal
+        if ($principal.UserId -like 'S-1-*') { $sid=$principal.UserId }
+        else { $sid=([Security.Principal.NTAccount]$principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value }
+        @{absent=$false;xml=$task.Xml;owner_sid=$sid;current_sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
+          run_level=$principal.RunLevel;logon_type=$principal.LogonType;action_count=$definition.Actions.Count
+        }|ConvertTo-Json -Compress
+    """, [name])
+
+
+def verify_limited_task_action(check: dict) -> None:
+    # The scheduler omits default fields from exported XML. Require the
+    # effective COM principal and action count even when RunLevel is omitted.
+    expected = {'action_count': 1, 'exec_count': 1, 'run_level': 0, 'logon_type': 3}
+    if (any(type(check[key]) is not int or check[key] != value for key, value in expected.items())
+            or check['xml_run_level'] not in (None, 'LeastPrivilege')):
+        raise AssertionError('Task action or privilege changed')
+
+
+def checked_owned_cleanup(browser_result: dict, evidence: Path) -> dict:
+    """Exact new fixture registrations only; Instance has no consumer retire CLI."""
+    slack = browser_result['slack_cleanup']; bound = browser_result['instance_cleanup']
+    if slack['retired']['state'] != 'retired' or slack['retired']['control_current'] is not True:
+        raise AssertionError('Slack checked retirement is not proved')
+    home = ordinary(Path(bound['home']),directory=True)
+    if directory_identity(home)!=bound['home_identity']: raise AssertionError('Instance home identity changed')
+    identifier = str(uuid.UUID(bound['instance_id']))
+    if home.name != browser_result['endpoint_id'] or not path_equal(home,browser_result['instance_home']):
+        raise AssertionError('New fixture home changed')
+    install_path = ordinary(home/'install.json')
+    if digest(install_path) != bound['install_sha256']: raise AssertionError('Installation metadata changed')
+    install = json.loads(install_path.read_bytes()); config = json.loads((home/'config.json').read_bytes())['config']
+    if install['instance_id'] != identifier or config['instance_id'] != identifier:
+        raise AssertionError('Fixture installation identity differs')
+    binary = ordinary(Path(bound['binary']))
+    if not path_equal(binary.parent,home/'bin') or digest(binary) != bound['binary_sha256']:
+        raise AssertionError('Installed executable changed')
+    helper = ordinary(Path.home()/'.local/share/constellation-updates'/identifier,directory=True)
+    helper_identity=directory_identity(helper)
+    registration = ordinary(helper/'registration.json'); registration_sha = digest(registration)
+    registered = json.loads(registration.read_bytes())
+    if registered['instance_id'] != identifier or not path_equal(registered['home'],home) or not path_equal(registered['state'],helper):
+        raise AssertionError('Helper registration does not own this exact fixture')
+    private = install['private_python']; python = ordinary(home/'support'/private['directory']/(private['windowless_executable'] if os.name=='nt' else private['executable']))
+    helper_args = ['-I','-X','utf8',str(helper/'worker.py'),'--registration',str(registration)]
+    app_args = ['serve','--home',str(home)] + (['--log-directory',str(home)] if os.name=='nt' else [])
+    jobs = []; processes = []; audit = {'schema':1,'instance_id':identifier,'home':str(home),'helper':str(helper),
+                                      'registration_sha256':registration_sha,'jobs':jobs,'processes':[],
+                                      'scope':'Disposable fixture-owned OS cleanup; Instance exposes no consumer retirement command'}
+    audit_path = evidence/'owned-cleanup.json'
+    def save(): audit_path.write_text(json.dumps(audit,indent=2)+'\n')
+    try:
+        for role,exe,argv in [('instance',binary,app_args),('helper',python,helper_args)]:
+            path_indices = {2,4} if role=='instance' and os.name=='nt' else {2} if role=='instance' else {3,5}
+            if os.name == 'nt':
+                name = ('AgentInstance-' if role=='instance' else 'constellation-updates-')+identifier
+                profile = task_profile(name)
+                if profile['absent'] or profile['owner_sid'] != profile['current_sid']: raise AssertionError('Task owner changed')
+                xml = profile['xml']; tree = ET.fromstring(xml); ns={'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+                actions = tree.findall('t:Actions/t:Exec',ns)
+                xml_level=tree.findtext('t:Principals/t:Principal/t:RunLevel',namespaces=ns)
+                check={'role':role,'action_count':profile['action_count'],
+                    'exec_count':len(actions),'run_level':profile['run_level'],'logon_type':profile['logon_type'],
+                    'xml_run_level':xml_level,'profile_sha256':hashlib.sha256(xml.encode()).hexdigest()}
+                audit.setdefault('task_checks',[]).append(check);save()
+                verify_limited_task_action(check)
+                if not path_equal(actions[0].findtext('t:Command',namespaces=ns),exe): raise AssertionError('Task executable changed')
+                if not arguments_equal(windows_arguments('fixture '+(actions[0].findtext('t:Arguments',default='',namespaces=ns)))[1:],argv,path_indices):
+                    raise AssertionError('Task arguments changed')
+                if role == 'instance': pid = bound['pid']
+                else:
+                    rows = powershell("@(Get-CimInstance Win32_Process | Where-Object {$_.Name -eq $d[0]} | Select-Object ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Compress",[exe.name])
+                    if isinstance(rows,dict): rows=[rows]
+                    matching=[]
+                    for row in rows or []:
+                        if not row.get('ExecutablePath') or not row.get('CommandLine'): continue
+                        actual=windows_arguments(row['CommandLine'])
+                        if (path_equal(row['ExecutablePath'],exe) and actual and path_equal(actual[0],exe)
+                                and arguments_equal(actual[1:],argv,path_indices)):
+                            matching.append(row)
+                    if len(matching)!=1: raise AssertionError('Exact helper process is unavailable or ambiguous')
+                    pid=int(matching[0]['ProcessId'])
+                job={'role':role,'name':name,'profile':profile,'profile_sha256':hashlib.sha256(xml.encode()).hexdigest()}
+            else:
+                name=('io.agent-instance.' if role=='instance' else 'io.constellation-updates-')+identifier
+                file=ordinary(Path.home()/'Library/LaunchAgents'/(name+'.plist')); raw=file.read_bytes(); profile=plistlib.loads(raw)
+                actual=profile.get('ProgramArguments')
+                if profile.get('Label')!=name or not isinstance(actual,list) or len(actual)!=len(argv)+1 or not path_equal(actual[0],exe) or not arguments_equal(actual[1:],argv,path_indices):
+                    raise AssertionError('LaunchAgent profile changed')
+                service=f'gui/{os.getuid()}/{name}'; found=os_command(['/bin/launchctl','print',service])
+                match=re.search(rb'(?m)^\s*pid = (\d+)\s*$',found.stdout)
+                if found.returncode or not match: raise AssertionError('Exact LaunchAgent PID unavailable')
+                pid=int(match[1])
+                if role=='instance' and pid!=bound['pid']: raise AssertionError('Instance generation changed before cleanup')
+                job={'role':role,'name':name,'service':service,'file':str(file),'profile_sha256':hashlib.sha256(raw).hexdigest()}
+            process=OwnedProcess(pid,exe);processes.append(process);job['process_identity']=process.identity;jobs.append(job)
+        audit['processes']=[p.identity for p in processes]; save()
+        # Preserve the exact observed registration/profile until each stop. No
+        # service query is used as permission to stop a different generation.
+        for job,process in reversed(list(zip(jobs,processes))):
+            if digest(registration)!=registration_sha or process.absent(): raise AssertionError('Owner changed before stop')
+            if os.name=='nt':
+                if task_profile(job['name'])!=job['profile']: raise AssertionError('Task definition changed before stop')
+                job['stop_dispatch_outcome']='intent_or_unknown';save()
+                powershell("Stop-ScheduledTask -TaskName $d[0] -TaskPath '\\';@{accepted=$true}|ConvertTo-Json -Compress",[job['name']])
+            else:
+                if digest(Path(job['file']))!=job['profile_sha256']: raise AssertionError('LaunchAgent changed before stop')
+                job['stop_dispatch_outcome']='intent_or_unknown';save()
+                stopped=os_command(['/bin/launchctl','bootout',job['service']])
+                if stopped.returncode: raise AssertionError('Exact LaunchAgent stop was not acknowledged')
+            job['stop_dispatched']=True;job['stop_dispatch_outcome']='acknowledged';save()
+        deadline=time.monotonic()+20
+        while not all(p.absent() for p in processes):
+            if time.monotonic()>=deadline: raise AssertionError('Same owned process generation remains alive')
+            time.sleep(.1)
+        audit['same_generations_absent']=True;save()
+        for job in jobs:
+            if os.name=='nt':
+                if task_profile(job['name'])!=job['profile']: raise AssertionError('Task definition changed before retirement')
+                job['retirement_dispatch_outcome']='intent_or_unknown';save()
+                powershell("Unregister-ScheduledTask -TaskName $d[0] -TaskPath '\\' -Confirm:$false;@{accepted=$true}|ConvertTo-Json -Compress",[job['name']])
+                if task_profile(job['name'])['absent'] is not True: raise AssertionError('Task absence unconfirmed')
+            else:
+                inactive=os_command(['/bin/launchctl','print',job['service']])
+                if inactive.returncode==0 or not any(s in inactive.stderr for s in (b'Could not find service',b'No such process')): raise AssertionError('LaunchAgent absence unconfirmed')
+                if digest(Path(job['file']))!=job['profile_sha256']: raise AssertionError('LaunchAgent file changed')
+                job['retirement_dispatch_outcome']='intent_or_unknown';save()
+                Path(job['file']).unlink()
+            job['registration_absent']=True;job['retirement_dispatch_outcome']='absence_confirmed';save()
+        if digest(registration)!=registration_sha: raise AssertionError('Helper registration changed')
+        if directory_identity(home)!=bound['home_identity'] or directory_identity(helper)!=helper_identity:
+            raise AssertionError('An owned directory identity changed')
+        slack_home=ordinary(Path(slack['home']),directory=True)
+        if (directory_identity(slack_home)!=slack['home_identity']
+                or slack_home.name!='observatory-'+str(uuid.UUID(slack['operation_id']))
+                or json.loads((slack_home/'native-installation.json').read_bytes())['id']!=slack['id']
+                or digest(slack_home/'adapter.json')!=slack['config_sha256']
+                or digest(Path(slack['executable']))!=slack['sha256']):
+            raise AssertionError('Retired Slack fixture identity changed')
+        # Retirement is complete. Removal is one strict attempt, never a retry
+        # over an unknown process, a foreign home, or an old installation.
+        audit['homes_removed']=[]
+        for owned in (helper,home,slack_home):
+            audit['removal_intent_or_unknown']=str(owned);save()
+            shutil.rmtree(owned);audit['homes_removed'].append(str(owned));audit.pop('removal_intent_or_unknown');save()
+        audit.update(passed=True,homes_removed=[str(helper),str(home),str(slack_home)],slack_retirement=slack['retired']);save()
+        return audit
+    except BaseException as error:
+        audit.update(passed=False,error_type=type(error).__name__,unknowns_retained=True);save();raise
+    finally:
+        for process in processes: process.close()
+
+
+class OfflineTests(unittest.TestCase):
+    def test_windows_task_cleanup_requires_effective_interactive_limited_principal(self):
+        limited = {'action_count': 1, 'exec_count': 1, 'run_level': 0, 'logon_type': 3,
+                   'xml_run_level': None}
+        verify_limited_task_action(limited)
+        verify_limited_task_action(dict(limited, xml_run_level='LeastPrivilege'))
+        for field, value in [('run_level', 1), ('run_level', None), ('run_level', False),
+                             ('logon_type', 2), ('action_count', 2), ('exec_count', 0),
+                             ('xml_run_level', 'HighestAvailable')]:
+            with self.subTest(field=field, value=value), self.assertRaises(AssertionError):
+                verify_limited_task_action(dict(limited, **{field: value}))
+
+    @unittest.skipIf(os.name=='nt','Portable Mac filesystem model uses Unix path spelling')
+    def test_mac_canonical_unicode_spelling_still_requires_actual_file_identity(self):
+        from unittest.mock import patch
+        expected=Path('/private/caf\u00e9/payload')
+        actual=Path(unicodedata.normalize('NFD',str(expected)))
+        with patch(__name__+'.sys.platform','darwin'), \
+                patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict: path), \
+                patch(__name__+'.os.path.samefile',return_value=True) as identity:
+            self.assertTrue(path_equal(actual,expected))
+            identity.assert_called_once_with(actual,expected)
+        with patch(__name__+'.sys.platform','darwin'), \
+                patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict: path), \
+                patch(__name__+'.os.path.samefile',return_value=False) as identity:
+            self.assertFalse(path_equal(actual,expected))
+            identity.assert_called_once_with(actual,expected)
+        with patch(__name__+'.sys.platform','linux'), \
+                patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict: path), \
+                patch(__name__+'.os.path.samefile',return_value=True) as identity:
+            self.assertFalse(path_equal(actual,expected));identity.assert_not_called()
+
+    @unittest.skipIf(os.name=='nt','Portable Mac filesystem model uses Unix path spelling')
+    def test_mac_unicode_key_never_equates_compatibility_case_or_foreign_scope(self):
+        from unittest.mock import patch
+        for actual,expected in [('/private/\ufb00/payload','/private/ff/payload'),
+                ('/private/CAFE/payload','/private/cafe/payload'),
+                ('/other/caf\u00e9/payload','/private/caf\u00e9/payload')]:
+            with self.subTest(actual=actual),patch(__name__+'.sys.platform','darwin'), \
+                    patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict: path), \
+                    patch(__name__+'.os.path.samefile',return_value=True) as identity:
+                self.assertFalse(path_equal(actual,expected));identity.assert_not_called()
+
+    @unittest.skipIf(os.name=='nt','Portable Mac filesystem model uses Unix path spelling')
+    def test_mac_unicode_lookup_uses_real_file_identity_and_refuses_distinct_files(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();first=root/'caf\u00e9';first.write_bytes(b'first')
+            second=root/unicodedata.normalize('NFD',first.name)
+            try:
+                with second.open('xb') as output: output.write(b'different')
+            except FileExistsError:
+                equivalent=True  # Native normalization-insensitive filesystem.
+            else:
+                equivalent=False  # Linux ordinary filesystem keeps distinct names.
+            with patch(__name__+'.sys.platform','darwin'):
+                self.assertEqual(path_equal(first,second),equivalent)
+                other=root/'other';other.write_bytes(b'first')
+                self.assertFalse(path_equal(first,other))
+                linked=root/'different-hardlink';os.link(first,linked)
+                self.assertFalse(path_equal(first,linked))
+
+    @unittest.skipIf(os.name=='nt','Portable fake Mac process uses Unix path spelling')
+    def test_mac_foreign_image_and_changed_generation_still_refuse(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();expected=root/'owned';expected.write_bytes(b'payload')
+            foreign=root/'foreign';foreign.write_bytes(b'payload')
+            original={'pid':42,'uid':os.getuid(),'start_seconds':'1','start_microseconds':'2'}
+            changed={**original,'start_microseconds':'3'}
+            for image,generations in [(foreign,[original]),(expected,[original,changed])]:
+                def image_path(pid,buffer,size):
+                    buffer.value=os.fsencode(image)
+                    return len(buffer.value)
+                lib=SimpleNamespace(proc_pidpath=Mock(side_effect=image_path))
+                with self.subTest(image=image),patch(__name__+'.sys.platform','darwin'), \
+                        patch(__name__+'.ctypes.CDLL',return_value=lib), \
+                        patch.object(OwnedProcess,'mac_identity',side_effect=generations), \
+                        self.assertRaisesRegex(AssertionError,'Owned process identity changed'):
+                    OwnedProcess(42,expected)
+
+    def test_mac_exact_launcher_argv_layout_keeps_unicode_spaces_and_excludes_environment(self):
+        args=[b'/private/app/agent-observatory',b'--home','/private/Observatory café 日本'.encode(),b'--no-browser']
+        for padding in (0,1,7):
+            raw=len(args).to_bytes(4,sys.byteorder,signed=True)+b'/different/bare/exec-path\0'+b'\0'*padding+b'\0'.join(args)+b'\0TOKEN=not-returned\0'
+            self.assertEqual(mac_arguments_bytes(raw),[os.fsdecode(value) for value in args])
+            self.assertNotIn('TOKEN',repr(mac_arguments_bytes(raw)))
+
+    def test_mac_argument_diagnostics_never_authorize_unicode_or_changed_flags(self):
+        from unittest.mock import patch
+        expected=['/private/café/payload','--home','/private/home','--no-browser']
+        actual=[unicodedata.normalize('NFD',expected[0]),*expected[1:]]
+        with patch(__name__+'.path_equal',return_value=False) as check:
+            matches,details=mac_desktop_argument_check(actual,expected)
+        self.assertFalse(matches);check.assert_called_once_with(actual[0],expected[0])
+        self.assertTrue(details['comparisons'][0]['nfc_spelling_equal'])
+        self.assertFalse(details['comparisons'][0]['exact_check_passed'])
+        self.assertNotIn(expected[0],json.dumps(details))
+        self.assertNotIn(actual[0],json.dumps(details))
+        with patch(__name__+'.path_equal',return_value=True) as check:
+            matches,_=mac_desktop_argument_check(expected,expected)
+            self.assertTrue(matches);self.assertEqual(check.call_count,2)
+            check.reset_mock();matches,_=mac_desktop_argument_check(expected[:-1],expected)
+            self.assertFalse(matches);check.assert_not_called()
+            check.reset_mock();matches,_=mac_desktop_argument_check([expected[0],'--different',*expected[2:]],expected)
+            self.assertFalse(matches);check.assert_called_once()
+
+    @unittest.skipIf(os.name=='nt','Portable fake Mac owner requires Unix ownership')
+    def test_mac_argv_refusal_retains_diagnostic_without_generation_query_or_stop(self):
+        from unittest.mock import patch
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();home=root/'fresh';home.mkdir()
+            executable=root/'download/Observatory.app/Contents/MacOS/agent-observatory'
+            executable.parent.mkdir(parents=True);executable.write_bytes(b'inert')
+            inputs={'schema':1,'root':str(root),'home':str(home),'binary':str(executable),
+                    'binary_sha256':digest(executable),'launch_mode':'mac_launch_services'}
+            input_path=root/'browser-inputs.json';private_create_json(input_path,inputs)
+            private_create_json(home/'runtime.json',{'pid':42,'binary_sha256':digest(executable)})
+            witness=root/'mac-desktop-1.json'
+            class FakeProcess:
+                def __init__(self,*_):self.identity={'pid':42,'uid':os.getuid(),'start_seconds':'1','start_microseconds':'2'}
+                def absent(self):raise AssertionError('No generation query permitted after argument mismatch')
+                def close(self):pass
+            actual=[str(executable),'--unexpected-private-argument',str(home),'--no-browser']
+            captured=io.StringIO()
+            with patch(__name__+'.sys.platform','darwin'),patch(__name__+'.OwnedProcess',FakeProcess), \
+                    patch(__name__+'.mac_arguments',return_value=actual),patch(__name__+'.os.kill') as kill, \
+                    contextlib.redirect_stderr(captured),self.assertRaisesRegex(AssertionError,'Desktop process home, arguments or generation differs'):
+                mac_desktop_control(input_path,witness,stop=False)
+            kill.assert_not_called();self.assertFalse(witness.exists())
+            observation=json.loads(witness.with_suffix('.observation-failed.json').read_bytes())
+            self.assertFalse(observation['arguments_match']);self.assertFalse(observation['generation_absence_checked'])
+            self.assertIsNone(observation['generation_absent'])
+            self.assertNotIn('--unexpected-private-argument',captured.getvalue())
+            self.assertIn('OBSERVATORY_MAC_OWNERSHIP ',captured.getvalue())
+
+    def test_mac_diagnostic_write_failure_cannot_replace_original_refusal(self):
+        from unittest.mock import patch
+        import contextlib
+        import io
+        captured=io.StringIO()
+        with patch(__name__+'.private_create_json',side_effect=FileExistsError('never exposed')),contextlib.redirect_stderr(captured):
+            retain_mac_observation_failure(Path('/inert/mac-desktop-1.json'),{'schema':1,'arguments_match':False},stop=False)
+        self.assertIn('FileExistsError',captured.getvalue());self.assertNotIn('never exposed',captured.getvalue())
+
+    def test_console_details_do_not_change_original_window_predicate(self):
+        from unittest.mock import patch
+        monitor=ConsoleMonitor()
+        baseline={'window':10,'pid':42,'class':'ConsoleWindowClass'}
+        new_window={'window':11,'pid':42,'class':'ConsoleWindowClass'}
+        monitor.baseline=[baseline]
+        with patch.object(monitor,'detail',return_value={'process':{'state':'unavailable'}}) as observed:
+            monitor.retain_new(dict(baseline))
+            observed.assert_not_called()
+            monitor.retain_new(new_window)
+            monitor.retain_new(dict(new_window))
+            observed.assert_called_once_with(new_window)
+        self.assertEqual(monitor.unexpected,[new_window])
+        self.assertEqual(monitor.baseline,[baseline])
+        self.assertEqual(monitor.unexpected_details,[{'process':{'state':'unavailable'}}])
+
+    def test_console_detail_failure_keeps_original_failure_row_and_bound(self):
+        from unittest.mock import patch
+        monitor=ConsoleMonitor()
+        row={'window':11,'pid':42,'class':'ConsoleWindowClass'}
+        with patch(__name__+'.windows_console_process',side_effect=OSError('not returned')), \
+             patch(__name__+'.windows_console_visibility',side_effect=RuntimeError('never returned')):
+            monitor.retain_new(row)
+        self.assertEqual(monitor.unexpected,[row])
+        detail=monitor.unexpected_details[0]
+        self.assertEqual(detail['metadata_error_type'],'OSError')
+        self.assertEqual(detail['window_visibility_error_type'],'RuntimeError')
+        self.assertNotIn('not returned',json.dumps(detail))
+        self.assertNotIn('never returned',json.dumps(detail))
+        self.assertGreaterEqual(int(detail['observation_completed_monotonic_ns']),int(detail['observed_monotonic_ns']))
+        with patch.object(monitor,'detail',return_value={'state':'unavailable'}) as observed:
+            for number in range(100):
+                monitor.retain_new({'window':number+100,'pid':42,'class':'ConsoleWindowClass'})
+            self.assertEqual(observed.call_count,31)
+        self.assertEqual(len(monitor.unexpected),32)
+        self.assertEqual(len(monitor.unexpected_details),32)
+
+    def fake_console_visibility(self, *, visible=True, rect=(10,20,90,60), rect_ok=True,
+                                flags=3, status=0, dwm_missing=False):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        def rectangle(_window,pointer):
+            pointer._obj.left,pointer._obj.top,pointer._obj.right,pointer._obj.bottom=rect
+            return rect_ok
+        def cloak(_window,attribute,pointer,size):
+            self.assertEqual(attribute,14);self.assertEqual(size,4)
+            pointer._obj.value=flags
+            return status
+        user=SimpleNamespace(IsWindowVisible=Mock(return_value=visible),GetWindowRect=Mock(side_effect=rectangle))
+        dwm=SimpleNamespace(DwmGetWindowAttribute=Mock(side_effect=cloak))
+        def load(name,**kwargs):
+            self.assertEqual(kwargs,{'use_last_error':True})
+            if name=='user32':return user
+            self.assertEqual(name,'dwmapi')
+            if dwm_missing:raise OSError('private loader text')
+            return dwm
+        return load,user,dwm
+
+    def test_console_visibility_retains_cloak_style_and_area_without_exemption(self):
+        from unittest.mock import patch
+        load,user,dwm=self.fake_console_visibility()
+        with patch.object(ctypes,'WinDLL',side_effect=load,create=True):
+            observed=windows_console_visibility(11)
+        self.assertEqual(observed,{'is_window_visible':True,
+            'rectangle':{'width':80,'height':40,'positive_area':True,'area':3200},
+            'dwm_cloaked':{'hresult':'00000000','flags':3},'errors':[]})
+        user.IsWindowVisible.assert_called_once_with(11)
+        self.assertEqual(user.GetWindowRect.call_count,1);self.assertEqual(dwm.DwmGetWindowAttribute.call_count,1)
+        monitor=ConsoleMonitor();row={'window':11,'pid':42,'class':'ConsoleWindowClass'}
+        with patch(__name__+'.windows_console_visibility',return_value=observed), \
+             patch(__name__+'.windows_console_process',side_effect=OSError('unavailable')):
+            monitor.retain_new(row)
+        self.assertEqual(monitor.unexpected,[row])
+        self.assertEqual(monitor.unexpected_details[0]['window_visibility'],observed)
+
+    def test_console_visibility_failed_hresult_never_authorizes_output_flags(self):
+        from unittest.mock import patch
+        load,_,_=self.fake_console_visibility(status=-2147024890,flags=7)
+        with patch.object(ctypes,'WinDLL',side_effect=load,create=True):
+            observed=windows_console_visibility(11)
+        self.assertEqual(observed['dwm_cloaked'],{'hresult':'80070006','flags':None})
+        self.assertEqual(observed['rectangle']['area'],3200)
+
+    def test_console_visibility_unavailable_dwm_retains_other_observations(self):
+        from unittest.mock import patch
+        load,_,_=self.fake_console_visibility(dwm_missing=True,visible=False,rect=(0,0,0,0))
+        with patch.object(ctypes,'WinDLL',side_effect=load,create=True):
+            observed=windows_console_visibility(11)
+        self.assertFalse(observed['is_window_visible']);self.assertFalse(observed['rectangle']['positive_area'])
+        self.assertEqual(observed['rectangle']['area'],0);self.assertIsNone(observed['dwm_cloaked'])
+        self.assertEqual(observed['errors'],[{'api':'DwmGetWindowAttribute','error_type':'OSError'}])
+        self.assertNotIn('private loader text',json.dumps(observed))
+
+    def test_console_visibility_rectangle_failure_retains_cloak_without_fabricated_area(self):
+        from unittest.mock import patch
+        load,_,_=self.fake_console_visibility(rect_ok=False,flags=0)
+        with patch.object(ctypes,'WinDLL',side_effect=load,create=True), \
+             patch.object(ctypes,'get_last_error',return_value=1400,create=True):
+            observed=windows_console_visibility(11)
+        self.assertIsNone(observed['rectangle'])
+        self.assertEqual(observed['errors'],[{'api':'GetWindowRect','winerror':1400}])
+        self.assertEqual(observed['dwm_cloaked'],{'hresult':'00000000','flags':0})
+
+    def package_fixture(self, root: Path, *, slack_ready: bool = True, mac: bool = False) -> Path:
+        def sha(value): return hashlib.sha256(value).hexdigest()
+        target = "x86_64-pc-windows-msvc"
+        files = {"agent-observatory.exe": b"inert Observatory fixture, never executed"}
+        instance_binary = b"inert Instance fixture, never executed"
+        instance = {"schema": 1, "kind": "instance-consumer-bundle", "version": "0.22.13",
+                    "target": target, "binary": "agent-instance.exe", "native_runtime": {"version": "0.15.12"},
+                    "files": {"agent-instance.exe": sha(instance_binary)}}
+        instance_bytes = json.dumps(instance).encode()
+        files["support/instance/consumer-bundle.json"] = instance_bytes
+        files["support/instance/agent-instance.exe"] = instance_binary
+        archive_bytes = b"inert closed Slack archive; not extracted by this test"
+        descriptor = {"schema": 1, "source": "1" * 40, "version": "0.0.0", "target": target,
+                      "archive_size": len(archive_bytes), "archive_sha256": sha(archive_bytes)}
+        descriptor_bytes = json.dumps(descriptor).encode()
+        binding = {**descriptor, "descriptor_sha256": sha(descriptor_bytes)}
+        files["support/slack/descriptor.json"] = descriptor_bytes
+        files["support/slack/" + target + ".zip"] = archive_bytes
+        package = {"schema": 1, "version": "0.0.0", "target": target,
+                   "binary_sha256": sha(files["agent-observatory.exe"]), "slack_bundle": binding,
+                   "instance_manifest_sha256": sha(instance_bytes)}
+        files["observatory-package.json"] = json.dumps(package).encode()
+        if mac:
+            target = 'aarch64-apple-darwin'
+            instance['target'] = target; descriptor['target'] = target
+            instance_bytes = json.dumps(instance).encode(); descriptor_bytes = json.dumps(descriptor).encode()
+            binding = {**descriptor, 'descriptor_sha256':sha(descriptor_bytes)}
+            package.update(target=target, mac_bundle_layout=1, slack_bundle=binding,
+                           instance_manifest_sha256=sha(instance_bytes))
+            files = {'Observatory.app/Contents/MacOS/agent-observatory':files['agent-observatory.exe'],
+                     'Observatory.app/Contents/MacOS/Observatory':b'inert GUI fixture, never executed',
+                     'Observatory.app/Contents/Resources/observatory-package.json':json.dumps(package).encode(),
+                     'Observatory.app/Contents/Resources/support/instance/consumer-bundle.json':instance_bytes,
+                     'Observatory.app/Contents/Resources/support/instance/agent-instance.exe':instance_binary,
+                     'Observatory.app/Contents/Resources/support/slack/descriptor.json':descriptor_bytes,
+                     'Observatory.app/Contents/Resources/support/slack/'+target+'.zip':archive_bytes}
+        archive = root / "fixture.zip"
+        with zipfile.ZipFile(archive, "w") as zipped:
+            for name, data in files.items():
+                info = zipfile.ZipInfo(name); info.external_attr = (stat.S_IFREG | 0o644) << 16
+                zipped.writestr(info, data)
+        record = {"schema": 1, "component": "agent-observatory", "version": "0.0.0", "target": target,
+                  "os": "windows", "filename": archive.name, "entry": "agent-observatory.exe",
+                  "sha256": digest(archive), "binary_sha256": package["binary_sha256"],
+                  "includes_agent_setup": True, "includes_computer_setup": True,
+                  "includes_slack_setup": slack_ready, "slack_bundle": binding, "instance_version": instance["version"]}
+        if mac:
+            record.update(os='macos', mac_bundle_layout=1,
+                          entry='Observatory.app/Contents/MacOS/agent-observatory',
+                          gui_entry='Observatory.app/Contents/MacOS/Observatory',
+                          gui_sha256=sha(files['Observatory.app/Contents/MacOS/Observatory']))
+        metadata = root / "fixture.json"; metadata.write_text(json.dumps(record))
+        return metadata
+
+    def test_launchservices_flags_must_be_advertised_by_the_installed_tool(self):
+        flags = ['-n','-W','--stdout','--stderr','--args']
+        require_open_options('Usage: open '+ ' '.join(flags))
+        for missing in flags:
+            with self.subTest(missing=missing), self.assertRaises(FixtureBlocked):
+                require_open_options(' '.join(flag for flag in flags if flag != missing)+' '+missing+'-unsupported')
+
+    def test_mac_argument_reader_excludes_environment_and_refuses_incomplete_arguments(self):
+        args = [b'/exact/application',b'--home',b'/fresh/home',b'--no-browser']
+        raw = len(args).to_bytes(4,sys.byteorder,signed=True)+args[0]+b'\0\0'+b'\0'.join(args)+b'\0TOKEN=not-returned\0'
+        self.assertEqual(mac_arguments_bytes(raw),[os.fsdecode(a) for a in args])
+        self.assertNotIn('TOKEN', repr(mac_arguments_bytes(raw)))
+        for invalid in [b'', (33).to_bytes(4,sys.byteorder)+raw[4:], raw[:20]]:
+            with self.assertRaises(ValueError): mac_arguments_bytes(invalid)
+
+    def test_runtime_record_requires_exact_binary_and_nonboolean_positive_pid(self):
+        self.assertEqual(validate_desktop_runtime({'pid':42,'binary_sha256':'a'*64},'a'*64),42)
+        for pid in [True,0,-1,'42',None]:
+            with self.assertRaises(AssertionError): validate_desktop_runtime({'pid':pid,'binary_sha256':'a'*64},'a'*64)
+        with self.assertRaises(AssertionError): validate_desktop_runtime({'pid':42,'binary_sha256':'b'*64},'a'*64)
+
+    def test_mac_resources_and_gui_bytes_are_bound_without_a_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            metadata = self.package_fixture(Path(temporary),mac=True)
+            inspected = inspect_package(metadata,digest(metadata))
+            self.assertEqual(inspected['package']['mac_bundle_layout'],1)
+            original = json.loads(metadata.read_bytes())
+            for delta in [{'gui_sha256':'f'*64},{'mac_bundle_layout':None},{'mac_bundle_layout':True},
+                          {'mac_bundle_layout':2},{'gui_entry':'Observatory.app/Contents/MacOS/other'}]:
+                metadata.write_text(json.dumps({**original,**delta}))
+                with self.subTest(delta=delta), self.assertRaises(ValueError): inspect_package(metadata,digest(metadata))
+
+    @unittest.skipIf(os.name == 'nt', 'Portable fake Mac owner requires Unix file ownership fields')
+    def test_mac_stop_requires_saved_generation_and_durable_single_dispatch(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();home=root/'fresh';home.mkdir()
+            executable=root/'download/Observatory.app/Contents/MacOS/agent-observatory'
+            executable.parent.mkdir(parents=True);executable.write_bytes(b'inert fixture')
+            inputs={'schema':1,'root':str(root),'home':str(home),'binary':str(executable),
+                    'binary_sha256':digest(executable),'launch_mode':'mac_launch_services'}
+            input_path=root/'browser-inputs.json';private_create_json(input_path,inputs)
+            runtime=home/'runtime.json';private_create_json(runtime,{'pid':42,'binary_sha256':digest(executable)})
+            witness=root/'mac-desktop-1.json';killed=[]
+            class FakeProcess:
+                def __init__(self,pid,_): self.identity={'pid':pid,'uid':os.getuid(),'start_seconds':'1','start_microseconds':'2'}
+                def absent(self): return bool(killed)
+                def close(self): pass
+            args=[str(executable),'--home',str(home),'--no-browser']
+            with patch(__name__+'.sys.platform','darwin'),patch(__name__+'.OwnedProcess',FakeProcess), \
+                    patch(__name__+'.mac_arguments',return_value=args),patch(__name__+'.os.kill',side_effect=lambda *a:killed.append(a)) as kill:
+                mac_desktop_control(input_path,witness,stop=False)
+                original=witness.read_bytes(); changed=json.loads(original);changed['process_identity']['start_seconds']='0'
+                witness.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(AssertionError,'ownership changed'):mac_desktop_control(input_path,witness,stop=True)
+                kill.assert_not_called();self.assertFalse(witness.with_suffix('.stop-intent.json').exists())
+                witness.write_bytes(original)
+                result=mac_desktop_control(input_path,witness,stop=True)
+                self.assertTrue(result['same_generation_absent']);kill.assert_called_once_with(42,signal.SIGTERM)
+                killed.clear()
+                with self.assertRaises(FileExistsError):mac_desktop_control(input_path,witness,stop=True)
+                kill.assert_called_once()
+
+    def test_checked_cleanup_contract_is_required_before_native_dispatch(self):
+        from unittest.mock import patch
+        require_live_owner_contract()
+        with patch(__name__+'.checked_owned_cleanup',None),self.assertRaises(FixtureBlocked):require_live_owner_contract()
+
+    def test_directory_identity_does_not_equate_a_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);original=root/'owned';original.mkdir();before=directory_identity(original)
+            original.rename(root/'retained');original.mkdir()
+            self.assertNotEqual(directory_identity(original),before)
+            self.assertEqual(directory_identity(root/'retained'),before)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows file-ID observer')
+    def test_windows_directory_identity_reader_matches_full_volume_and_file_id(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)
+            expected = directory_identity(path)
+            result = os_command([sys.executable, '-I', '-B', '-X', 'utf8', __file__,
+                                 '--windows-directory-identity', str(path)])
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(json.loads(result.stdout), expected)
+            info = path.stat()
+            self.assertEqual(int(expected['volume_serial_64'], 16), info.st_dev)
+            self.assertEqual(int.from_bytes(bytes.fromhex(expected['file_id_128']), 'little'), info.st_ino)
+            file = path/'ordinary-file'
+            file.touch()
+            with self.assertRaises(ValueError):
+                directory_identity(file)
+
+    def test_path_comparison_requires_same_file_not_equal_contents_or_basename(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);file=root/'python';file.write_bytes(b'identical')
+            copy=root/'other';copy.mkdir();other=copy/'python';other.write_bytes(b'identical')
+            self.assertTrue(path_equal(file,file))
+            self.assertFalse(path_equal(file,other))
+            hardlink=root/'another-name';os.link(file,hardlink)
+            self.assertFalse(path_equal(file,hardlink))
+            if os.name=='nt':
+                self.assertTrue(path_equal(str(file),'\\\\?\\'+str(file.resolve())))
+            else:
+                alias=root/'alias';alias.symlink_to(file);self.assertTrue(path_equal(alias,file))
+
+    def test_only_typed_argument_paths_are_normalized_flags_and_order_are_exact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);home=root/'home';home.mkdir()
+            expected=['serve','--home',str(home)]
+            actual=['serve','--home',str(home/'.')]
+            self.assertTrue(arguments_equal(actual,expected,{2}))
+            for changed in [['serve','--HOME',str(home)],['--home','serve',str(home)],expected+['--extra']]:
+                self.assertFalse(arguments_equal(changed,expected,{2}))
+            other=root/'copy';other.mkdir()
+            self.assertFalse(arguments_equal(['serve','--home',str(other)],expected,{2}))
+
+    def test_partial_cleanup_is_not_relabelled_unattempted_and_success_is_retained(self):
+        evidence=Path('/fixture-evidence');result={}
+        retain_cleanup_outcome(result,evidence)
+        self.assertEqual(result['cleanup'],{'state':'not_attempted'})
+        result['cleanup']={'state':'started','audit':str(evidence/'owned-cleanup.json')}
+        retain_cleanup_outcome(result,evidence)
+        self.assertEqual(result['cleanup'],{'state':'failed_or_unknown_after_start','audit':str(evidence/'owned-cleanup.json')})
+        succeeded={'passed':True,'homes_removed':['owned']};result['cleanup']=succeeded
+        retain_cleanup_outcome(result,evidence)
+        self.assertIs(result['cleanup'],succeeded)
+
+    def test_unconfirmed_slack_retirement_refuses_before_any_instance_cleanup(self):
+        from unittest.mock import patch
+        for value in [{'state':'unknown','control_current':True},{'state':'retired','control_current':False}]:
+            with patch(__name__+'.os_command') as command,patch(__name__+'.powershell') as ps,self.assertRaises(AssertionError):
+                checked_owned_cleanup({'slack_cleanup':{'retired':value},'instance_cleanup':{}},Path('.'))
+            command.assert_not_called();ps.assert_not_called()
+
+    def test_member_aliases_are_refused_on_every_platform(self):
+        for value in ("../a", "/a", "a/../b", "a//b", "./a", "C:/a", "a\\b", "a:", "a/"):
+            with self.subTest(value=value), self.assertRaises(ValueError): member_path(value)
+        self.assertEqual(str(member_path("Observatory.app/Contents/MacOS/agent-observatory")),
+                         "Observatory.app/Contents/MacOS/agent-observatory")
+
+    def test_preservation_checks_content_and_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); file = root / "sentinel"; file.write_bytes(b"original")
+            before = [snapshot(root), snapshot(file)]
+            self.assertEqual(require_preserved(before), before)
+            file.write_bytes(b"replaced")
+            with self.assertRaises(AssertionError): require_preserved(before)
+
+    def test_nonempty_exact_hash_only(self):
+        self.assertEqual(checked_hash("a" * 64), "a" * 64)
+        for value in ("", "A" * 64, "a" * 63, "a" * 64 + "\n"):
+            with self.assertRaises(ValueError): checked_hash(value)
+
+    def test_exact_nested_packages_are_required_without_running_them(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            metadata = self.package_fixture(Path(temporary))
+            inspected = inspect_package(metadata, digest(metadata))
+            self.assertEqual(inspected["instance"]["version"], "0.22.13")
+            self.assertEqual(inspected["slack"]["archive_sha256"], inspected["package"]["slack_bundle"]["archive_sha256"])
+
+    def test_missing_slack_fails_instead_of_skipping_native_coverage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            metadata = self.package_fixture(Path(temporary), slack_ready=False)
+            with self.assertRaises(FixtureBlocked): inspect_package(metadata, digest(metadata))
+
+    def test_resealed_outer_archive_cannot_hide_changed_instance_payload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); metadata = self.package_fixture(root)
+            archive = root / "fixture.zip"
+            with zipfile.ZipFile(archive) as source:
+                files = [(info, source.read(info)) for info in source.infolist()]
+            with zipfile.ZipFile(archive, "w") as output:
+                for info, value in files:
+                    if info.filename == "support/instance/agent-instance.exe": value = b"changed"
+                    output.writestr(info, value)
+            record = json.loads(metadata.read_text()); record["sha256"] = digest(archive)
+            metadata.write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "Instance inventory differs"):
+                inspect_package(metadata, digest(metadata))
+
+    def test_os_environment_drops_ambient_credentials(self):
+        original = dict(os.environ)
+        try:
+            os.environ.update(OPENAI_API_KEY="do-not-copy", SLACK_BOT_TOKEN="do-not-copy", NODE_OPTIONS="bad")
+            env = os_only_environment()
+            self.assertNotIn("OPENAI_API_KEY", env)
+            self.assertNotIn("SLACK_BOT_TOKEN", env)
+            self.assertNotIn("NODE_OPTIONS", env)
+        finally:
+            os.environ.clear(); os.environ.update(original)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    control = parser.add_mutually_exclusive_group()
+    control.add_argument('--mac-observe-desktop', type=Path, help=argparse.SUPPRESS)
+    control.add_argument('--mac-stop-desktop', type=Path, help=argparse.SUPPRESS)
+    control.add_argument('--windows-directory-identity', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--mac-witness', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--metadata", type=Path)
+    parser.add_argument("--metadata-sha256")
+    parser.add_argument("--run", action="store_true", help="Requires the frozen owner cleanup contract")
+    parser.add_argument('--mac-launch-services', action='store_true',
+                        help='Use the actual Mac app through LaunchServices; never fall back to direct execution')
+    parser.add_argument("--node", type=Path); parser.add_argument("--node-sha256")
+    parser.add_argument("--playwright-module", type=Path); parser.add_argument("--playwright-sha256")
+    parser.add_argument("--browser", type=Path); parser.add_argument("--browser-sha256")
+    parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--preserve", type=Path, action="append", default=[])
+    args = parser.parse_args()
+    if args.windows_directory_identity is not None:
+        if os.name != 'nt':
+            parser.error('Windows file IDs require a Windows host')
+        print(json.dumps(windows_directory_identity(args.windows_directory_identity)))
+        return
+    if args.mac_observe_desktop or args.mac_stop_desktop:
+        if not args.mac_witness:
+            parser.error('The exact fixture witness path is required')
+        value = mac_desktop_control(args.mac_observe_desktop or args.mac_stop_desktop,
+                                    args.mac_witness, stop=bool(args.mac_stop_desktop))
+        print(json.dumps(value)); return
+    if args.self_test:
+        result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(OfflineTests))
+        raise SystemExit(0 if result.wasSuccessful() else 1)
+    if not args.metadata or not args.metadata_sha256:
+        parser.error("--metadata and --metadata-sha256 bind the existing packaged artifact")
+    inspected = inspect_package(args.metadata.resolve(strict=True), args.metadata_sha256)
+    if args.run:
+        run_packaged(args, inspected)
+    else:
+        print(json.dumps({"status": "offline_package_verified", "native_test": "not run",
+                          "metadata_sha256": inspected["metadata_sha256"],
+                          "package": inspected["record"], "limits": LIVE_LIMITS,
+                          "remaining_gate": "Exact packaged live browser/manager qualification has not run"}, indent=2))
+
+
+if __name__ == "__main__":
+    main()
