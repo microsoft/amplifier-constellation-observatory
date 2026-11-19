@@ -230,9 +230,31 @@ impl Backend for LocalBackend {
         body: Option<&'a Value>,
     ) -> FutureResult<'a, Value> {
         Box::pin(async move {
+            if matches!(action, Action::Setup) {
+                prepare_connector_parent(home)?;
+            }
             slack_local::call(exe,hash,home,action,body).await.map_err(|_|ApiError(StatusCode::BAD_GATEWAY,"The connector did not confirm this step. Its installation and saved request were preserved.".into()))
         })
     }
+}
+
+// Only the admitted explicit prepare action reaches this boundary, after its
+// saved native-setup phase. Home selection and GET observations remain read-only.
+fn prepare_connector_parent(home: &Path) -> ApiResult<()> {
+    let parent = home
+        .parent()
+        .ok_or_else(|| ApiError::bad("Missing private Slack installation parent"))?;
+    match std::fs::symlink_metadata(parent) {
+        Ok(_) => platform::validate_private_directory(parent)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Create only this fixed application directory, never ancestors or
+            // the installation home. Existing policies are not repaired/adopted.
+            platform::private_create_dir(parent)?;
+            platform::validate_private_directory(parent)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 async fn download_archive(archive: &Path, selected: &LockedTarget) -> ApiResult<()> {
@@ -1224,4 +1246,95 @@ async fn resume<B: Backend>(
     record["private"]["final_reply_received"] = json!(true);
     *record = save(state, record)?;
     observations(backend, record).await
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use super::*;
+
+    #[test]
+    fn missing_connector_parent_is_created_private_without_creating_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("acp-slack-adapter");
+        let home = parent.join(format!("observatory-{}", Uuid::new_v4()));
+        assert!(platform::validate_private_directory(&parent).is_err());
+        prepare_connector_parent(&home).unwrap();
+        platform::validate_private_directory(&parent).unwrap();
+        assert!(!home.exists());
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn existing_private_connector_parent_and_other_installation_are_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("acp-slack-adapter");
+        platform::private_create_dir(&parent).unwrap();
+        let note = parent.join("existing-installation-record");
+        platform::private_create(&note, b"existing owner state").unwrap();
+        let before = std::fs::symlink_metadata(&parent).unwrap();
+        let home = parent.join(format!("observatory-{}", Uuid::new_v4()));
+        prepare_connector_parent(&home).unwrap();
+        let after = std::fs::symlink_metadata(&parent).unwrap();
+        assert_eq!(before.created().ok(), after.created().ok());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        platform::validate_private_directory(&parent).unwrap();
+        assert_eq!(std::fs::read(note).unwrap(), b"existing owner state");
+        assert!(!home.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                (before.dev(), before.ino(), before.uid(), before.mode()),
+                (after.dev(), after.ino(), after.uid(), after.mode())
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_file_and_missing_ancestor_are_refused_without_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("acp-slack-adapter");
+        platform::private_create(&parent, b"preserved conflicting file").unwrap();
+        assert!(prepare_connector_parent(&parent.join("new-home")).is_err());
+        assert_eq!(
+            std::fs::read(&parent).unwrap(),
+            b"preserved conflicting file"
+        );
+        let absent = temp.path().join("absent-ancestor");
+        assert!(prepare_connector_parent(&absent.join("parent/new-home")).is_err());
+        assert!(!absent.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_parent_and_foreign_target_link_are_refused_without_changes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        std::fs::create_dir(&public).unwrap();
+        std::fs::set_permissions(&public, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = std::fs::symlink_metadata(&public).unwrap();
+        assert!(prepare_connector_parent(&public.join("new-home")).is_err());
+        let after = std::fs::symlink_metadata(&public).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino(), before.uid(), before.mode()),
+            (after.dev(), after.ino(), after.uid(), after.mode())
+        );
+        assert_eq!(std::fs::read_dir(&public).unwrap().count(), 0);
+        let foreign = temp.path().join("other-installation");
+        platform::private_create_dir(&foreign).unwrap();
+        platform::private_create(&foreign.join("keep"), b"unchanged").unwrap();
+        let link = temp.path().join("redirect");
+        symlink(&foreign, &link).unwrap();
+        let before = std::fs::symlink_metadata(&foreign).unwrap();
+        assert!(prepare_connector_parent(&link.join("new-home")).is_err());
+        let after = std::fs::symlink_metadata(&foreign).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), foreign);
+        assert_eq!(std::fs::read(foreign.join("keep")).unwrap(), b"unchanged");
+        assert_eq!(
+            (before.dev(), before.ino(), before.uid(), before.mode()),
+            (after.dev(), after.ino(), after.uid(), after.mode())
+        );
+        assert!(!foreign.join("new-home").exists());
+    }
 }

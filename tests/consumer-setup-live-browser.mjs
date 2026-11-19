@@ -50,6 +50,34 @@ async function checkpoint(phase, detail = {}) {
   observations.push({phase, at: new Date().toISOString(), ...detail});
   await fs.writeFile(output('progress.json'), JSON.stringify({schema: 1, observations}, null, 2));
 }
+// Closed, content-free projection of the reply to this fixture's one prepare.
+// Never retain messages, private records, auth commands, workspace data or bodies.
+function prepareResponseProjection(value, request, selected) {
+  const member = (value, allowed) => allowed.includes(value) ? value : null;
+  const operation = value?.operation;
+  const bound = value?.schema === 1 && value.endpoint_id === selected.id
+    && value.endpoint_revision === selected.revision;
+  const requestBound = typeof request?.request_id === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request.request_id)
+    && request.action === 'prepare' && request.endpoint_revision === selected.revision;
+  const refusal = bound && requestBound && value.kind === 'slack_setup_refusal'
+    && value.refused_before_intent === true && value.action === 'prepare'
+    && value.request_id === request.request_id && value.operation_id === null
+    && value.expected_revision === request.expected_revision;
+  return {
+    endpoint_matches: bound,
+    operation_matches: bound && requestBound && operation?.id === request.request_id
+      && operation?.request_id === request.request_id,
+    phase: member(operation?.phase, ['prepare', 'package', 'native-setup', 'native-start', 'bind-agent', 'bind']),
+    state: member(operation?.state, ['running', 'complete', 'unknown']),
+    uncertain: typeof operation?.uncertain === 'boolean' ? operation.uncertain : null,
+    binding_verified: value?.connector?.binding_verified === true,
+    capabilities: Object.fromEntries(['prepare', 'bind', 'resume', 'claim', 'authorize', 'confirm', 'connect', 'discard']
+      .map(name => ['can_' + name, value?.capabilities?.['can_' + name] === true])),
+    refusal_code: refusal ? member(value.code, ['endpoint_changed', 'setup_changed', 'invalid_input',
+      'package_unavailable', 'existing_home', 'not_prepared', 'step_unavailable']) : null,
+  };
+}
 async function openGuard() {
   try { await fs.stat(path.join(input.root, 'fixture-abort')); }
   catch (error) { if (error.code === 'ENOENT') return; throw error; }
@@ -489,8 +517,53 @@ try {
   await click(page.getByRole('button', {name: 'Continue to Slack', exact: true}));
   await click(page.locator('[data-action=slack-setup]'));
   await page.getByRole('button', {name: 'Set up Slack', exact: true}).waitFor();
+  // Retain the existing request's response before closing the owned parent on
+  // failure. A button timeout does not measure native setup duration. The same
+  // 430-second allowance covers both this observation and the ready UI; no GET,
+  // setup retry, private-record read or additional native command is introduced.
+  const prepareStarted = Date.now(), prepareDeadline = prepareStarted + 430_000;
+  const prepareReply = page.waitForResponse(response => {
+    const address = new URL(response.url()), request = response.request();
+    if (address.origin !== base || address.pathname !== `/api/v1/endpoints/${endpoint.id}/slack-setup`
+        || request.method() !== 'POST') return false;
+    try { return request.postDataJSON()?.action === 'prepare'; } catch { return false; }
+  }, {timeout: 430_000});
+  prepareReply.catch(() => {});
   await click(page.getByRole('button', {name: 'Set up Slack', exact: true}));
-  await page.getByRole('button', {name: 'Connect to Slack', exact: true}).waitFor({timeout: 430_000});
+  let prepared;
+  try { prepared = await prepareReply; }
+  catch (error) {
+    await checkpoint('slack-prepare-response-unavailable', {action: 'prepare',
+      elapsed_ms: Date.now() - prepareStarted, response_observed: false});
+    throw error;
+  }
+  const prepareObservation = {action: 'prepare', status: prepared.status(), accepted: prepared.ok(),
+    elapsed_ms: Date.now() - prepareStarted, body_observation: 'unavailable'};
+  const prepareSize = Number(prepared.headers()['content-length']);
+  const bodyRemaining = prepareDeadline - Date.now();
+  if (Number.isSafeInteger(prepareSize) && prepareSize > 0 && prepareSize <= 16_384 && bodyRemaining > 0) {
+    let timer;
+    try {
+      const bytes = await Promise.race([prepared.body(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Error('Original Slack prepare observation allowance elapsed')), bodyRemaining);
+      })]);
+      if (bytes.length === prepareSize) {
+        prepareObservation.projection = prepareResponseProjection(JSON.parse(bytes.toString('utf8')),
+          prepared.request().postDataJSON(), endpoint);
+        prepareObservation.body_observation = 'projected';
+      } else { prepareObservation.body_observation = 'length_mismatch'; }
+    } catch { prepareObservation.body_observation = 'unreadable_or_unavailable'; }
+    finally { clearTimeout(timer); }
+  }
+  await checkpoint('slack-prepare-response', prepareObservation);
+  assert(prepared.ok(), 'Actual Slack prepare HTTP reply refused; bounded response evidence is retained');
+  const projection = prepareObservation.projection;
+  assert(!projection?.refusal_code, 'Actual Slack prepare was refused before intent; response evidence is retained');
+  if (projection?.operation_matches) assert(projection.uncertain !== true && projection.state !== 'unknown',
+    'Actual Slack prepare outcome is unknown; saved response phase is retained without another request');
+  const prepareRemaining = prepareDeadline - Date.now();
+  assert(prepareRemaining > 0, 'Original Slack prepare observation allowance elapsed');
+  await page.getByRole('button', {name: 'Connect to Slack', exact: true}).waitFor({timeout: prepareRemaining});
   const saved = await api(`endpoints/${endpoint.id}/slack-setup`, undefined, 'GET');
   assert.equal(saved.connector.binding_verified, true); assert.equal(saved.connector.endpoint_id, endpoint.id);
   assert.equal(saved.capabilities.can_authorize, true); assert.equal(saved.connector.setup_complete, false);
