@@ -351,6 +351,61 @@ def windows_console_visibility(window):
     return result
 
 
+class MacTerminalWindows:
+    """Sample on-screen terminal windows using system frameworks, without reading window titles."""
+    owners = {"Terminal", "iTerm2", "iTerm", "Warp", "Ghostty", "Alacritty", "kitty", "WezTerm"}
+
+    def __init__(self):
+        frameworks = "/System/Library/Frameworks"
+        self.cg = ctypes.CDLL(frameworks + "/CoreGraphics.framework/CoreGraphics")
+        self.cf = ctypes.CDLL(frameworks + "/CoreFoundation.framework/CoreFoundation")
+        ptr, index, integer = ctypes.c_void_p, ctypes.c_long, ctypes.c_uint32
+        for lib, name, args, result in (
+            (self.cg, "CGWindowListCopyWindowInfo", [integer, integer], ptr),
+            (self.cf, "CFArrayGetCount", [ptr], index),
+            (self.cf, "CFArrayGetValueAtIndex", [ptr, index], ptr),
+            (self.cf, "CFDictionaryGetValue", [ptr, ptr], ptr),
+            (self.cf, "CFStringGetCString", [ptr, ptr, index, integer], ctypes.c_ubyte),
+            (self.cf, "CFNumberGetValue", [ptr, ctypes.c_int, ptr], ctypes.c_ubyte),
+            (self.cf, "CFRelease", [ptr], None),
+        ):
+            fn = getattr(lib, name)
+            fn.argtypes, fn.restype = args, result
+        self.keys = {key: ptr.in_dll(self.cg, "kCGWindow" + key).value
+                     for key in ("OwnerName", "OwnerPID", "Number", "Layer")}
+
+    def windows(self):
+        # kCGWindowListOptionOnScreenOnly; IDs, PIDs and application names only.
+        listing = self.cg.CGWindowListCopyWindowInfo(1, 0)
+        if not listing:
+            raise RuntimeError("The Mac window server is unavailable")
+        rows = []
+        try:
+            for index in range(self.cf.CFArrayGetCount(listing)):
+                window = self.cf.CFArrayGetValueAtIndex(listing, index)
+                owner = self.cf.CFDictionaryGetValue(window, self.keys["OwnerName"])
+                if not owner:
+                    continue
+                name = ctypes.create_string_buffer(256)
+                if not self.cf.CFStringGetCString(owner, name, len(name), 0x08000100):
+                    continue
+                app = name.value.decode("utf-8")
+                if app not in self.owners:
+                    continue
+                fields = {}
+                for key in ("Number", "OwnerPID", "Layer"):
+                    value = self.cf.CFDictionaryGetValue(window, self.keys[key])
+                    number = ctypes.c_int64()
+                    if not value or not self.cf.CFNumberGetValue(value, 4, ctypes.byref(number)):
+                        raise RuntimeError("Incomplete Mac terminal-window identity")
+                    fields[key] = number.value
+                if fields["Layer"] == 0:
+                    rows.append({"window": fields["Number"], "pid": fields["OwnerPID"], "class": app})
+            return sorted(rows, key=lambda row: row["window"])
+        finally:
+            self.cf.CFRelease(listing)
+
+
 class ConsoleMonitor:
     """Bounded visible-console sampling, not a universal no-flash claim."""
     def __init__(self):
@@ -364,6 +419,8 @@ class ConsoleMonitor:
         # baseline/new row gets at most one observation, bounded to 32 per kind.
         result={'window':row['window'],'pid':row['pid'],'class':row['class'],
                 'observed_unix_ns':str(time.time_ns()),'observed_monotonic_ns':str(time.monotonic_ns())}
+        if sys.platform == 'darwin' and row['class'] in MacTerminalWindows.owners:
+            return {**result, 'on_screen': True}
         try:
             result['window_visibility']=windows_console_visibility(row['window'])
         except Exception as error:
@@ -409,14 +466,19 @@ class ConsoleMonitor:
         return sorted(rows,key=lambda row:row['window'])
 
     def start(self):
-        if os.name!='nt':return
-        self.baseline=self.windows()
+        if sys.platform == "darwin":
+            snapshot = MacTerminalWindows().windows
+        elif os.name == "nt":
+            snapshot = self.windows
+        else:
+            return
+        self.baseline = snapshot()
         self.baseline_details=[self.detail(row) for row in self.baseline[:32]]
         def sample():
             try:
                 while not self.stop_event.wait(.05):
                     self.samples+=1
-                    for row in self.windows():
+                    for row in snapshot():
                         self.retain_new(row)
             except BaseException as error:self.error=type(error).__name__
         self.thread=threading.Thread(target=sample,daemon=True);self.thread.start()
@@ -424,10 +486,11 @@ class ConsoleMonitor:
     def finish(self):
         self.stop_event.set()
         if self.thread:self.thread.join(timeout=2)
-        return {'applicable':os.name=='nt','sample_interval_ms':50,'samples':self.samples,
+        return {'applicable':os.name=='nt' or sys.platform=='darwin','sample_interval_ms':50,'samples':self.samples,
                 'baseline_visible_consoles':self.baseline,'new_visible_consoles':self.unexpected,
                 'baseline_process_observations':self.baseline_details,'new_process_observations':self.unexpected_details,
                 'error':self.error or ('observer_did_not_stop' if self.thread and self.thread.is_alive() else None),
+                'mac_terminal_apps': sorted(MacTerminalWindows.owners) if sys.platform == 'darwin' else None,
                 'scope':'Visible console/window snapshots during actual packaged journey; sub-sample flashes and unrelated ambient UI remain outside attribution.',
                 'diagnostic_scope':'At most 32 baseline and 32 new rows, one limited read-only process/parent observation and one window visibility/rectangle/cloaking snapshot each. No title, arguments, environment or memory read; no wait, attach or control. Window snapshots are non-atomic; style/rectangle/cloaking and current parent metadata are not application causation, displayed-pixel proof or an exemption from the original console predicate.'}
 

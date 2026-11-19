@@ -233,7 +233,24 @@ impl Backend for LocalBackend {
             if matches!(action, Action::Setup) {
                 prepare_connector_parent(home)?;
             }
-            slack_local::call(exe,hash,home,action,body).await.map_err(|_|ApiError(StatusCode::BAD_GATEWAY,"The connector did not confirm this step. Its installation and saved request were preserved.".into()))
+            slack_local::call(exe, hash, home, action, body)
+                .await
+                .map_err(|error| {
+                    use std::io::Write;
+                    // Only fixed operation and error categories. Keep payloads,
+                    // credentials and connector output out of diagnostics.
+                    let step = match action {
+                        Action::Setup => "setup".to_owned(),
+                        Action::Start { .. } => "start".to_owned(),
+                        Action::Status => "status".to_owned(),
+                        Action::Api(api) => format!("{api:?}"),
+                    };
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "OBSERVATORY_SLACK_CLI {step} {error:?}"
+                    );
+                    ApiError(StatusCode::BAD_GATEWAY, "The connector did not confirm this step. Its installation and saved request were preserved.".into())
+                })
         })
     }
 }

@@ -195,7 +195,8 @@ async function start(first) {
     return first ? macSetupUrl() : undefined;
   }
   child = spawn(input.binary, ['--home', input.home, '--no-browser'], {
-    env: input.application_env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    // Exercise the packaged GUI executable's normal Windows visibility.
+    env: input.application_env, stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', bytes => { stdout += bytes.toString(); });
   child.stderr.on('data', bytes => { stderr += bytes.toString(); });

@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fmt,
     io::Read,
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
     process::Stdio,
     time::Duration,
 };
@@ -103,10 +103,11 @@ fn absolute_plain(path: &Path) -> bool {
         })
 }
 fn ordinary(path: &Path) -> std::io::Result<()> {
-    let mut prefix = PathBuf::new();
-    for part in path.components() {
-        prefix.push(part);
-        let metadata = std::fs::symlink_metadata(&prefix)?;
+    // Inspect complete roots and ancestors. A canonical Windows path starts
+    // with a verbatim drive/UNC prefix, which is not a filesystem path until
+    // its root separator is included.
+    for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let metadata = std::fs::symlink_metadata(ancestor)?;
         if metadata.file_type().is_symlink() {
             return Err(std::io::Error::other("Symbolic path"));
         }
@@ -244,7 +245,7 @@ fn command(executable: &Path, home: &Path, action: Action, body_file: Option<&Pa
     }
     #[cfg(windows)]
     if let Some(root) = std::env::var_os("SYSTEMROOT") {
-        command.env("PATH", PathBuf::from(root).join("System32"));
+        command.env("PATH", std::path::PathBuf::from(root).join("System32"));
     }
     #[cfg(unix)]
     command.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
@@ -449,6 +450,46 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn canonical_installed_executable_passes_full_path_validation() {
+        // prepare() passes this canonical spelling to native-start after the
+        // fresh installation. Validate actual filesystem metadata and digest;
+        // this inert file is never launched and needs no service or tool.
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("fixed-fixture.exe");
+        let bytes = b"inert canonical path fixture";
+        std::fs::write(&executable, bytes).unwrap();
+        let canonical = executable.canonicalize().unwrap();
+        #[cfg(windows)]
+        assert!(matches!(
+            canonical.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_))
+        ));
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        validate_executable(&canonical, &digest).unwrap();
+        assert_eq!(
+            validate_executable(&canonical, &"0".repeat(64)),
+            Err(CallError::Refused(Refusal::InvalidExecutable))
+        );
+        assert!(ordinary(canonical.parent().unwrap()).is_err());
+        let traversal = canonical
+            .parent()
+            .unwrap()
+            .join("..")
+            .join("fixed-fixture.exe");
+        assert!(!absolute_plain(&traversal));
+        #[cfg(unix)]
+        {
+            let leaf_link = canonical.parent().unwrap().join("leaf-link");
+            std::os::unix::fs::symlink(&canonical, &leaf_link).unwrap();
+            assert!(ordinary(&leaf_link).is_err());
+            let parent_link = canonical.parent().unwrap().join("parent-link");
+            std::os::unix::fs::symlink(canonical.parent().unwrap(), &parent_link).unwrap();
+            assert!(ordinary(&parent_link.join("fixed-fixture.exe")).is_err());
+        }
+    }
+
+    #[test]
     fn fixed_owner_setup_transport_fits_existing_helper_budget() {
         for api in [
             ApiAction::Authorize,
@@ -536,6 +577,7 @@ mod tests {
     mod unix {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
         struct Fixture {
             _temp: tempfile::TempDir,
             executable: PathBuf,
