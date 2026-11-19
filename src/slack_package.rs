@@ -19,6 +19,7 @@ use std::{
 pub const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_MEMBERS: usize = 20_000;
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+const MAC_LAUNCHER: &str = "Slack Connector.app/Contents/MacOS/SlackConnector";
 const STAPLE_TICKET: &str = "Slack Connector.app/Contents/CodeResources";
 const MAX_STAPLE_TICKET: u64 = 64 * 1024;
 const RECEIPT: &str = "observatory-slack-package.json";
@@ -222,6 +223,10 @@ impl ReleaseDescriptor {
                     || name == paths.manifest
                     || matches!(name.as_str(), "START-HERE.txt" | "LICENSE")
                     || paths.plist == Some(name.as_str())
+                    || (name == MAC_LAUNCHER
+                        && self.signed_derivative.is_some()
+                        && file.mode == 0o755
+                        && file.size > 0)
                     || (self.signed_derivative.is_some()
                         && matches!(
                             name.as_str(),
@@ -786,6 +791,10 @@ mod tests {
             (b"inert signature resource fixture".to_vec(), 0o644),
         );
         fixture.files.insert(
+            MAC_LAUNCHER.into(),
+            (b"inert bundle launcher fixture".to_vec(), 0o755),
+        );
+        fixture.files.insert(
             STAPLE_TICKET.into(),
             (
                 b"inert Apple staple ticket; no notarization claim".to_vec(),
@@ -803,7 +812,34 @@ mod tests {
             team_id: "ABCDEFGHIJ".into(),
         });
         assert!(fixture.release.download_url().is_err());
-        fixture.stage().unwrap();
+        let staged = fixture.stage().unwrap();
+        assert_eq!(
+            staged.executable,
+            fixture.destination.join(&fixture.release.entry)
+        );
+        assert_eq!(
+            std::fs::read(fixture.destination.join(MAC_LAUNCHER)).unwrap(),
+            fixture.files[MAC_LAUNCHER].0
+        );
+        let mut legacy = fixture.release.clone();
+        legacy.files.remove(MAC_LAUNCHER);
+        assert!(legacy.validate_for_target(MAC).is_ok());
+        for (size, mode) in [(0, 0o755), (1, 0o644)] {
+            let mut invalid = fixture.release.clone();
+            let launcher = invalid.files.get_mut(MAC_LAUNCHER).unwrap();
+            launcher.size = size;
+            launcher.mode = mode;
+            assert!(invalid.validate_for_target(MAC).is_err());
+        }
+        let mut unsigned = Fixture::new(MAC).release;
+        unsigned.files.insert(
+            MAC_LAUNCHER.into(),
+            fixture.release.files[MAC_LAUNCHER].clone(),
+        );
+        assert!(unsigned.validate_for_target(MAC).is_err());
+        let mut wrong_entry = fixture.release.clone();
+        wrong_entry.entry = MAC_LAUNCHER.into();
+        assert!(wrong_entry.validate_for_target(MAC).is_err());
         assert_eq!(
             std::fs::read(fixture.destination.join(seal)).unwrap(),
             fixture.files[seal].0
