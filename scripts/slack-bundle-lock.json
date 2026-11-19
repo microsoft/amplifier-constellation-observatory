@@ -3,8 +3,8 @@
   "targets": {
     "aarch64-apple-darwin": {
       "release": {
-        "archive_sha256": "fc8c6872d7bc308ea05e57082fd6e0afb8f8e83df5f837902edd65a3bc39d2ca",
-        "archive_size": 51109240,
+        "archive_sha256": "2da5dd6d2a0b8038cd0795e45629ea47e34f93715c4244ac7f375f40107643d9",
+        "archive_size": 51120459,
         "entry": "Slack Connector.app/Contents/MacOS/acp-slack-adapter",
         "files": {
           "LICENSE": {
@@ -19,22 +19,27 @@
           },
           "Slack Connector.app/Contents/CodeResources": {
             "mode": 420,
-            "sha256": "0214e6c7635c925cf9975905f113e6f296404b15b4f482d7d51e30943a8fe940",
-            "size": 1905
+            "sha256": "51c92da3c198c2857f6e8b46105cc18586a09509e24a636c5312079164ed470c",
+            "size": 1926
           },
           "Slack Connector.app/Contents/Info.plist": {
             "mode": 420,
-            "sha256": "35ea14e85fc4f40f1f3b4500f155a570262f74f347e96f0c7807afd073d33c71",
-            "size": 726
+            "sha256": "5aeaa9068c7199fbb82f1743baa3e41c4c5e2e72a8ed01b0a024aa9f5831773f",
+            "size": 723
+          },
+          "Slack Connector.app/Contents/MacOS/SlackConnector": {
+            "mode": 493,
+            "sha256": "1422d0254bb8ae7a85aa57474a799294b4989255d42b4aeeccfb63299c039c96",
+            "size": 70416
           },
           "Slack Connector.app/Contents/MacOS/acp-slack-adapter": {
             "mode": 493,
-            "sha256": "041db7f427157bd88e0e68db331065d2a62085bb2345c49aa45545ee856f2196",
-            "size": 26449856
+            "sha256": "970c546d57840977c19f59cbe2879c2ceb72c5b1885150e1c40cfca41c39acd1",
+            "size": 26443104
           },
           "Slack Connector.app/Contents/Resources/native-bundle.json": {
             "mode": 420,
-            "sha256": "af4ebbcaecb3f71ef58790cab582882a45a40c8259851c0517632db5d4985adb",
+            "sha256": "beabbc474b633933940a2b27436571c01ecffa504f0106942067fb1df840df49",
             "size": 203472
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/idle3": {
@@ -8584,22 +8589,22 @@
           },
           "Slack Connector.app/Contents/_CodeSignature/CodeResources": {
             "mode": 420,
-            "sha256": "1d3be06dc0ef67d19cced166f7dc2844137cc91880a75e1e61367bad5dbcec45",
-            "size": 552028
+            "sha256": "1de9080b76607c1b87b757e1d2446936644438ea3f21d1213f0e421e686304ab",
+            "size": 552460
           }
         },
-        "native_bundle_sha256": "af4ebbcaecb3f71ef58790cab582882a45a40c8259851c0517632db5d4985adb",
+        "native_bundle_sha256": "beabbc474b633933940a2b27436571c01ecffa504f0106942067fb1df840df49",
         "schema": 1,
         "signed_derivative": {
-          "origin_archive_sha256": "9ff0f87c2fe7f9f3a0e31701be03dd0cf4c52f234fabca32af58445c125d142a",
-          "origin_native_bundle_sha256": "418c0b8f7ba6bc10a502383e22ce3cfa9169b9f4b798ff16784e5657400c61f4",
+          "origin_archive_sha256": "c4d4e74a76f4e7e43131e027c5ceaed286c5e9f592543125aaf9741f6c485194",
+          "origin_native_bundle_sha256": "4cbc5043c7a83b762305f19843b02d52d5a25f0c8ca52a094ed8017f6a060921",
           "schema": 1,
-          "signing_receipt_sha256": "513e4a2223fe3d5f070c730c7e5932736921408789fd5645947e697553265a01",
+          "signing_receipt_sha256": "61e726026d8c906bbdec2b0fa640f2443d235cc9f695ff7c3cf7a12f6eae0525",
           "team_id": "M7YXZ8RV88"
         },
-        "source": "bd6227b54c59212b565c33d1eef152beb59cfed8",
+        "source": "9a227fc8d25863522bac08aa901153bd5cd78c8b",
         "target": "aarch64-apple-darwin",
-        "version": "0.18.2"
+        "version": "0.18.3"
       },
       "url": null
     },
@@ -22860,8 +22865,8 @@
     },
     "x86_64-apple-darwin": {
       "release": {
-        "archive_sha256": "ae0752a8b2545eb6dd45ddf5ea110cba145df7d2b644866613f74b5cea66109f",
-        "archive_size": 52542393,
+        "archive_sha256": "ce03dfbf7f7af6b0ce26d72591ef4832ac51c8c5afd08c584217d6e75f53f730",
+        "archive_size": 52551834,
         "entry": "Slack Connector.app/Contents/MacOS/acp-slack-adapter",
         "files": {
           "LICENSE": {
@@ -22876,22 +22881,27 @@
           },
           "Slack Connector.app/Contents/CodeResources": {
             "mode": 420,
-            "sha256": "f2e16548ebb484f0093e7852e56173a3ca3e073b4c45feb05319decc24f9bd17",
-            "size": 1905
+            "sha256": "f8dd45063d5f969c2a3f055d2d94fd382c11069a0cf7f7a7930c1b838aa8f9ac",
+            "size": 1926
           },
           "Slack Connector.app/Contents/Info.plist": {
             "mode": 420,
-            "sha256": "35ea14e85fc4f40f1f3b4500f155a570262f74f347e96f0c7807afd073d33c71",
-            "size": 726
+            "sha256": "5aeaa9068c7199fbb82f1743baa3e41c4c5e2e72a8ed01b0a024aa9f5831773f",
+            "size": 723
+          },
+          "Slack Connector.app/Contents/MacOS/SlackConnector": {
+            "mode": 493,
+            "sha256": "8a73eff9bb02e850a85a8063e701023d5a7c9e5a8ec28d71b8b9f768da6652af",
+            "size": 36896
           },
           "Slack Connector.app/Contents/MacOS/acp-slack-adapter": {
             "mode": 493,
-            "sha256": "02579403d5dcddc8230b496ca645a272b62931770a054daa1f5d8a12977ab025",
-            "size": 28473120
+            "sha256": "eefb225fd238a61cd525a0b4f67b845a8ca50f4045b32f190f77db68b16e35fb",
+            "size": 28476464
           },
           "Slack Connector.app/Contents/Resources/native-bundle.json": {
             "mode": 420,
-            "sha256": "fcba1add86cdaf94dc76911af15dc9e00d77cb99ddf25de388d99bc1e6462350",
+            "sha256": "c5f134580449e257270939cbb34b302bee1eb7aa277985812a3beb2acec23354",
             "size": 203471
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/idle3": {
@@ -31441,22 +31451,22 @@
           },
           "Slack Connector.app/Contents/_CodeSignature/CodeResources": {
             "mode": 420,
-            "sha256": "8104ef3cd781ee0fbe670c1d2af3c64cc6d8c9f43599b7a46decd0cf9a4e1546",
-            "size": 552028
+            "sha256": "76a20ee6bfba7b6e056de9ddee843a9d85129b6c88edf932cb6fcc5450ad4b92",
+            "size": 552460
           }
         },
-        "native_bundle_sha256": "fcba1add86cdaf94dc76911af15dc9e00d77cb99ddf25de388d99bc1e6462350",
+        "native_bundle_sha256": "c5f134580449e257270939cbb34b302bee1eb7aa277985812a3beb2acec23354",
         "schema": 1,
         "signed_derivative": {
-          "origin_archive_sha256": "3953f47e687aeb46fda06304db44e5a3e0033499fe1ab1785803bcb881c6d495",
-          "origin_native_bundle_sha256": "c5f1924167c2010774c117975e466120c2268da092c25e22e0aa56bd8a76892c",
+          "origin_archive_sha256": "8da9d52f3e698a2186e3127762d5e2628a07d406eed20ff0065fd65c6bc089ed",
+          "origin_native_bundle_sha256": "a78932adcb8aed740a6fefa6c2095cfff8e874902bdec6ea030bb1cc6054c021",
           "schema": 1,
-          "signing_receipt_sha256": "6f67acd7d65ea45bb34cc7c13c3d6cd96b60582d08a0e29e5f96244b54df3635",
+          "signing_receipt_sha256": "6af588616b10e806656aaf8c301d91986b4957b167d774a97ea79858424e5750",
           "team_id": "M7YXZ8RV88"
         },
-        "source": "bd6227b54c59212b565c33d1eef152beb59cfed8",
+        "source": "9a227fc8d25863522bac08aa901153bd5cd78c8b",
         "target": "x86_64-apple-darwin",
-        "version": "0.18.2"
+        "version": "0.18.3"
       },
       "url": null
     },
