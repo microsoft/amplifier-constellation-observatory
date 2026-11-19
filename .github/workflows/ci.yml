@@ -252,6 +252,7 @@ jobs:
           path: ${{ runner.temp }}/observatory-signed-input-provenance.json
           if-no-files-found: ignore
       - name: Verify actual packaged Observatory to Slack setup and saved-connection continuity
+        id: consumer_walkthrough
         if: runner.os == 'Windows' || runner.os == 'macOS'
         env:
           TARGET: ${{ matrix.target }}
@@ -267,6 +268,16 @@ jobs:
           name: actual-consumer-setup-${{ matrix.target }}
           path: ${{ runner.temp }}/observatory-actual-consumer
           if-no-files-found: warn
+      - name: Retain the exact desktop package for walkthrough diagnosis
+        uses: actions/upload-artifact@v4
+        if: failure() && github.event_name == 'pull_request' && steps.consumer_walkthrough.outcome == 'failure'
+        with:
+          name: unqualified-desktop-${{ matrix.target }}
+          path: |
+            dist/*-desktop.zip
+            dist/*-desktop.zip.json
+          if-no-files-found: error
+          retention-days: 5
       - name: Verify packaged local browser and computer network setup
         if: runner.os == 'Linux' && runner.arch == 'X64'
         env:
