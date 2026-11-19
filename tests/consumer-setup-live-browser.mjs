@@ -6,7 +6,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {createHash, randomUUID} from 'node:crypto';
-import {spawn} from 'node:child_process';
+import {execFile, spawn} from 'node:child_process';
+import {promisify} from 'node:util';
 import {once} from 'node:events';
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
@@ -88,7 +89,23 @@ async function absent(file) {
   catch (error) { if (error.code === 'ENOENT') return true; throw error; }
 }
 async function privateJson(file) { return JSON.parse(await fs.readFile(file, 'utf8')); }
+async function verifyFixtureObserver() {
+  assert.equal(sha(await fs.readFile(input.fixture_python)), input.fixture_python_sha256);
+  assert.equal(sha(await fs.readFile(input.fixture_controller)), input.fixture_controller_sha256);
+}
 async function directoryIdentity(file) {
+  if (process.platform === 'win32') {
+    // libuv and Python can expose different widths for a Windows volume serial.
+    // Both the initial witness and the later cleanup must compare the full FILE_ID_INFO.
+    await verifyFixtureObserver();
+    const {stdout} = await promisify(execFile)(input.fixture_python,
+      ['-I', '-B', '-X', 'utf8', input.fixture_controller, '--windows-directory-identity', file],
+      {env: input.application_env, windowsHide: true, timeout: 10_000, maxBuffer: 4096, encoding: 'utf8'});
+    const identity = JSON.parse(stdout);
+    assert.match(identity.volume_serial_64, /^[0-9a-f]{16}$/);
+    assert.match(identity.file_id_128, /^[0-9a-f]{32}$/);
+    return identity;
+  }
   const value = await fs.lstat(file, {bigint:true});
   assert(value.isDirectory() && !value.isSymbolicLink());
   return {device: String(value.dev), inode: String(value.ino)};
@@ -145,8 +162,7 @@ async function macSetupUrl() {
 }
 async function macControl(stop = false) {
   assert(macLaunch && macWitness);
-  assert.equal(sha(await fs.readFile(input.fixture_python)), input.fixture_python_sha256);
-  assert.equal(sha(await fs.readFile(input.fixture_controller)), input.fixture_controller_sha256);
+  await verifyFixtureObserver();
   const observer = spawn(input.fixture_python, [input.fixture_controller,
     stop ? '--mac-stop-desktop' : '--mac-observe-desktop', process.argv[2], '--mac-witness', macWitness],
   {env: input.application_env, stdio: ['ignore', 'pipe', 'pipe']});

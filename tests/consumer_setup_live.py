@@ -102,8 +102,46 @@ def snapshot(path: Path) -> dict:
 
 
 def directory_identity(path: Path) -> dict:
+    if os.name == 'nt':
+        return windows_directory_identity(path)
     ordinary(path,directory=True);info=path.stat()
     return {'device':str(info.st_dev),'inode':str(info.st_ino)}
+
+
+def windows_directory_identity(path: Path) -> dict:
+    """Capture the complete Windows volume and file ID from one ordinary directory handle."""
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+
+    class AttributeTag(ctypes.Structure):
+        _fields_ = [('attributes', w.DWORD), ('tag', w.DWORD)]
+
+    class FileId(ctypes.Structure):
+        _fields_ = [('volume', ctypes.c_uint64), ('file_id', ctypes.c_ubyte * 16)]
+
+    kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE]
+    kernel.CreateFileW.restype = w.HANDLE
+    kernel.GetFileInformationByHandleEx.argtypes = [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]
+    kernel.GetFileInformationByHandleEx.restype = w.BOOL
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.CloseHandle.restype = w.BOOL
+    # Open an existing directory for attribute reads, including the reparse point itself.
+    # Share existing readers, writers and deleters without locking the installation.
+    handle = kernel.CreateFileW(str(path), 0x80, 7, None, 3, 0x02000000 | 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        attributes = AttributeTag()
+        if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not attributes.attributes & 0x10 or attributes.attributes & 0x400:
+            raise ValueError('An ordinary directory handle is required')
+        identity = FileId()
+        if not kernel.GetFileInformationByHandleEx(handle, 18, ctypes.byref(identity), ctypes.sizeof(identity)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return {'volume_serial_64': f'{identity.volume:016x}', 'file_id_128': bytes(identity.file_id).hex()}
+    finally:
+        kernel.CloseHandle(handle)
 
 
 def require_preserved(before: list[dict]) -> list[dict]:
@@ -546,14 +584,15 @@ def run_packaged(args, inspected: dict) -> None:
               "operation_id": str(uuid.uuid4()), "limits": LIVE_LIMITS,
               "application_env": os_only_environment()}
     inputs['launch_mode'] = 'mac_launch_services' if mac_launch else 'direct_payload'
-    if mac_launch:
-        inputs.update(app=str(extracted/'Observatory.app'),
-                      gui=str(extracted.joinpath(*member_path(inspected['record']['gui_entry']).parts)),
-                      gui_sha256=inspected['record']['gui_sha256'],
-                      fixture_python=str(Path(sys.executable).resolve()),
+    if os.name == 'nt' or mac_launch:
+        inputs.update(fixture_python=str(Path(sys.executable).resolve()),
                       fixture_python_sha256=digest(Path(sys.executable).resolve()),
                       fixture_controller=str(Path(__file__).resolve()),
                       fixture_controller_sha256=digest(Path(__file__).resolve()))
+    if mac_launch:
+        inputs.update(app=str(extracted/'Observatory.app'),
+                      gui=str(extracted.joinpath(*member_path(inspected['record']['gui_entry']).parts)),
+                      gui_sha256=inspected['record']['gui_sha256'])
     input_path = root / "browser-inputs.json"
     with input_path.open("x", encoding="utf-8") as output:
         json.dump(inputs, output)
@@ -1411,6 +1450,24 @@ class OfflineTests(unittest.TestCase):
             root=Path(temporary);original=root/'owned';original.mkdir();before=directory_identity(original)
             original.rename(root/'retained');original.mkdir()
             self.assertNotEqual(directory_identity(original),before)
+            self.assertEqual(directory_identity(root/'retained'),before)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows file-ID observer')
+    def test_windows_directory_identity_reader_matches_full_volume_and_file_id(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)
+            expected = directory_identity(path)
+            result = os_command([sys.executable, '-I', '-B', '-X', 'utf8', __file__,
+                                 '--windows-directory-identity', str(path)])
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(json.loads(result.stdout), expected)
+            info = path.stat()
+            self.assertEqual(int(expected['volume_serial_64'], 16), info.st_dev)
+            self.assertEqual(int.from_bytes(bytes.fromhex(expected['file_id_128']), 'little'), info.st_ino)
+            file = path/'ordinary-file'
+            file.touch()
+            with self.assertRaises(ValueError):
+                directory_identity(file)
 
     def test_path_comparison_requires_same_file_not_equal_contents_or_basename(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1517,6 +1574,7 @@ def main() -> None:
     control = parser.add_mutually_exclusive_group()
     control.add_argument('--mac-observe-desktop', type=Path, help=argparse.SUPPRESS)
     control.add_argument('--mac-stop-desktop', type=Path, help=argparse.SUPPRESS)
+    control.add_argument('--windows-directory-identity', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--mac-witness', type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--metadata", type=Path)
@@ -1530,6 +1588,11 @@ def main() -> None:
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--preserve", type=Path, action="append", default=[])
     args = parser.parse_args()
+    if args.windows_directory_identity is not None:
+        if os.name != 'nt':
+            parser.error('Windows file IDs require a Windows host')
+        print(json.dumps(windows_directory_identity(args.windows_directory_identity)))
+        return
     if args.mac_observe_desktop or args.mac_stop_desktop:
         if not args.mac_witness:
             parser.error('The exact fixture witness path is required')
