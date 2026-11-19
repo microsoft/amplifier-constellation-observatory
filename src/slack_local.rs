@@ -472,12 +472,20 @@ mod tests {
             Err(CallError::Refused(Refusal::InvalidExecutable))
         );
         assert!(ordinary(canonical.parent().unwrap()).is_err());
-        let traversal = canonical
-            .parent()
-            .unwrap()
-            .join("..")
-            .join("fixed-fixture.exe");
-        assert!(!absolute_plain(&traversal));
+        // PathBuf::join normalizes ".." on canonical Windows verbatim paths.
+        // Keep the untrusted spelling intact for this rejection check.
+        let mut spelling = canonical.parent().unwrap().as_os_str().to_owned();
+        spelling.push(std::path::MAIN_SEPARATOR_STR);
+        spelling.push("..");
+        spelling.push(std::path::MAIN_SEPARATOR_STR);
+        spelling.push("fixed-fixture.exe");
+        let traversal = Path::new(&spelling);
+        assert!(
+            traversal
+                .components()
+                .any(|part| part == Component::ParentDir)
+        );
+        assert!(!absolute_plain(traversal));
         #[cfg(unix)]
         {
             let leaf_link = canonical.parent().unwrap().join("leaf-link");
