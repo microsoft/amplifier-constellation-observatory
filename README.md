@@ -39,7 +39,8 @@ before any further action; installation and connection requests are not repeated
 automatically. Your existing agents, sessions and connections stay in place.
 
 Packages target Windows 11, macOS, and Linux on Intel/AMD and ARM processors.
-Windows and macOS downloads are unsigned previews; keep OS security protections
+Windows previews are unsigned. Check the included launch instructions for each
+macOS download's signing and notarization status. Keep OS security protections
 enabled and review any launch warning. A smaller server package connects existing
 installations but omits local agent setup.
 
