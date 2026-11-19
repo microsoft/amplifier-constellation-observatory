@@ -28,16 +28,16 @@
     "release_id": 450690722,
     "slack": {
       "aarch64-apple-darwin": {
-        "id": 765477122,
-        "name": "slack-aarch64-apple-darwin-signed-stapled-private.zip",
-        "sha256": "88c564a5b945a80db196998a4d40adfafe27cd9313812b0f8384f95231ccee33",
-        "size": 50985182
+        "id": 766552731,
+        "name": "slack-0.18.1-aarch64-apple-darwin-signed-stapled-private.zip",
+        "sha256": "427ef00a88cf3ae64154cf44653686d156f3190fdeaaa4cf47211c437012f957",
+        "size": 51106599
       },
       "x86_64-apple-darwin": {
-        "id": 765477357,
-        "name": "slack-x86_64-apple-darwin-signed-stapled-private.zip",
-        "sha256": "29f785204b04b0d558beb29b38f1a722053f460fb7dab23abb6e904e11492c08",
-        "size": 52388066
+        "id": 766552732,
+        "name": "slack-0.18.1-x86_64-apple-darwin-signed-stapled-private.zip",
+        "sha256": "8067b2a2fae56104e3ccf147ef2ac648396684c6d257b337bbb4803a93b54562",
+        "size": 52538905
       }
     }
   },

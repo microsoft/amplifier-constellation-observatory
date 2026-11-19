@@ -3,8 +3,8 @@
   "targets": {
     "aarch64-apple-darwin": {
       "release": {
-        "archive_sha256": "88c564a5b945a80db196998a4d40adfafe27cd9313812b0f8384f95231ccee33",
-        "archive_size": 50985182,
+        "archive_sha256": "427ef00a88cf3ae64154cf44653686d156f3190fdeaaa4cf47211c437012f957",
+        "archive_size": 51106599,
         "entry": "Slack Connector.app/Contents/MacOS/acp-slack-adapter",
         "files": {
           "LICENSE": {
@@ -14,27 +14,27 @@
           },
           "START-HERE.txt": {
             "mode": 420,
-            "sha256": "30a8b112ce9eae82f52a76aedbf3d35f37e3fc5beffff916e96830b81e826b0a",
-            "size": 738
+            "sha256": "182e7dd7afca4336e204399459e2286c8cb0f2420dd0670930d0f733e2f797d4",
+            "size": 666
           },
           "Slack Connector.app/Contents/CodeResources": {
             "mode": 420,
-            "sha256": "451850328c7c501e066c23cf82888fda37b288770e19c5d3e014a3f82fc72305",
+            "sha256": "64ccdad2076e9204243c6fa4f82bdce323989696a268e265701df12d65beac42",
             "size": 1905
           },
           "Slack Connector.app/Contents/Info.plist": {
             "mode": 420,
-            "sha256": "cdc2bc5850b8f733c3c4ccf62711bc3b904cec396ca0e2cfaa220aeebf7558b3",
+            "sha256": "32233b4d71c3daf2100e838bcdbe9daa5c3110d655f681cfa1a7eaf66b11378a",
             "size": 726
           },
           "Slack Connector.app/Contents/MacOS/acp-slack-adapter": {
             "mode": 493,
-            "sha256": "5920dfcd9d2e2ecbae58e0d1fa184898cea8d142e66cc3b2ca89dfe5e5e818d0",
-            "size": 26092304
+            "sha256": "0681dc710915a23ab9880567101ad90d3553738b3e77e55ac24acb9b97994e86",
+            "size": 26447440
           },
           "Slack Connector.app/Contents/Resources/native-bundle.json": {
             "mode": 420,
-            "sha256": "09aaae0cf2184bd18e46b9e1513bf6dd8e4808c7ba1a6084e3d1b56e411546e4",
+            "sha256": "e1038560649a007b2e1a19b071ae8a897f6ae66268fb6f2c01a503daaa9db5fa",
             "size": 203472
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/idle3": {
@@ -74,12 +74,12 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python": {
             "mode": 493,
-            "sha256": "e972bba63e4cdd0f09a086f5e278fa6a3921325af9296e5d05f79e63e019381e",
+            "sha256": "1bcf688ff521e6103f9538b8d05abb9fc1226f0fea7a61256f9f18d0e4a9710b",
             "size": 17970752
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python3": {
             "mode": 493,
-            "sha256": "c7455361ea3697a3736631a776ce4e1ad556eb360065bd81037a140313b8c02c",
+            "sha256": "694223e360fbdac9f42c466647ca499dfa259e6c46722ceee03d8e1b4f443e2c",
             "size": 17970752
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python3-config": {
@@ -89,7 +89,7 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python3.13": {
             "mode": 493,
-            "sha256": "1d3f62ef746c46738f152968783333f0148281cbd0268f7f9c505bc548428b37",
+            "sha256": "bb2013bfc1c5d512d96664522d95204b42f59c47fed3bbd3f1b7ce387f64e2dd",
             "size": 17970752
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python3.13-config": {
@@ -1539,7 +1539,7 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/itcl4.3.8/libitcl4.3.8.dylib": {
             "mode": 420,
-            "sha256": "d67301a469c8815893c2d68b3807ed34c11c0741448a97ea2134afd189353f14",
+            "sha256": "91ab0cafc6b3dfa8b6ed4284208706b873f88737b27a2fd485ab09e402845622",
             "size": 316560
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/itcl4.3.8/libitclstub.a": {
@@ -1554,7 +1554,7 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/itcl4.3.8/libtcl9itcl4.3.8.dylib": {
             "mode": 420,
-            "sha256": "743f903ed0ea0d8f4e2ba03823ef382fcdd2460f01c338dc225f5c02d70b7905",
+            "sha256": "d36d58dbaea77a5c1954ab3790a73ebbd66cc1415a6a3422a8364cb43f210dff",
             "size": 316912
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/itcl4.3.8/pkgIndex.tcl": {
@@ -1564,17 +1564,17 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/libpython3.13.dylib": {
             "mode": 493,
-            "sha256": "860ac5d4ece26a7c8298e2d96afd3b36fb4d1d9a3f719631b7cb97039486be56",
+            "sha256": "091706a801690b57bc18f671cee269b58821649fc32a7d25fdfce4fbea4166a8",
             "size": 18003296
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/libtcl9.0.dylib": {
             "mode": 493,
-            "sha256": "215d0b02dfbfad434e27c0b58151aa2c414df6f749b2e55ed29051cc802dd516",
+            "sha256": "04e81ba4af62891e393ca6be4d2ee47937338a0eccf7f915087f4fb76707a9de",
             "size": 2047296
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/libtcl9tk9.0.dylib": {
             "mode": 493,
-            "sha256": "29647ce98a8af85f38d08c7024b57ac35ce474b22bafef7513d792ea9fe3959b",
+            "sha256": "161e61be392c993d8c26daba8b9b7fd3e499a473f532a06360a382ab2b718496",
             "size": 1851744
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/pkgconfig/python-3.13-embed.pc": {
@@ -3894,12 +3894,12 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/python3.13/lib-dynload/_dbm.cpython-313-darwin.so": {
             "mode": 493,
-            "sha256": "4c6cc5fa09144a5a6ef99213da07eed16a012ed113d5c2d0c63237bd4548d10e",
+            "sha256": "08f29b19a5b8efbe779c4a759d57b36c2680cfbfcf234b8b044b8bb0a7696efb",
             "size": 73408
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/python3.13/lib-dynload/_tkinter.cpython-313-darwin.so": {
             "mode": 493,
-            "sha256": "2a8737f1ffed90d94ccdbe810a990c8514f60edae5abbed2c1d24af9c28b888a",
+            "sha256": "302fc0d38a436ff72a6b117c8c29932d38df7f26895382e9b54312be0f1fd07b",
             "size": 121712
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/python3.13/linecache.py": {
@@ -8184,12 +8184,12 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/thread3.0.6/libtcl9thread3.0.6.dylib": {
             "mode": 420,
-            "sha256": "d75bc99e002ed6aa6a6100374b02047c136a68ef14537b93684957c5219b91a7",
+            "sha256": "0c2195b45a148a4b97ae7bf1563e138a6a550e3f54ef97527f06bdf713a80972",
             "size": 156336
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/thread3.0.6/libthread3.0.6.dylib": {
             "mode": 420,
-            "sha256": "76cf98fa2cb05b8da0753895d3f91b42750db58a9fcd86774ad622abe59ce25c",
+            "sha256": "5830a510a2d27871bc4c2a6b4bf489d25133eef0cffd3a9712a55e742f8441c4",
             "size": 156336
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/thread3.0.6/pkgIndex.tcl": {
@@ -8584,29 +8584,29 @@
           },
           "Slack Connector.app/Contents/_CodeSignature/CodeResources": {
             "mode": 420,
-            "sha256": "14d1d4a871890312657a569814e0c40ebf7e65138ba3589809eab94227438fa7",
+            "sha256": "4b3e0c36a231758d381ac89ef077368a8d66f92b97d7f2d2e2320a3a6e64892e",
             "size": 552028
           }
         },
-        "native_bundle_sha256": "09aaae0cf2184bd18e46b9e1513bf6dd8e4808c7ba1a6084e3d1b56e411546e4",
+        "native_bundle_sha256": "e1038560649a007b2e1a19b071ae8a897f6ae66268fb6f2c01a503daaa9db5fa",
         "schema": 1,
         "signed_derivative": {
-          "origin_archive_sha256": "73c1f29c28eacc3955aef3bbc154ac5cec3592479beeb5fe8a55a2930b4c386e",
-          "origin_native_bundle_sha256": "cb8c91b63068533bc86e38479ee2b18423bedcea640113b3c2f2c6b1a6ac3821",
+          "origin_archive_sha256": "bad678bdd8b1ddd65cafc29ea111ea9944d870789dc73f715cf981bfa1e17f15",
+          "origin_native_bundle_sha256": "f6109433eccf3ca1d867ea04e96abe5096da7557315fe6db0b7fd962a23540d7",
           "schema": 1,
-          "signing_receipt_sha256": "1f0c78cdca57bdd83ae5d2cf3f019f90b82f589375470452716b819783a34611",
+          "signing_receipt_sha256": "603d514211ee06a3771f94bbe59e634e97cd7ff83010338ba0fe37296c37a745",
           "team_id": "M7YXZ8RV88"
         },
-        "source": "a3ec41399bf4b3ef502125062913943c9fdf65c6",
+        "source": "9cb103c51459db210f6fe93c97e6b6f4e5c60e30",
         "target": "aarch64-apple-darwin",
-        "version": "0.18.0"
+        "version": "0.18.1"
       },
       "url": null
     },
     "aarch64-pc-windows-msvc": {
       "release": {
-        "archive_sha256": "c1b40f539b01f0984bd3cba2f12e5e40bb7cd74a90f8cc8c66fd7c703aab56c5",
-        "archive_size": 51607829,
+        "archive_sha256": "6d6a05beb4295b2f085f2b9d325a41fff472ed4b2f4095f6201fb89a32018c22",
+        "archive_size": 59922860,
         "entry": "acp-slack-adapter.exe",
         "files": {
           "LICENSE": {
@@ -8616,18 +8616,18 @@
           },
           "START-HERE.txt": {
             "mode": 420,
-            "sha256": "298b1bbb769e82dc88a8df0b5b852f89847176e2c12d4533b5212eb444734b68",
-            "size": 744
+            "sha256": "5662324e67968a74b679beedecff0eb3b3dd9a14e335b3ed2c65f331ec72d138",
+            "size": 832
           },
           "acp-slack-adapter.exe": {
             "mode": 493,
-            "sha256": "e4ceb1e8e0df286ddf8ab3b5a167cf9d38fe256356b0ec1214daa3b8ced8cdf7",
-            "size": 23040000
+            "sha256": "f511e0b48e7675940f3171819eece9c651e185d65e8e16f25f1d5fd89e677923",
+            "size": 22882304
           },
           "native-bundle.json": {
             "mode": 420,
-            "sha256": "528ffa66bbb2e3383b53724f6db4e351d758a60f2e28c55da69e217dfb8579f4",
-            "size": 309405
+            "sha256": "01dc8cde9fbd2c748f177c0e682cc1f22b960a23711b98f796bc4bf45c31d54a",
+            "size": 310862
           },
           "runtime/python/DLLs/_asyncio.pdb": {
             "mode": 420,
@@ -16474,6 +16474,21 @@
             "sha256": "1b8f63cc768245487a8272c97fe63d1e6d1c014c4d603b04d310a412059a2601",
             "size": 659456
           },
+          "runtime/python/slack-cli/LICENSE": {
+            "mode": 420,
+            "sha256": "a65d087cf010a52f8736da6b387df1feb7089e2c0636ef21cb86bef05940e0a4",
+            "size": 11415
+          },
+          "runtime/python/slack-cli/provenance.json": {
+            "mode": 420,
+            "sha256": "261dd22e0126a801b23576878eab91a17e73f9a2bda4410c7b93a8193261466b",
+            "size": 1070
+          },
+          "runtime/python/slack-cli/slack.exe": {
+            "mode": 493,
+            "sha256": "3f7d667d96dfd9f2d4187192a0aec91900d66190b0a72c23d4490611475bd140",
+            "size": 22269952
+          },
           "runtime/python/tcl/dde1.4/pkgIndex.tcl": {
             "mode": 420,
             "sha256": "64d08a3abcb271db3af043c535e045f7c325348d87a349a76864637baedd2554",
@@ -22835,18 +22850,18 @@
             "size": 53600
           }
         },
-        "native_bundle_sha256": "528ffa66bbb2e3383b53724f6db4e351d758a60f2e28c55da69e217dfb8579f4",
+        "native_bundle_sha256": "01dc8cde9fbd2c748f177c0e682cc1f22b960a23711b98f796bc4bf45c31d54a",
         "schema": 1,
-        "source": "a3ec41399bf4b3ef502125062913943c9fdf65c6",
+        "source": "9cb103c51459db210f6fe93c97e6b6f4e5c60e30",
         "target": "aarch64-pc-windows-msvc",
-        "version": "0.18.0"
+        "version": "0.18.1"
       },
-      "url": "https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.18.0/acp-slack-adapter-0.18.0-aarch64-pc-windows-msvc.zip"
+      "url": "https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.18.1/acp-slack-adapter-0.18.1-aarch64-pc-windows-msvc.zip"
     },
     "x86_64-apple-darwin": {
       "release": {
-        "archive_sha256": "29f785204b04b0d558beb29b38f1a722053f460fb7dab23abb6e904e11492c08",
-        "archive_size": 52388066,
+        "archive_sha256": "8067b2a2fae56104e3ccf147ef2ac648396684c6d257b337bbb4803a93b54562",
+        "archive_size": 52538905,
         "entry": "Slack Connector.app/Contents/MacOS/acp-slack-adapter",
         "files": {
           "LICENSE": {
@@ -22856,27 +22871,27 @@
           },
           "START-HERE.txt": {
             "mode": 420,
-            "sha256": "30a8b112ce9eae82f52a76aedbf3d35f37e3fc5beffff916e96830b81e826b0a",
-            "size": 738
+            "sha256": "182e7dd7afca4336e204399459e2286c8cb0f2420dd0670930d0f733e2f797d4",
+            "size": 666
           },
           "Slack Connector.app/Contents/CodeResources": {
             "mode": 420,
-            "sha256": "cbc750192979a6103ee6b55239ff76db62c6c8207a90e367cdfba2a14b2829bc",
+            "sha256": "a0cfac18367e14a20371bdb1bece02b2be53e4943366e5bca507e2f31f0e2660",
             "size": 1905
           },
           "Slack Connector.app/Contents/Info.plist": {
             "mode": 420,
-            "sha256": "cdc2bc5850b8f733c3c4ccf62711bc3b904cec396ca0e2cfaa220aeebf7558b3",
+            "sha256": "32233b4d71c3daf2100e838bcdbe9daa5c3110d655f681cfa1a7eaf66b11378a",
             "size": 726
           },
           "Slack Connector.app/Contents/MacOS/acp-slack-adapter": {
             "mode": 493,
-            "sha256": "ea08f2ace621e6cc4105653198722f01c2878f465447b17176139e79811daccc",
-            "size": 27958880
+            "sha256": "3a6cb09c9711ebf8268998c4a9a67292b404c4a44332eb816d626650ed06774b",
+            "size": 28454224
           },
           "Slack Connector.app/Contents/Resources/native-bundle.json": {
             "mode": 420,
-            "sha256": "1bb8697fe5fef74989d692ba0762ea0e31df4d2703b088700dbc457a06b2806e",
+            "sha256": "9ebfa9f6998851ed500aa21826797a5eb69cc0db021387ba9c71bcbcf3911130",
             "size": 203471
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/idle3": {
@@ -22916,12 +22931,12 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python": {
             "mode": 493,
-            "sha256": "c97990ea2a9f66904a9892312e9c3a664e659217a9450b2e3108b465a8ceec86",
+            "sha256": "1d5aa58ed8c07993e718b97bfc3b910f8283206bf68a840f36d94764f46ed1c1",
             "size": 18442176
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python3": {
             "mode": 493,
-            "sha256": "3c62ed5b93ee193638cedeae29ce0c6c442b2acd1ce448743b05771c0fea0015",
+            "sha256": "d0a8f883cf16f59d7e4967f50869501fb372833ea9e4a792a867363211778b42",
             "size": 18442176
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python3-config": {
@@ -22931,7 +22946,7 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python3.13": {
             "mode": 493,
-            "sha256": "4534e21e944942b19838452ff4e933f12fbcc7a11de0b1edd3b4d8f8dd3335f0",
+            "sha256": "4d6ce799744c71d7fa33d272d89fb0696690e6a1e1b11f475c89a8e4b32437d4",
             "size": 18442176
           },
           "Slack Connector.app/Contents/Resources/runtime/python/bin/python3.13-config": {
@@ -24381,7 +24396,7 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/itcl4.3.8/libitcl4.3.8.dylib": {
             "mode": 420,
-            "sha256": "27da2fa1247445c9c309631a2fa8928eab5f99a4d46ced2de410f5928ee1c76b",
+            "sha256": "0f88be09db53a313b0e5e11ff4669a77a96d22dabc63d1d83762ec9a17543a7a",
             "size": 289456
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/itcl4.3.8/libitclstub.a": {
@@ -24396,7 +24411,7 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/itcl4.3.8/libtcl9itcl4.3.8.dylib": {
             "mode": 420,
-            "sha256": "fc5681d79b13b51e6fad4b1ff70ec769518b98b9861ba85ced25f5d45c32f763",
+            "sha256": "c671799a0a9d53d04fd6b8ec0275815941a6b9d9fff3e1da8a2842827c3068ec",
             "size": 293952
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/itcl4.3.8/pkgIndex.tcl": {
@@ -24406,17 +24421,17 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/libpython3.13.dylib": {
             "mode": 493,
-            "sha256": "095ff133c415ff1f1daefc62b2b95edabfa00ae09e5eb5b320f8ecfa4782d883",
+            "sha256": "3a41850068a4c98f3291b1ee6a3bd986cef63dfd2446b93fc056465c94b83e18",
             "size": 18433616
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/libtcl9.0.dylib": {
             "mode": 493,
-            "sha256": "5a3aef7b348d088080cae68a87a9002af8fd883f70c9be16f92088f57bb0ed66",
+            "sha256": "91175e590921cdbf522025c59c1aafc077c68f34e2c41f0e324332507da08910",
             "size": 2092752
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/libtcl9tk9.0.dylib": {
             "mode": 493,
-            "sha256": "26d036176285df47db56abd938698ceeae96118a430392cc6c1432be3e4f5918",
+            "sha256": "fe660b58c3ef444a30200c999baff5ebba680dca2742fd094daf17dce96bfe8a",
             "size": 1924112
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/pkgconfig/python-3.13-embed.pc": {
@@ -26736,12 +26751,12 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/python3.13/lib-dynload/_dbm.cpython-313-darwin.so": {
             "mode": 493,
-            "sha256": "fcc24e95d831518e88f523ebf0a13c2b15cfb351d968a3b62080e8083c5a4bd2",
+            "sha256": "f6ca58a44e72b61d59489d17bbcbc64e8919b05ec45cdd5221cac220cf15106a",
             "size": 44832
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/python3.13/lib-dynload/_tkinter.cpython-313-darwin.so": {
             "mode": 493,
-            "sha256": "3c02028e3b555bc4248e5251f6111f7eeab2823c6dc7c026a012a3df3f8d20f2",
+            "sha256": "12fa4f206572b38cabc5fd5c38fba32ea2c83556c9a8e564eddb0b9e819eeca7",
             "size": 89296
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/python3.13/linecache.py": {
@@ -31026,12 +31041,12 @@
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/thread3.0.6/libtcl9thread3.0.6.dylib": {
             "mode": 420,
-            "sha256": "6a7e15d284492bc55ea5a96a100a453ce934f629aaf6950fcd5496ec40ea32c5",
+            "sha256": "9d0214fa6a682f864d1fc1962881d4a54af08a9adbcf63626d0bde7c5ad2997b",
             "size": 125152
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/thread3.0.6/libthread3.0.6.dylib": {
             "mode": 420,
-            "sha256": "17dcdec339c0e0901186b164538f94be3c10b48664c2d27fedb780a7c171f6db",
+            "sha256": "50104efe0f2e5f36c83184d1c65c63a347c0f08810507f94bdfc656a6bdeffc6",
             "size": 125152
           },
           "Slack Connector.app/Contents/Resources/runtime/python/lib/thread3.0.6/pkgIndex.tcl": {
@@ -31426,29 +31441,29 @@
           },
           "Slack Connector.app/Contents/_CodeSignature/CodeResources": {
             "mode": 420,
-            "sha256": "ed3aa71a3f13f8f7cff40d5340e9c86d8a75910c1bdcde4c3f26d2a081f4f4c5",
+            "sha256": "73a7fe2175304ed7d7ed79313ff0288aa5c929a0bc7288ad35b9c433d93b84e3",
             "size": 552028
           }
         },
-        "native_bundle_sha256": "1bb8697fe5fef74989d692ba0762ea0e31df4d2703b088700dbc457a06b2806e",
+        "native_bundle_sha256": "9ebfa9f6998851ed500aa21826797a5eb69cc0db021387ba9c71bcbcf3911130",
         "schema": 1,
         "signed_derivative": {
-          "origin_archive_sha256": "8c1f6c6619560b98c345fba9f2b4823e6f3d5f46539199be6d39c3c1d53b6de4",
-          "origin_native_bundle_sha256": "601317aa3391155d167abf7c7d4c570da90437ef71bc1b8328bbbca9ffc17d4a",
+          "origin_archive_sha256": "7144bdd347e1edb10667d12f46ca4c571e816b741b2f7099c7d9f76f44f1eac3",
+          "origin_native_bundle_sha256": "26d0f61c6371c431c7d73a4ec52cddb6728c0c5fa03b48d486cc9c67bb58edb9",
           "schema": 1,
-          "signing_receipt_sha256": "cd8bd5e7bdc93c754c4d3dcf9269fbab1f3b3517223b81320d3a0bf500aa855b",
+          "signing_receipt_sha256": "99c844b2cec68ea7d88fdd46f5bf19b3468816d621933bd98287f8392d6e80c9",
           "team_id": "M7YXZ8RV88"
         },
-        "source": "a3ec41399bf4b3ef502125062913943c9fdf65c6",
+        "source": "9cb103c51459db210f6fe93c97e6b6f4e5c60e30",
         "target": "x86_64-apple-darwin",
-        "version": "0.18.0"
+        "version": "0.18.1"
       },
       "url": null
     },
     "x86_64-pc-windows-msvc": {
       "release": {
-        "archive_sha256": "30b9fd128bc72010bcee8430d0cd3b9ca7d2e61f129a0187ab21d02b9a080eea",
-        "archive_size": 54396666,
+        "archive_sha256": "52699aaf01104f6887cb4ee8d5f85710f55268321e1ff49113c8336dd00a375b",
+        "archive_size": 62707008,
         "entry": "acp-slack-adapter.exe",
         "files": {
           "LICENSE": {
@@ -31458,18 +31473,18 @@
           },
           "START-HERE.txt": {
             "mode": 420,
-            "sha256": "298b1bbb769e82dc88a8df0b5b852f89847176e2c12d4533b5212eb444734b68",
-            "size": 744
+            "sha256": "5662324e67968a74b679beedecff0eb3b3dd9a14e335b3ed2c65f331ec72d138",
+            "size": 832
           },
           "acp-slack-adapter.exe": {
             "mode": 493,
-            "sha256": "b1c4412083ff5478c0f1d10d20535ffbcf1423e42266081edcffdd92747e6804",
-            "size": 27311616
+            "sha256": "de515869472ce63150aa2c46dd8f9a0ca70ad9a9aa462ab9c35f0d4772273b59",
+            "size": 27011584
           },
           "native-bundle.json": {
             "mode": 420,
-            "sha256": "c722eafb98618d91116de975d7412ed9e32f7986dfb08d02c9a67f59dbceb70e",
-            "size": 309395
+            "sha256": "51842016f1f8bc2c81b4d7404c44b05c0bf559ca0af5c6d6689532d0017869f8",
+            "size": 310852
           },
           "runtime/python/DLLs/_asyncio.pdb": {
             "mode": 420,
@@ -39316,6 +39331,21 @@
             "sha256": "3f8bf4732e84e5e258e0555ed084651254e83e52f97994631b4a8aceae1aa88d",
             "size": 561152
           },
+          "runtime/python/slack-cli/LICENSE": {
+            "mode": 420,
+            "sha256": "a65d087cf010a52f8736da6b387df1feb7089e2c0636ef21cb86bef05940e0a4",
+            "size": 11415
+          },
+          "runtime/python/slack-cli/provenance.json": {
+            "mode": 420,
+            "sha256": "261dd22e0126a801b23576878eab91a17e73f9a2bda4410c7b93a8193261466b",
+            "size": 1070
+          },
+          "runtime/python/slack-cli/slack.exe": {
+            "mode": 493,
+            "sha256": "3f7d667d96dfd9f2d4187192a0aec91900d66190b0a72c23d4490611475bd140",
+            "size": 22269952
+          },
           "runtime/python/tcl/dde1.4/pkgIndex.tcl": {
             "mode": 420,
             "sha256": "64d08a3abcb271db3af043c535e045f7c325348d87a349a76864637baedd2554",
@@ -45677,13 +45707,13 @@
             "size": 49792
           }
         },
-        "native_bundle_sha256": "c722eafb98618d91116de975d7412ed9e32f7986dfb08d02c9a67f59dbceb70e",
+        "native_bundle_sha256": "51842016f1f8bc2c81b4d7404c44b05c0bf559ca0af5c6d6689532d0017869f8",
         "schema": 1,
-        "source": "a3ec41399bf4b3ef502125062913943c9fdf65c6",
+        "source": "9cb103c51459db210f6fe93c97e6b6f4e5c60e30",
         "target": "x86_64-pc-windows-msvc",
-        "version": "0.18.0"
+        "version": "0.18.1"
       },
-      "url": "https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.18.0/acp-slack-adapter-0.18.0-x86_64-pc-windows-msvc.zip"
+      "url": "https://github.com/microsoft/amplifier-acp-slack/releases/download/v0.18.1/acp-slack-adapter-0.18.1-x86_64-pc-windows-msvc.zip"
     }
   }
 }
