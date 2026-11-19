@@ -1,5 +1,46 @@
 {
-  "schema": 1,
+  "cohort": {
+    "helpers": {
+      "asset": {
+        "id": 765439427,
+        "name": "constellation-machine-helpers-0.3.5.zip",
+        "sha256": "ce46d95ba59e969ef7ada4f653c099a67611c1ba7ea4242650664c29f8a7adf8",
+        "size": 17555140
+      },
+      "manifest_sha256": "df299560d0bf1c5279b2de66fd589bbd37339cfb22cf55584acf1ce80eb71a95",
+      "source": "b3d08983345d7be83cf231a636d09edfb3bbcb32",
+      "version": "0.3.5"
+    },
+    "instance": {
+      "aarch64-apple-darwin": {
+        "id": 765439580,
+        "name": "instance-aarch64-apple-darwin-signed-private.zip",
+        "sha256": "b8e6ad1aeafe419add4334d493948ed5b0d1f3cd5bd5fb676b0923fa74bc4cbe",
+        "size": 56945302
+      },
+      "x86_64-apple-darwin": {
+        "id": 765439817,
+        "name": "instance-x86_64-apple-darwin-signed-private.zip",
+        "sha256": "2075c937df9b169e77f366ffb6760aedd09769dfab568fb2f794d00bb5eff74a",
+        "size": 58889846
+      }
+    },
+    "release_id": 450690722,
+    "slack": {
+      "aarch64-apple-darwin": {
+        "id": 765477122,
+        "name": "slack-aarch64-apple-darwin-signed-stapled-private.zip",
+        "sha256": "88c564a5b945a80db196998a4d40adfafe27cd9313812b0f8384f95231ccee33",
+        "size": 50985182
+      },
+      "x86_64-apple-darwin": {
+        "id": 765477357,
+        "name": "slack-x86_64-apple-darwin-signed-stapled-private.zip",
+        "sha256": "29f785204b04b0d558beb29b38f1a722053f460fb7dab23abb6e904e11492c08",
+        "size": 52388066
+      }
+    }
+  },
   "repository": "microsoft/amplifier-constellation-observatory",
-  "cohort": null
+  "schema": 1
 }

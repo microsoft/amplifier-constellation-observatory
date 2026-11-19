@@ -17,6 +17,9 @@ permissions:
 
 jobs:
   helper-closure:
+    # GitHub restricts private draft assets to push-access callers.
+    permissions:
+      contents: write
     needs: [machine-helper]
     runs-on: ubuntu-24.04
     outputs:
@@ -55,6 +58,9 @@ jobs:
           if-no-files-found: error
 
   observatory:
+    # GitHub restricts private draft assets to push-access callers.
+    permissions:
+      contents: write
     needs: [helper-closure]
     if: ${{ !startsWith(github.ref, 'refs/tags/machine-helper-v') && !(github.event_name == 'workflow_dispatch' && inputs.helpers_only == true) }}
     strategy:

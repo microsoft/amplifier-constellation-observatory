@@ -1,4 +1,61 @@
 {
   "schema": 1,
-  "targets": {}
+  "targets": {
+    "aarch64-apple-darwin": {
+      "cohort_id": "96cad6aa-8243-4505-afa2-bb7ec32968a7",
+      "instance": {
+        "archive_sha256": "9da8227e035367c8a56db329e8356da03d9b847eade7d693feb3f4fbe49c7d4f",
+        "manifest_sha256": "fb4907d61617649bdfcfaeabf0d37eab3c55130cbe9e9751374aed69d602d462",
+        "source": "f2885db3f5046b01cf92f5405c32d609d3703b26",
+        "tree": "3331b67a3a3371872cb61f6adf98eb62046de107",
+        "version": "0.22.14"
+      },
+      "instance_binary_sha256": "fcf9d56139e01b8a26cb6a8ecb32fff58b9f3aceddc34c70f95188f09694dda9",
+      "manifest_sha256": "a2de338da524d1d56319cdc4d9e326da50277fe22c2f9b3947fb349e9b199de8",
+      "python": {
+        "archive_sha256": "1afd3983237c2a10277345f235be730e9cb49a123e0574ed252dbf3a841a24e4",
+        "lock_sha256": "895206e4e030fec2611d5d2fde0f27c9d92055ed9c945555a1ac95e6c673c6ed"
+      },
+      "runtime": {
+        "archive_sha256": "75bff29f9a2ee84b10460fad7a08f8dfbaaadbae5999f41570e54a11faca91fe",
+        "binary_sha256": "b41a739cd1cf02fa09a2be6946d11a21711ac6d49c16f351ed09cf620d465bcc",
+        "lock_sha256": "d22cea01afce30829f29952becfc1a581ac2f6bb8ca9adbf628d555d21c98297",
+        "source": "02078a8099b8c8d6b41fa1964c5aa78b1bc34a9a",
+        "version": "0.15.12"
+      },
+      "runtime_binary_sha256": "732968a141aaa821ff86c7c2339ca29eacd350ce53f964caf09b913502146fc6",
+      "schema": 1,
+      "signing_receipt_sha256": "4596c296f6d808197e1a6ead993de37dcdc7bca8d58e21435c37e1c6d4089995",
+      "signing_team_id": "M7YXZ8RV88",
+      "target": "aarch64-apple-darwin"
+    },
+    "x86_64-apple-darwin": {
+      "cohort_id": "5924baf3-aacd-41da-971a-20adb8d450e9",
+      "instance": {
+        "archive_sha256": "b3e359fa7f07cc4ef670b3f14021b1c4e07e58d9caff791babee8f14889629ed",
+        "manifest_sha256": "4a77fa325c50c058f569e053f1fd7cd0a7fb5d69a5c8a9e4f8afe10af9f3b17e",
+        "source": "f2885db3f5046b01cf92f5405c32d609d3703b26",
+        "tree": "3331b67a3a3371872cb61f6adf98eb62046de107",
+        "version": "0.22.14"
+      },
+      "instance_binary_sha256": "b15586b0ce171a39876ddd5b5a2a05ed7e861def790dfab0e51911f84da332cc",
+      "manifest_sha256": "f74a2286fff2f03f40736aee89fcceb4594c4af8871104975d06da4657d22efe",
+      "python": {
+        "archive_sha256": "a46bcdeecd28ba253522b321dcb3806da1b0ff581479fc1d27e9613e3ac44764",
+        "lock_sha256": "895206e4e030fec2611d5d2fde0f27c9d92055ed9c945555a1ac95e6c673c6ed"
+      },
+      "runtime": {
+        "archive_sha256": "2b6ad84fae336a34f7f500f80d4ea18a1e31e63d891b083e2048d9ecbdf178f8",
+        "binary_sha256": "bac4954ea732f41ff9af041f73327e6b287efe512f1202ea03f54f52f02338a5",
+        "lock_sha256": "d22cea01afce30829f29952becfc1a581ac2f6bb8ca9adbf628d555d21c98297",
+        "source": "02078a8099b8c8d6b41fa1964c5aa78b1bc34a9a",
+        "version": "0.15.12"
+      },
+      "runtime_binary_sha256": "3545d535c8704694096697da0bb76407cddea3491bfd49bffc73a33288019251",
+      "schema": 1,
+      "signing_receipt_sha256": "d97c6e4d2fa0a39643bbc12c81acbf3257f85a073d989402ad0201e50afc2577",
+      "signing_team_id": "M7YXZ8RV88",
+      "target": "x86_64-apple-darwin"
+    }
+  }
 }

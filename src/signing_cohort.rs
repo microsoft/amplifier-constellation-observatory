@@ -449,7 +449,10 @@ mod tests {
     #[test]
     fn empty_lock_wrong_target_and_missing_private_marker_never_fall_back() {
         let mut f = Fixture::new();
-        let empty: Lock = serde_json::from_str(LOCK).unwrap();
+        let empty = Lock {
+            schema: 1,
+            targets: BTreeMap::new(),
+        };
         assert!(empty.targets.is_empty());
         assert!(runtime_for(&f.root, TARGET, &empty).is_err());
         assert!(runtime_for(&f.root, "x86_64-apple-darwin", &f.lock).is_err());
