@@ -234,11 +234,117 @@ def os_only_environment() -> dict[str, str]:
     return env
 
 
+def windows_console_process(pid):
+    """One read-only handle observation; never grants control of a console host.
+
+    A window PID can be conhost/Terminal rather than the application that caused
+    the console. Parent PID and current parent generation are diagnostics only.
+    No process arguments, environment, memory, tokens or window text are read.
+    """
+    from ctypes import wintypes as w
+    if type(pid) is not int or not 0 < pid <= 0xffffffff:
+        return {'state':'unavailable','reason':'invalid_pid'}
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.OpenProcess.argtypes=[w.DWORD,w.BOOL,w.DWORD];kernel.OpenProcess.restype=w.HANDLE
+    kernel.CloseHandle.argtypes=[w.HANDLE];kernel.CloseHandle.restype=w.BOOL
+    kernel.GetProcessId.argtypes=[w.HANDLE];kernel.GetProcessId.restype=w.DWORD
+    kernel.QueryFullProcessImageNameW.argtypes=[w.HANDLE,w.DWORD,w.LPWSTR,ctypes.POINTER(w.DWORD)]
+    kernel.QueryFullProcessImageNameW.restype=w.BOOL
+    kernel.GetProcessTimes.argtypes=[w.HANDLE,*([ctypes.POINTER(w.FILETIME)]*4)]
+    kernel.GetProcessTimes.restype=w.BOOL
+    kernel.GetExitCodeProcess.argtypes=[w.HANDLE,ctypes.POINTER(w.DWORD)];kernel.GetExitCodeProcess.restype=w.BOOL
+
+    def observe(process_id, parent=False):
+        result={'pid':process_id,'state':'unavailable','errors':[]}
+        handle=kernel.OpenProcess(0x1000,False,process_id) # QUERY_LIMITED_INFORMATION only
+        if not handle:
+            result['errors'].append({'api':'OpenProcess','winerror':ctypes.get_last_error()})
+            return result
+        def creation():
+            values=[w.FILETIME() for _ in range(4)]
+            if not kernel.GetProcessTimes(handle,*map(ctypes.byref,values)):
+                result['errors'].append({'api':'GetProcessTimes','winerror':ctypes.get_last_error()})
+                return None
+            return str((values[0].dwHighDateTime<<32)|values[0].dwLowDateTime)
+        try:
+            if kernel.GetProcessId(handle)!=process_id:
+                result['errors'].append({'api':'GetProcessId','reason':'identity_mismatch'})
+                return result
+            result['creation_time_100ns']=creation()
+            path=ctypes.create_unicode_buffer(32768);length=w.DWORD(len(path))
+            if kernel.QueryFullProcessImageNameW(handle,0,path,ctypes.byref(length)):
+                result['image']=path.value
+            else: result['errors'].append({'api':'QueryFullProcessImageNameW','winerror':ctypes.get_last_error()})
+            exited=w.DWORD()
+            if kernel.GetExitCodeProcess(handle,ctypes.byref(exited)):
+                result['exit_code_observed']=exited.value
+            else: result['errors'].append({'api':'GetExitCodeProcess','winerror':ctypes.get_last_error()})
+            if parent:
+                # This documented native query may be unavailable. Its failure
+                # leaves the original console observation and image/birth intact.
+                try:
+                    class Basic(ctypes.Structure):
+                        _fields_=[('exit_status',w.LONG),('peb',w.LPVOID),('affinity',ctypes.c_size_t),
+                                  ('priority',w.LONG),('pid',ctypes.c_size_t),('parent_pid',ctypes.c_size_t)]
+                    ntdll=ctypes.WinDLL('ntdll',use_last_error=True)
+                    query=ntdll.NtQueryInformationProcess
+                    query.argtypes=[w.HANDLE,w.ULONG,w.LPVOID,w.ULONG,ctypes.POINTER(w.ULONG)]
+                    query.restype=w.LONG
+                    basic=Basic();returned=w.ULONG()
+                    status=query(handle,0,ctypes.byref(basic),ctypes.sizeof(basic),ctypes.byref(returned))
+                    if status==0 and returned.value==ctypes.sizeof(basic) and basic.pid==process_id:
+                        result['parent_pid_observed']=int(basic.parent_pid)
+                        if 0<basic.parent_pid<=0xffffffff and basic.parent_pid!=process_id:
+                            current=observe(int(basic.parent_pid))
+                            result['current_parent_process']=current
+                            child_birth=result.get('creation_time_100ns');parent_birth=current.get('creation_time_100ns')
+                            result['parent_creation_not_after_child']=(int(parent_birth)<=int(child_birth)
+                                if child_birth is not None and parent_birth is not None else None)
+                    else: result['errors'].append({'api':'NtQueryInformationProcess','ntstatus':f'{status&0xffffffff:08x}',
+                                                   'returned_bytes':returned.value})
+                except Exception as error:
+                    result['errors'].append({'api':'NtQueryInformationProcess','error_type':type(error).__name__})
+            result['rechecked_creation_time_100ns']=creation()
+            if (result.get('creation_time_100ns') is not None and result.get('image')
+                    and result['creation_time_100ns']==result['rechecked_creation_time_100ns']):
+                result['state']='same_handle_generation_observed'
+            return result
+        finally:
+            kernel.CloseHandle(handle)
+    return observe(pid,parent=True)
+
+
 class ConsoleMonitor:
     """Bounded visible-console sampling, not a universal no-flash claim."""
     def __init__(self):
         self.stop_event=threading.Event();self.thread=None;self.error=None
         self.baseline=[];self.unexpected=[];self.samples=0
+        self.baseline_details=[];self.unexpected_details=[]
+
+    @staticmethod
+    def detail(row):
+        # Keep timestamps/metadata out of the original comparison key. Each
+        # baseline/new row gets at most one observation, bounded to 32 per kind.
+        result={'window':row['window'],'pid':row['pid'],'class':row['class'],
+                'observed_unix_ns':str(time.time_ns()),'observed_monotonic_ns':str(time.monotonic_ns())}
+        try:
+            result['process']=windows_console_process(row['pid'])
+            from ctypes import wintypes as w
+            user=ctypes.WinDLL('user32',use_last_error=True)
+            user.GetWindowThreadProcessId.argtypes=[w.HWND,ctypes.POINTER(w.DWORD)]
+            user.GetWindowThreadProcessId.restype=w.DWORD
+            pid=w.DWORD();thread=user.GetWindowThreadProcessId(row['window'],ctypes.byref(pid))
+            result['window_pid_matches_after']=bool(thread and pid.value==row['pid'])
+        except Exception as error:
+            result['metadata_error_type']=type(error).__name__
+        result['observation_completed_monotonic_ns']=str(time.monotonic_ns())
+        return result
+
+    def retain_new(self,row):
+        # The original failure predicate is unchanged, including its row cap.
+        if row not in self.baseline and row not in self.unexpected and len(self.unexpected)<32:
+            self.unexpected.append(row)
+            self.unexpected_details.append(self.detail(row))
 
     @staticmethod
     def windows():
@@ -264,12 +370,13 @@ class ConsoleMonitor:
     def start(self):
         if os.name!='nt':return
         self.baseline=self.windows()
+        self.baseline_details=[self.detail(row) for row in self.baseline[:32]]
         def sample():
             try:
                 while not self.stop_event.wait(.05):
                     self.samples+=1
                     for row in self.windows():
-                        if row not in self.baseline and row not in self.unexpected and len(self.unexpected)<32:self.unexpected.append(row)
+                        self.retain_new(row)
             except BaseException as error:self.error=type(error).__name__
         self.thread=threading.Thread(target=sample,daemon=True);self.thread.start()
 
@@ -278,8 +385,10 @@ class ConsoleMonitor:
         if self.thread:self.thread.join(timeout=2)
         return {'applicable':os.name=='nt','sample_interval_ms':50,'samples':self.samples,
                 'baseline_visible_consoles':self.baseline,'new_visible_consoles':self.unexpected,
+                'baseline_process_observations':self.baseline_details,'new_process_observations':self.unexpected_details,
                 'error':self.error or ('observer_did_not_stop' if self.thread and self.thread.is_alive() else None),
-                'scope':'Visible console/window snapshots during actual packaged journey; sub-sample flashes and unrelated ambient UI remain outside attribution.'}
+                'scope':'Visible console/window snapshots during actual packaged journey; sub-sample flashes and unrelated ambient UI remain outside attribution.',
+                'diagnostic_scope':'At most 32 baseline and 32 new rows, one limited read-only process/parent observation each. No title, arguments, environment or memory read; no wait, attach or control. Current parent metadata and matching PID are not application causation or an exemption from the original console predicate.'}
 
 
 def run_packaged(args, inspected: dict) -> None:
@@ -774,6 +883,40 @@ def checked_owned_cleanup(browser_result: dict, evidence: Path) -> dict:
 
 
 class OfflineTests(unittest.TestCase):
+    def test_console_details_do_not_change_original_window_predicate(self):
+        from unittest.mock import patch
+        monitor=ConsoleMonitor()
+        baseline={'window':10,'pid':42,'class':'ConsoleWindowClass'}
+        new_window={'window':11,'pid':42,'class':'ConsoleWindowClass'}
+        monitor.baseline=[baseline]
+        with patch.object(monitor,'detail',return_value={'process':{'state':'unavailable'}}) as observed:
+            monitor.retain_new(dict(baseline))
+            observed.assert_not_called()
+            monitor.retain_new(new_window)
+            monitor.retain_new(dict(new_window))
+            observed.assert_called_once_with(new_window)
+        self.assertEqual(monitor.unexpected,[new_window])
+        self.assertEqual(monitor.baseline,[baseline])
+        self.assertEqual(monitor.unexpected_details,[{'process':{'state':'unavailable'}}])
+
+    def test_console_detail_failure_keeps_original_failure_row_and_bound(self):
+        from unittest.mock import patch
+        monitor=ConsoleMonitor()
+        row={'window':11,'pid':42,'class':'ConsoleWindowClass'}
+        with patch(__name__+'.windows_console_process',side_effect=OSError('not returned')):
+            monitor.retain_new(row)
+        self.assertEqual(monitor.unexpected,[row])
+        detail=monitor.unexpected_details[0]
+        self.assertEqual(detail['metadata_error_type'],'OSError')
+        self.assertNotIn('not returned',json.dumps(detail))
+        self.assertGreaterEqual(int(detail['observation_completed_monotonic_ns']),int(detail['observed_monotonic_ns']))
+        with patch.object(monitor,'detail',return_value={'state':'unavailable'}) as observed:
+            for number in range(100):
+                monitor.retain_new({'window':number+100,'pid':42,'class':'ConsoleWindowClass'})
+            self.assertEqual(observed.call_count,31)
+        self.assertEqual(len(monitor.unexpected),32)
+        self.assertEqual(len(monitor.unexpected_details),32)
+
     def package_fixture(self, root: Path, *, slack_ready: bool = True, mac: bool = False) -> Path:
         def sha(value): return hashlib.sha256(value).hexdigest()
         target = "x86_64-pc-windows-msvc"

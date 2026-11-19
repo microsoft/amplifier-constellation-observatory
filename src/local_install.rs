@@ -21,6 +21,22 @@ const INSTANCE: platform::Application = platform::Application {
 use crate::instance_package::ordinary;
 pub(crate) use crate::instance_package::{copy_bundle, inventory};
 
+// The fresh setup owns this parent before either Instance or Slack retention.
+// A nested private_dir call protects its leaf, not implicitly created parents.
+// Existing entries must already be private; never adopt or repair their policy.
+fn prepare_support_parent(home: &Path) -> Result<PathBuf> {
+    platform::validate_private_directory(home)?;
+    let support = home.join("support");
+    match std::fs::symlink_metadata(&support) {
+        Ok(_) => platform::validate_private_directory(&support)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            platform::private_create_dir(&support)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(support)
+}
+
 /// Called only during explicit new desktop setup. Existing registries are never
 /// rewritten by opening an application or replacing a downloaded executable.
 pub fn prepare(
@@ -36,7 +52,7 @@ pub fn prepare(
         // A private derivative is authorized by compiled cohort data, not by a
         // browser path or a self-asserted package manifest. Refuse before copy.
         crate::signing_cohort::runtime(source)?;
-        let destination = state.home.join("support/instance");
+        let destination = prepare_support_parent(&state.home)?.join("instance");
         let manifest = copy_bundle(source, &destination)?;
         let runtime = crate::signing_cohort::runtime(&destination)?;
         recipes.push(recipe(final_home, &manifest, runtime.as_ref()));
@@ -374,6 +390,103 @@ mod tests {
         AppState::open(root.into()).unwrap()
     }
     #[test]
+    fn fresh_support_parent_is_private_and_existing_private_parent_is_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        platform::private_create_dir(&home).unwrap();
+        let support = prepare_support_parent(&home).unwrap();
+        platform::validate_private_directory(&support).unwrap();
+        assert_eq!(support, home.join("support"));
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
+        let note = support.join("retained-owner-note");
+        platform::private_create(&note, b"preserve existing private parent").unwrap();
+        let before = std::fs::symlink_metadata(&support).unwrap();
+        assert_eq!(prepare_support_parent(&home).unwrap(), support);
+        let after = std::fs::symlink_metadata(&support).unwrap();
+        assert_eq!(before.created().ok(), after.created().ok());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(
+            before.permissions().readonly(),
+            after.permissions().readonly()
+        );
+        platform::validate_private_directory(&support).unwrap();
+        assert_eq!(
+            std::fs::read(&note).unwrap(),
+            b"preserve existing private parent"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                (before.dev(), before.ino(), before.uid(), before.mode()),
+                (after.dev(), after.ino(), after.uid(), after.mode())
+            );
+        }
+    }
+    #[test]
+    fn existing_support_file_is_refused_without_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        platform::private_create_dir(&home).unwrap();
+        let support = home.join("support");
+        platform::private_create(&support, b"preserve conflicting file").unwrap();
+        let before = std::fs::symlink_metadata(&support).unwrap();
+        assert!(prepare_support_parent(&home).is_err());
+        let after = std::fs::symlink_metadata(&support).unwrap();
+        assert!(after.is_file());
+        assert_eq!(before.created().ok(), after.created().ok());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(
+            std::fs::read(support).unwrap(),
+            b"preserve conflicting file"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn public_support_and_foreign_link_refuse_without_policy_or_identity_repair() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        platform::private_create_dir(&home).unwrap();
+        let support = home.join("support");
+        std::fs::create_dir(&support).unwrap();
+        std::fs::set_permissions(&support, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = std::fs::symlink_metadata(&support).unwrap();
+        assert!(prepare_support_parent(&home).is_err());
+        let after = std::fs::symlink_metadata(&support).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino(), before.uid(), before.mode()),
+            (after.dev(), after.ino(), after.uid(), after.mode())
+        );
+        assert_eq!(std::fs::read_dir(&support).unwrap().count(), 0);
+        // Test-owned fixture cleanup only; no production removal or repair.
+        std::fs::remove_dir(&support).unwrap();
+        let other = temp.path().join("outside-owned-home");
+        platform::private_create_dir(&other).unwrap();
+        platform::private_create(&other.join("keep"), b"unchanged").unwrap();
+        symlink(&other, &support).unwrap();
+        let before = std::fs::symlink_metadata(&support).unwrap();
+        let target_before = std::fs::symlink_metadata(&other).unwrap();
+        assert!(prepare_support_parent(&home).is_err());
+        let after = std::fs::symlink_metadata(&support).unwrap();
+        let target_after = std::fs::symlink_metadata(&other).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino(), before.mode()),
+            (after.dev(), after.ino(), after.mode())
+        );
+        assert_eq!(
+            (
+                target_before.dev(),
+                target_before.ino(),
+                target_before.mode()
+            ),
+            (target_after.dev(), target_after.ino(), target_after.mode())
+        );
+        assert_eq!(std::fs::read_link(&support).unwrap(), other);
+        assert_eq!(std::fs::read(other.join("keep")).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read_dir(&other).unwrap().count(), 1);
+    }
+    #[test]
     fn copy_preserves_exact_inventory_bytes_used_by_package_identity() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("download");
@@ -448,9 +561,11 @@ mod tests {
                 "The expected signed package is missing or changed"
             );
             assert!(state.list("hosts").unwrap().is_empty());
+            assert!(!state.home.join("support").exists());
             assert!(!state.home.join("support/instance").exists());
         } else {
             result.unwrap();
+            platform::validate_private_directory(&state.home.join("support")).unwrap();
             let hosts = state.list("hosts").unwrap();
             assert_eq!(hosts.len(), 1);
             assert_eq!(hosts[0]["native_local"], true);
@@ -596,6 +711,7 @@ mod tests {
             .is_err()
         );
         assert!(!state.home.join("support/instance").exists());
+        assert!(!state.home.join("support").exists());
         assert!(state.list("hosts").unwrap().is_empty());
         assert_eq!(
             serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap(),

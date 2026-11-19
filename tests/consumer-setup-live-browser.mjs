@@ -342,8 +342,45 @@ try {
   await page.getByLabel('Your name', {exact: true}).fill('Packaged consumer café 日本');
   await page.getByLabel('Choose an Observatory password', {exact: true}).fill(password);
   await page.getByLabel('Open Observatory when I sign in').uncheck();
+  // Observe this one browser request; never issue a diagnostic create/retry.
+  // Use the existing setup allowance across the response and ready UI together.
+  const setupDeadline = Date.now() + 180_000;
+  const createReply = page.waitForResponse(response => {
+    const address = new URL(response.url());
+    return address.origin === base && address.pathname === '/desktop/create'
+      && response.request().method() === 'POST';
+  }, {timeout: 180_000});
+  createReply.catch(() => {}); // the awaited rejection below remains authoritative
   await click(page.getByRole('button', {name: 'Open my constellation', exact: true}));
-  await page.locator('.ow-top').waitFor({timeout: 180_000});
+  const created = await createReply;
+  const reply = {status: created.status(), accepted: created.ok()};
+  if (!created.ok()) {
+    // Never retain cookies, request bodies, arbitrary errors or private paths.
+    const size = Number(created.headers()['content-length']);
+    const remaining = setupDeadline - Date.now();
+    if (Number.isSafeInteger(size) && size > 0 && size <= 8192 && remaining > 0) {
+      let timer;
+      try {
+        const bytes = await Promise.race([created.body(), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Error('Original setup observation allowance elapsed')), remaining);
+        })]);
+        if (bytes.length === size) {
+          reply.error_body_sha256 = sha(bytes);
+          try {
+            const value = JSON.parse(bytes.toString('utf8'));
+            reply.error_class = value.error === 'Directory is not private current-user storage'
+              ? 'private_directory_refused' : 'other_setup_error';
+          } catch { reply.error_class = 'unreadable_setup_error'; }
+        }
+      } catch { reply.error_class = 'unavailable_setup_error'; }
+      finally { clearTimeout(timer); }
+    }
+  }
+  await checkpoint('desktop-create-response', reply);
+  assert(created.ok(), 'Actual desktop setup refused; response status and partial home are retained');
+  const setupRemaining = setupDeadline - Date.now();
+  assert(setupRemaining > 0, 'Original desktop setup allowance elapsed');
+  await page.locator('.ow-top').waitFor({timeout: setupRemaining});
   const session = await (await context.request.get(base + '/auth/session')).json();
   assert.equal(session.authenticated, true); csrf = session.csrf;
   await bindMacPayload();
@@ -423,7 +460,9 @@ try {
   await click(page.locator('[data-setup=key]'));
   await page.getByText('API key stored privately.', {exact: false}).waitFor();
   await click(page.getByRole('button', {name: 'Start my agent', exact: true}));
-  await page.getByText('Your agent is configured and enabled for connections.', {exact: false}).waitFor();
+  await page.getByRole('region', {name: 'Model account setup', exact: true})
+    .locator('.ow-setup-feedback[role=status]')
+    .filter({hasText: 'Your agent is configured and enabled for connections.'}).waitFor();
   const started = await operation('config'), status = await operation('status');
   assert.deepEqual(started.config, {...beforeInstance.config, setup_complete: true, enabled: true});
   assert.equal(status.instance_id, endpoint.management.expected_id);
