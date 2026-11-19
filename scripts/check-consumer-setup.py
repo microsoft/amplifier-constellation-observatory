@@ -8,10 +8,12 @@ This launcher installs nothing and never retries the product journey.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +22,36 @@ ROOT = Path(__file__).resolve().parents[1]
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def run_fixture(command, evidence):
+    if os.name != 'nt' or os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ARCH') != 'ARM64':
+        return subprocess.call(command, cwd=ROOT)
+    trace = evidence.with_suffix('.hosted-process-starts')
+    observer = None
+    try:
+        trace.mkdir()
+        system = Path(os.environ['SystemRoot'])
+        shell = system / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        environment = {k: os.environ[k] for k in ('SystemRoot','WINDIR','TEMP','TMP','USERPROFILE','COMPUTERNAME') if k in os.environ}
+        observer = subprocess.Popen([str(shell), '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
+                                     str(ROOT / 'scripts/observe-hosted-wsl.ps1'), str(trace)],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
+        deadline = time.monotonic() + 5
+        while observer.poll() is None and not (trace / 'ready').exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+    except OSError as error:
+        print('Hosted WSL origin observer unavailable:', type(error).__name__, file=sys.stderr)
+    try:
+        return subprocess.call(command, cwd=ROOT)
+    finally:
+        if observer is not None:
+            try:
+                (trace / 'stop').touch(exist_ok=False)
+                observer.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print('Hosted WSL origin observation incomplete:', type(error).__name__, file=sys.stderr)
 
 
 def main():
@@ -67,7 +99,7 @@ def main():
                                        ("browser", "--browser", "--browser-sha256")):
         row = bindings["inputs"][name]
         command += [path_flag, row["path"], hash_flag, row["sha256"]]
-    raise SystemExit(subprocess.call(command, cwd=ROOT))
+    raise SystemExit(run_fixture(command, evidence))
 
 
 if __name__ == "__main__":
