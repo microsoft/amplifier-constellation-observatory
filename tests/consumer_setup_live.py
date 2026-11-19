@@ -946,11 +946,35 @@ class OwnedProcess:
 
 
 def task_profile(name: str):
-    return powershell("$t=Get-ScheduledTask -TaskName $d[0] -TaskPath '\\' -ErrorAction SilentlyContinue;"
-                      "if($null -eq $t){@{absent=$true}|ConvertTo-Json -Compress;exit};"
-                      "if($t.Principal.UserId -like 'S-1-*'){$sid=$t.Principal.UserId}else{$sid=([Security.Principal.NTAccount]$t.Principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value};"
-                      "@{absent=$false;xml=(Export-ScheduledTask -TaskName $d[0] -TaskPath '\\');"
-                      "owner_sid=$sid;current_sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value} | ConvertTo-Json -Compress", [name])
+    return powershell(r"""
+        $scheduler=New-Object -ComObject Schedule.Service
+        $scheduler.Connect()
+        $folder=$scheduler.GetFolder('\')
+        try { $task=$folder.GetTask($d[0]) } catch {
+            $e=$_.Exception
+            while ($null -ne $e) {
+                if ($e.HResult -eq -2147024894) { @{absent=$true}|ConvertTo-Json -Compress; exit }
+                $e=$e.InnerException
+            }
+            throw
+        }
+        $definition=$task.Definition
+        $principal=$definition.Principal
+        if ($principal.UserId -like 'S-1-*') { $sid=$principal.UserId }
+        else { $sid=([Security.Principal.NTAccount]$principal.UserId).Translate([Security.Principal.SecurityIdentifier]).Value }
+        @{absent=$false;xml=$task.Xml;owner_sid=$sid;current_sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
+          run_level=$principal.RunLevel;logon_type=$principal.LogonType;action_count=$definition.Actions.Count
+        }|ConvertTo-Json -Compress
+    """, [name])
+
+
+def verify_limited_task_action(check: dict) -> None:
+    # The scheduler omits default fields from exported XML. Require the
+    # effective COM principal and action count even when RunLevel is omitted.
+    expected = {'action_count': 1, 'exec_count': 1, 'run_level': 0, 'logon_type': 3}
+    if (any(type(check[key]) is not int or check[key] != value for key, value in expected.items())
+            or check['xml_run_level'] not in (None, 'LeastPrivilege')):
+        raise AssertionError('Task action or privilege changed')
 
 
 def checked_owned_cleanup(browser_result: dict, evidence: Path) -> dict:
@@ -994,8 +1018,12 @@ def checked_owned_cleanup(browser_result: dict, evidence: Path) -> dict:
                 if profile['absent'] or profile['owner_sid'] != profile['current_sid']: raise AssertionError('Task owner changed')
                 xml = profile['xml']; tree = ET.fromstring(xml); ns={'t':'http://schemas.microsoft.com/windows/2004/02/mit/task'}
                 actions = tree.findall('t:Actions/t:Exec',ns)
-                if len(actions)!=1 or tree.findtext('t:Principals/t:Principal/t:RunLevel',namespaces=ns)!='LeastPrivilege':
-                    raise AssertionError('Task action or privilege changed')
+                xml_level=tree.findtext('t:Principals/t:Principal/t:RunLevel',namespaces=ns)
+                check={'role':role,'action_count':profile['action_count'],
+                    'exec_count':len(actions),'run_level':profile['run_level'],'logon_type':profile['logon_type'],
+                    'xml_run_level':xml_level,'profile_sha256':hashlib.sha256(xml.encode()).hexdigest()}
+                audit.setdefault('task_checks',[]).append(check);save()
+                verify_limited_task_action(check)
                 if not path_equal(actions[0].findtext('t:Command',namespaces=ns),exe): raise AssertionError('Task executable changed')
                 if not arguments_equal(windows_arguments('fixture '+(actions[0].findtext('t:Arguments',default='',namespaces=ns)))[1:],argv,path_indices):
                     raise AssertionError('Task arguments changed')
@@ -1084,6 +1112,17 @@ def checked_owned_cleanup(browser_result: dict, evidence: Path) -> dict:
 
 
 class OfflineTests(unittest.TestCase):
+    def test_windows_task_cleanup_requires_effective_interactive_limited_principal(self):
+        limited = {'action_count': 1, 'exec_count': 1, 'run_level': 0, 'logon_type': 3,
+                   'xml_run_level': None}
+        verify_limited_task_action(limited)
+        verify_limited_task_action(dict(limited, xml_run_level='LeastPrivilege'))
+        for field, value in [('run_level', 1), ('run_level', None), ('run_level', False),
+                             ('logon_type', 2), ('action_count', 2), ('exec_count', 0),
+                             ('xml_run_level', 'HighestAvailable')]:
+            with self.subTest(field=field, value=value), self.assertRaises(AssertionError):
+                verify_limited_task_action(dict(limited, **{field: value}))
+
     @unittest.skipIf(os.name=='nt','Portable Mac filesystem model uses Unix path spelling')
     def test_mac_canonical_unicode_spelling_still_requires_actual_file_identity(self):
         from unittest.mock import patch
