@@ -577,7 +577,17 @@ if mode=='exit': print('xoxb-private-value',file=sys.stderr); sys.exit(3)
 if mode=='bad': print('xoxb-private-invalid-json'); sys.exit(0)
 if mode=='oversize': print('x'*(1024*1024+1)); time.sleep(60)
 if mode=='exited-parent':
-    code="import pathlib,time; time.sleep(.2); pathlib.Path("+repr(str(marker)+'.survived')+").write_text('survived')"
+    code="""import pathlib,time
+path=pathlib.Path("""+repr(str(marker)+'.survived')+""")
+release=path.with_suffix('.release')
+deadline=time.monotonic()+10
+while not release.exists():
+    if time.monotonic()>=deadline: raise TimeoutError('fixture release absent')
+    time.sleep(.005)
+pending=path.with_suffix('.pending')
+with pending.open('x') as out: out.write('survived')
+pending.replace(path)
+"""
     subprocess.Popen([sys.executable,'-c',code],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 print(json.dumps({{'ok':True,'arguments':sys.argv[1:],'body_action':None if body is None else body.get('action'),'body_received':body is not None,'path':os.environ.get('PATH'),'ambient_secrets':bool(set(os.environ)&{{'OPENAI_API_KEY','ANTHROPIC_API_KEY','GITHUB_TOKEN','HTTP_PROXY','HTTPS_PROXY','PYTHONPATH'}})}}),flush=True)
 "##,
@@ -841,6 +851,10 @@ print(json.dumps({{'ok':True,'arguments':sys.argv[1:],'body_action':None if body
             // proves the guard does not signal a numeric group after reaping;
             // production native-start service lifetime still belongs to its OS manager.
             let survived = fixture.marker.with_extension("survived");
+            // Permit publication only after the observed parent has returned.
+            // The child closes its pending file before atomic publication, so
+            // existence cannot race an empty write_text-created marker.
+            std::fs::write(fixture.marker.with_extension("release"), b"release").unwrap();
             tokio::time::timeout(Duration::from_secs(3), async {
                 while !survived.exists() {
                     tokio::time::sleep(Duration::from_millis(5)).await;

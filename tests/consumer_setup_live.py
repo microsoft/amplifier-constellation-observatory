@@ -579,8 +579,10 @@ def windows_arguments(value: str) -> list[str]:
 def path_equal(first: str | Path, second: str | Path) -> bool:
     # Resolve both typed paths and compare canonical spelling AND identity. Windows may
     # report one spelling through DOS and another through the extended prefix;
-    # string equality alone is not an ownership proof. A different hardlink,
-    # copy or basename is not equal; the resolved sealed interpreter symlink is.
+    # Mac APFS lookup may use canonically equivalent Unicode spelling. NFC only
+    # qualifies the spelling check: samefile still queries the original resolved
+    # paths, never normalized replacements. Different canonical names/directories
+    # and copies remain unequal; the resolved sealed interpreter symlink is equal.
     a,b=Path(first).resolve(strict=True),Path(second).resolve(strict=True)
     def key(path):
         value=str(path)
@@ -588,6 +590,8 @@ def path_equal(first: str | Path, second: str | Path) -> bool:
             if value.startswith('\\\\?\\UNC\\'): value='\\\\'+value[8:]
             elif value.startswith('\\\\?\\'): value=value[4:]
             value=os.path.normcase(value)
+        elif sys.platform=='darwin':
+            value=unicodedata.normalize('NFC',value)
         return value
     return key(a)==key(b) and os.path.samefile(a,b)
 
@@ -672,8 +676,8 @@ def private_create_json(path: Path, value: dict) -> None:
 def mac_desktop_argument_check(actual: list[str], expected: list[str]) -> tuple[bool, dict]:
     """Preserve exact argument comparison; retain content-free failure context.
 
-    Path comparison still uses canonical spelling AND samefile. Unicode-normalized
-    equality is only a diagnostic; it does not authorize another path or process.
+    Path comparison uses platform canonical spelling AND actual samefile. The
+    separately reported Unicode equality never authorizes another path or process.
     The same length-first/short-circuit checks as arguments_equal are retained.
     """
     def field(value):
@@ -745,7 +749,7 @@ def mac_desktop_control(input_path: Path, witness_path: Path, *, stop: bool) -> 
                 'initial_process_identity':process.identity,'arguments_match':arguments_match,
                 'generation_absence_checked':arguments_match,'generation_absent':absent,
                 'argument_observation':argument_observation,
-                'scope':'Already-read arguments and original comparison only; hashes/lengths, no raw arguments. Initial process identity is not a later generation query. No predicate relaxation or retry.'},stop=stop)
+                'scope':'Already-read arguments and typed-path identity comparison only; hashes/lengths, no raw arguments. Initial process identity is not a later generation query. No retry.'},stop=stop)
             raise AssertionError('Desktop process home, arguments or generation differs')
         observed = {'schema':1, 'input_sha256':hashlib.sha256(input_bytes).hexdigest(),
                     'home':str(home), 'home_identity':directory_identity(home),
@@ -978,6 +982,76 @@ def checked_owned_cleanup(browser_result: dict, evidence: Path) -> dict:
 
 
 class OfflineTests(unittest.TestCase):
+    @unittest.skipIf(os.name=='nt','Portable Mac filesystem model uses Unix path spelling')
+    def test_mac_canonical_unicode_spelling_still_requires_actual_file_identity(self):
+        from unittest.mock import patch
+        expected=Path('/private/caf\u00e9/payload')
+        actual=Path(unicodedata.normalize('NFD',str(expected)))
+        with patch(__name__+'.sys.platform','darwin'), \
+                patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict: path), \
+                patch(__name__+'.os.path.samefile',return_value=True) as identity:
+            self.assertTrue(path_equal(actual,expected))
+            identity.assert_called_once_with(actual,expected)
+        with patch(__name__+'.sys.platform','darwin'), \
+                patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict: path), \
+                patch(__name__+'.os.path.samefile',return_value=False) as identity:
+            self.assertFalse(path_equal(actual,expected))
+            identity.assert_called_once_with(actual,expected)
+        with patch(__name__+'.sys.platform','linux'), \
+                patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict: path), \
+                patch(__name__+'.os.path.samefile',return_value=True) as identity:
+            self.assertFalse(path_equal(actual,expected));identity.assert_not_called()
+
+    @unittest.skipIf(os.name=='nt','Portable Mac filesystem model uses Unix path spelling')
+    def test_mac_unicode_key_never_equates_compatibility_case_or_foreign_scope(self):
+        from unittest.mock import patch
+        for actual,expected in [('/private/\ufb00/payload','/private/ff/payload'),
+                ('/private/CAFE/payload','/private/cafe/payload'),
+                ('/other/caf\u00e9/payload','/private/caf\u00e9/payload')]:
+            with self.subTest(actual=actual),patch(__name__+'.sys.platform','darwin'), \
+                    patch.object(Path,'resolve',autospec=True,side_effect=lambda path,strict: path), \
+                    patch(__name__+'.os.path.samefile',return_value=True) as identity:
+                self.assertFalse(path_equal(actual,expected));identity.assert_not_called()
+
+    @unittest.skipIf(os.name=='nt','Portable Mac filesystem model uses Unix path spelling')
+    def test_mac_unicode_lookup_uses_real_file_identity_and_refuses_distinct_files(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();first=root/'caf\u00e9';first.write_bytes(b'first')
+            second=root/unicodedata.normalize('NFD',first.name)
+            try:
+                with second.open('xb') as output: output.write(b'different')
+            except FileExistsError:
+                equivalent=True  # Native normalization-insensitive filesystem.
+            else:
+                equivalent=False  # Linux ordinary filesystem keeps distinct names.
+            with patch(__name__+'.sys.platform','darwin'):
+                self.assertEqual(path_equal(first,second),equivalent)
+                other=root/'other';other.write_bytes(b'first')
+                self.assertFalse(path_equal(first,other))
+                linked=root/'different-hardlink';os.link(first,linked)
+                self.assertFalse(path_equal(first,linked))
+
+    @unittest.skipIf(os.name=='nt','Portable fake Mac process uses Unix path spelling')
+    def test_mac_foreign_image_and_changed_generation_still_refuse(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock,patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();expected=root/'owned';expected.write_bytes(b'payload')
+            foreign=root/'foreign';foreign.write_bytes(b'payload')
+            original={'pid':42,'uid':os.getuid(),'start_seconds':'1','start_microseconds':'2'}
+            changed={**original,'start_microseconds':'3'}
+            for image,generations in [(foreign,[original]),(expected,[original,changed])]:
+                def image_path(pid,buffer,size):
+                    buffer.value=os.fsencode(image)
+                    return len(buffer.value)
+                lib=SimpleNamespace(proc_pidpath=Mock(side_effect=image_path))
+                with self.subTest(image=image),patch(__name__+'.sys.platform','darwin'), \
+                        patch(__name__+'.ctypes.CDLL',return_value=lib), \
+                        patch.object(OwnedProcess,'mac_identity',side_effect=generations), \
+                        self.assertRaisesRegex(AssertionError,'Owned process identity changed'):
+                    OwnedProcess(42,expected)
+
     def test_mac_exact_launcher_argv_layout_keeps_unicode_spaces_and_excludes_environment(self):
         args=[b'/private/app/agent-observatory',b'--home','/private/Observatory café 日本'.encode(),b'--no-browser']
         for padding in (0,1,7):
