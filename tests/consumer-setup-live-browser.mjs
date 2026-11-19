@@ -459,12 +459,24 @@ try {
   await page.locator('[data-setup-key]').fill(canary);
   await click(page.locator('[data-setup=key]'));
   await page.getByText('API key stored privately.', {exact: false}).waitFor();
+  // Saving a key intentionally adds a private secret reference to Instance's
+  // configuration. Verify that one change before checking the separate Start.
+  const keyed = await operation('config');
+  const keyEnvironment = intendedRuntime.provider.api_key_env;
+  assert.match(keyEnvironment, /^[A-Za-z0-9_]{1,128}$/);
+  const keyReference = keyed.config.backend.secret_env[keyEnvironment];
+  assert.match(keyReference, /^native-model-key-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  const keyedExpected = structuredClone(beforeInstance.config);
+  keyedExpected.backend.secret_env[keyEnvironment] = keyReference;
+  assert.deepEqual(keyed.config, keyedExpected);
+  assert.equal(sha(await fs.readFile(path.join(plan.home, 'secrets', keyReference))),
+    sha(Buffer.from(canary)), 'The disposable key must be stored at its exact private reference');
   await click(page.getByRole('button', {name: 'Start my agent', exact: true}));
   await page.getByRole('region', {name: 'Model account setup', exact: true})
     .locator('.ow-setup-feedback[role=status]')
     .filter({hasText: 'Your agent is configured and enabled for connections.'}).waitFor();
   const started = await operation('config'), status = await operation('status');
-  assert.deepEqual(started.config, {...beforeInstance.config, setup_complete: true, enabled: true});
+  assert.deepEqual(started.config, {...keyedExpected, setup_complete: true, enabled: true});
   assert.equal(status.instance_id, endpoint.management.expected_id);
   assert.equal(status.setup_complete, true); assert.equal(status.enabled, true);
   assert(Number.isSafeInteger(status.addresses.pid) && status.addresses.pid > 0);

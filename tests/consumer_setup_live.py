@@ -32,6 +32,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unicodedata
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -314,6 +315,42 @@ def windows_console_process(pid):
     return observe(pid,parent=True)
 
 
+def windows_console_visibility(window):
+    """Content-free, non-atomic window diagnostics, never an admission rule.
+
+    WS_VISIBLE can remain set for obscured or cloaked windows. The rectangle is
+    DPI-virtualized and can include invisible borders; its area is not a count
+    of displayed pixels. An HWND may disappear or be reused between queries.
+    """
+    from ctypes import wintypes as w
+    result={'is_window_visible':None,'rectangle':None,'dwm_cloaked':None,'errors':[]}
+    try:
+        user=ctypes.WinDLL('user32',use_last_error=True)
+        user.IsWindowVisible.argtypes=[w.HWND];user.IsWindowVisible.restype=w.BOOL
+        user.GetWindowRect.argtypes=[w.HWND,ctypes.POINTER(w.RECT)];user.GetWindowRect.restype=w.BOOL
+        result['is_window_visible']=bool(user.IsWindowVisible(window))
+        rectangle=w.RECT()
+        if user.GetWindowRect(window,ctypes.byref(rectangle)):
+            width=rectangle.right-rectangle.left;height=rectangle.bottom-rectangle.top
+            result['rectangle']={'width':width,'height':height,'positive_area':width>0 and height>0,
+                                 'area':max(0,width)*max(0,height)}
+        else:
+            result['errors'].append({'api':'GetWindowRect','winerror':ctypes.get_last_error()})
+    except Exception as error:
+        result['errors'].append({'api':'user32_visibility','error_type':type(error).__name__})
+    try:
+        dwm=ctypes.WinDLL('dwmapi',use_last_error=True)
+        query=dwm.DwmGetWindowAttribute
+        query.argtypes=[w.HWND,w.DWORD,w.LPVOID,w.DWORD];query.restype=ctypes.c_int32
+        flags=ctypes.c_uint32()
+        status=query(window,14,ctypes.byref(flags),ctypes.sizeof(flags)) # DWMWA_CLOAKED, DWORD
+        result['dwm_cloaked']={'hresult':f'{status&0xffffffff:08x}',
+                               'flags':flags.value if status==0 else None}
+    except Exception as error:
+        result['errors'].append({'api':'DwmGetWindowAttribute','error_type':type(error).__name__})
+    return result
+
+
 class ConsoleMonitor:
     """Bounded visible-console sampling, not a universal no-flash claim."""
     def __init__(self):
@@ -327,6 +364,10 @@ class ConsoleMonitor:
         # baseline/new row gets at most one observation, bounded to 32 per kind.
         result={'window':row['window'],'pid':row['pid'],'class':row['class'],
                 'observed_unix_ns':str(time.time_ns()),'observed_monotonic_ns':str(time.monotonic_ns())}
+        try:
+            result['window_visibility']=windows_console_visibility(row['window'])
+        except Exception as error:
+            result['window_visibility_error_type']=type(error).__name__
         try:
             result['process']=windows_console_process(row['pid'])
             from ctypes import wintypes as w
@@ -388,7 +429,7 @@ class ConsoleMonitor:
                 'baseline_process_observations':self.baseline_details,'new_process_observations':self.unexpected_details,
                 'error':self.error or ('observer_did_not_stop' if self.thread and self.thread.is_alive() else None),
                 'scope':'Visible console/window snapshots during actual packaged journey; sub-sample flashes and unrelated ambient UI remain outside attribution.',
-                'diagnostic_scope':'At most 32 baseline and 32 new rows, one limited read-only process/parent observation each. No title, arguments, environment or memory read; no wait, attach or control. Current parent metadata and matching PID are not application causation or an exemption from the original console predicate.'}
+                'diagnostic_scope':'At most 32 baseline and 32 new rows, one limited read-only process/parent observation and one window visibility/rectangle/cloaking snapshot each. No title, arguments, environment or memory read; no wait, attach or control. Window snapshots are non-atomic; style/rectangle/cloaking and current parent metadata are not application causation, displayed-pixel proof or an exemption from the original console predicate.'}
 
 
 def run_packaged(args, inspected: dict) -> None:
@@ -628,6 +669,46 @@ def private_create_json(path: Path, value: dict) -> None:
         json.dump(value, output, indent=2); output.write('\n'); output.flush(); os.fsync(output.fileno())
 
 
+def mac_desktop_argument_check(actual: list[str], expected: list[str]) -> tuple[bool, dict]:
+    """Preserve exact argument comparison; retain content-free failure context.
+
+    Path comparison still uses canonical spelling AND samefile. Unicode-normalized
+    equality is only a diagnostic; it does not authorize another path or process.
+    The same length-first/short-circuit checks as arguments_equal are retained.
+    """
+    def field(value):
+        raw=os.fsencode(value)
+        return {'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
+    detail={'actual_count':len(actual),'expected_count':len(expected),
+            'actual_fields':[field(value) for value in actual],
+            'expected_fields':[field(value) for value in expected],'comparisons':[]}
+    if len(actual)!=len(expected): return False,detail
+    for index,(value,wanted) in enumerate(zip(actual,expected)):
+        same=path_equal(value,wanted) if index in {0,2} else value==wanted
+        detail['comparisons'].append({'index':index,'typed_path':index in {0,2},
+            'exact_check_passed':same,'raw_spelling_equal':value==wanted,
+            'nfc_spelling_equal':unicodedata.normalize('NFC',value)==unicodedata.normalize('NFC',wanted)})
+        if not same:return False,detail
+    return True,detail
+
+
+def retain_mac_observation_failure(witness_path: Path, value: dict, *, stop: bool) -> None:
+    """One private diagnostic write; diagnostic failure never replaces refusal."""
+    # Stderr is already retained by the existing browser controller on both
+    # success/failure. No environment, raw argv, capability or transcript data.
+    try:
+        path=witness_path.with_suffix('.stop-observation-failed.json' if stop else '.observation-failed.json')
+        private_create_json(path,value)
+    except BaseException as error:
+        value={**value,'diagnostic_write_error_type':type(error).__name__}
+    try:
+        raw=json.dumps(value,sort_keys=True)
+        if len(raw.encode('utf-8'))<=32768:
+            print('OBSERVATORY_MAC_OWNERSHIP '+raw,file=sys.stderr,flush=True)
+    except BaseException:
+        pass
+
+
 def mac_desktop_control(input_path: Path, witness_path: Path, *, stop: bool) -> dict:
     """Fixture-only, exact fresh app observation/stop. Never target open's PID."""
     if sys.platform != 'darwin':
@@ -650,7 +731,21 @@ def mac_desktop_control(input_path: Path, witness_path: Path, *, stop: bool) -> 
     try:
         if process.identity.get('uid') != os.getuid():
             raise AssertionError('Desktop process belongs to another user')
-        if not arguments_equal(mac_arguments(pid), expected_arguments, {0, 2}) or process.absent():
+        actual_arguments=mac_arguments(pid)
+        arguments_match,argument_observation=mac_desktop_argument_check(actual_arguments,expected_arguments)
+        # Preserve the original short-circuit: no additional process query when
+        # argv already differs. A sampled mismatch does not permit stop/cleanup.
+        absent=process.absent() if arguments_match else None
+        if not arguments_match or absent:
+            retain_mac_observation_failure(witness_path,{
+                'schema':1,'phase':'initial_desktop_binding','stop_requested':stop,
+                'observed_unix_ns':str(time.time_ns()),'observed_monotonic_ns':str(time.monotonic_ns()),
+                'input_sha256':hashlib.sha256(input_bytes).hexdigest(),
+                'runtime_sha256':hashlib.sha256(runtime_bytes).hexdigest(),
+                'initial_process_identity':process.identity,'arguments_match':arguments_match,
+                'generation_absence_checked':arguments_match,'generation_absent':absent,
+                'argument_observation':argument_observation,
+                'scope':'Already-read arguments and original comparison only; hashes/lengths, no raw arguments. Initial process identity is not a later generation query. No predicate relaxation or retry.'},stop=stop)
             raise AssertionError('Desktop process home, arguments or generation differs')
         observed = {'schema':1, 'input_sha256':hashlib.sha256(input_bytes).hexdigest(),
                     'home':str(home), 'home_identity':directory_identity(home),
@@ -883,6 +978,72 @@ def checked_owned_cleanup(browser_result: dict, evidence: Path) -> dict:
 
 
 class OfflineTests(unittest.TestCase):
+    def test_mac_exact_launcher_argv_layout_keeps_unicode_spaces_and_excludes_environment(self):
+        args=[b'/private/app/agent-observatory',b'--home','/private/Observatory café 日本'.encode(),b'--no-browser']
+        for padding in (0,1,7):
+            raw=len(args).to_bytes(4,sys.byteorder,signed=True)+b'/different/bare/exec-path\0'+b'\0'*padding+b'\0'.join(args)+b'\0TOKEN=not-returned\0'
+            self.assertEqual(mac_arguments_bytes(raw),[os.fsdecode(value) for value in args])
+            self.assertNotIn('TOKEN',repr(mac_arguments_bytes(raw)))
+
+    def test_mac_argument_diagnostics_never_authorize_unicode_or_changed_flags(self):
+        from unittest.mock import patch
+        expected=['/private/café/payload','--home','/private/home','--no-browser']
+        actual=[unicodedata.normalize('NFD',expected[0]),*expected[1:]]
+        with patch(__name__+'.path_equal',return_value=False) as check:
+            matches,details=mac_desktop_argument_check(actual,expected)
+        self.assertFalse(matches);check.assert_called_once_with(actual[0],expected[0])
+        self.assertTrue(details['comparisons'][0]['nfc_spelling_equal'])
+        self.assertFalse(details['comparisons'][0]['exact_check_passed'])
+        self.assertNotIn(expected[0],json.dumps(details))
+        self.assertNotIn(actual[0],json.dumps(details))
+        with patch(__name__+'.path_equal',return_value=True) as check:
+            matches,_=mac_desktop_argument_check(expected,expected)
+            self.assertTrue(matches);self.assertEqual(check.call_count,2)
+            check.reset_mock();matches,_=mac_desktop_argument_check(expected[:-1],expected)
+            self.assertFalse(matches);check.assert_not_called()
+            check.reset_mock();matches,_=mac_desktop_argument_check([expected[0],'--different',*expected[2:]],expected)
+            self.assertFalse(matches);check.assert_called_once()
+
+    @unittest.skipIf(os.name=='nt','Portable fake Mac owner requires Unix ownership')
+    def test_mac_argv_refusal_retains_diagnostic_without_generation_query_or_stop(self):
+        from unittest.mock import patch
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();home=root/'fresh';home.mkdir()
+            executable=root/'download/Observatory.app/Contents/MacOS/agent-observatory'
+            executable.parent.mkdir(parents=True);executable.write_bytes(b'inert')
+            inputs={'schema':1,'root':str(root),'home':str(home),'binary':str(executable),
+                    'binary_sha256':digest(executable),'launch_mode':'mac_launch_services'}
+            input_path=root/'browser-inputs.json';private_create_json(input_path,inputs)
+            private_create_json(home/'runtime.json',{'pid':42,'binary_sha256':digest(executable)})
+            witness=root/'mac-desktop-1.json'
+            class FakeProcess:
+                def __init__(self,*_):self.identity={'pid':42,'uid':os.getuid(),'start_seconds':'1','start_microseconds':'2'}
+                def absent(self):raise AssertionError('No generation query permitted after argument mismatch')
+                def close(self):pass
+            actual=[str(executable),'--unexpected-private-argument',str(home),'--no-browser']
+            captured=io.StringIO()
+            with patch(__name__+'.sys.platform','darwin'),patch(__name__+'.OwnedProcess',FakeProcess), \
+                    patch(__name__+'.mac_arguments',return_value=actual),patch(__name__+'.os.kill') as kill, \
+                    contextlib.redirect_stderr(captured),self.assertRaisesRegex(AssertionError,'Desktop process home, arguments or generation differs'):
+                mac_desktop_control(input_path,witness,stop=False)
+            kill.assert_not_called();self.assertFalse(witness.exists())
+            observation=json.loads(witness.with_suffix('.observation-failed.json').read_bytes())
+            self.assertFalse(observation['arguments_match']);self.assertFalse(observation['generation_absence_checked'])
+            self.assertIsNone(observation['generation_absent'])
+            self.assertNotIn('--unexpected-private-argument',captured.getvalue())
+            self.assertIn('OBSERVATORY_MAC_OWNERSHIP ',captured.getvalue())
+
+    def test_mac_diagnostic_write_failure_cannot_replace_original_refusal(self):
+        from unittest.mock import patch
+        import contextlib
+        import io
+        captured=io.StringIO()
+        with patch(__name__+'.private_create_json',side_effect=FileExistsError('never exposed')),contextlib.redirect_stderr(captured):
+            retain_mac_observation_failure(Path('/inert/mac-desktop-1.json'),{'schema':1,'arguments_match':False},stop=False)
+        self.assertIn('FileExistsError',captured.getvalue());self.assertNotIn('never exposed',captured.getvalue())
+
     def test_console_details_do_not_change_original_window_predicate(self):
         from unittest.mock import patch
         monitor=ConsoleMonitor()
@@ -903,12 +1064,15 @@ class OfflineTests(unittest.TestCase):
         from unittest.mock import patch
         monitor=ConsoleMonitor()
         row={'window':11,'pid':42,'class':'ConsoleWindowClass'}
-        with patch(__name__+'.windows_console_process',side_effect=OSError('not returned')):
+        with patch(__name__+'.windows_console_process',side_effect=OSError('not returned')), \
+             patch(__name__+'.windows_console_visibility',side_effect=RuntimeError('never returned')):
             monitor.retain_new(row)
         self.assertEqual(monitor.unexpected,[row])
         detail=monitor.unexpected_details[0]
         self.assertEqual(detail['metadata_error_type'],'OSError')
+        self.assertEqual(detail['window_visibility_error_type'],'RuntimeError')
         self.assertNotIn('not returned',json.dumps(detail))
+        self.assertNotIn('never returned',json.dumps(detail))
         self.assertGreaterEqual(int(detail['observation_completed_monotonic_ns']),int(detail['observed_monotonic_ns']))
         with patch.object(monitor,'detail',return_value={'state':'unavailable'}) as observed:
             for number in range(100):
@@ -916,6 +1080,72 @@ class OfflineTests(unittest.TestCase):
             self.assertEqual(observed.call_count,31)
         self.assertEqual(len(monitor.unexpected),32)
         self.assertEqual(len(monitor.unexpected_details),32)
+
+    def fake_console_visibility(self, *, visible=True, rect=(10,20,90,60), rect_ok=True,
+                                flags=3, status=0, dwm_missing=False):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        def rectangle(_window,pointer):
+            pointer._obj.left,pointer._obj.top,pointer._obj.right,pointer._obj.bottom=rect
+            return rect_ok
+        def cloak(_window,attribute,pointer,size):
+            self.assertEqual(attribute,14);self.assertEqual(size,4)
+            pointer._obj.value=flags
+            return status
+        user=SimpleNamespace(IsWindowVisible=Mock(return_value=visible),GetWindowRect=Mock(side_effect=rectangle))
+        dwm=SimpleNamespace(DwmGetWindowAttribute=Mock(side_effect=cloak))
+        def load(name,**kwargs):
+            self.assertEqual(kwargs,{'use_last_error':True})
+            if name=='user32':return user
+            self.assertEqual(name,'dwmapi')
+            if dwm_missing:raise OSError('private loader text')
+            return dwm
+        return load,user,dwm
+
+    def test_console_visibility_retains_cloak_style_and_area_without_exemption(self):
+        from unittest.mock import patch
+        load,user,dwm=self.fake_console_visibility()
+        with patch.object(ctypes,'WinDLL',side_effect=load,create=True):
+            observed=windows_console_visibility(11)
+        self.assertEqual(observed,{'is_window_visible':True,
+            'rectangle':{'width':80,'height':40,'positive_area':True,'area':3200},
+            'dwm_cloaked':{'hresult':'00000000','flags':3},'errors':[]})
+        user.IsWindowVisible.assert_called_once_with(11)
+        self.assertEqual(user.GetWindowRect.call_count,1);self.assertEqual(dwm.DwmGetWindowAttribute.call_count,1)
+        monitor=ConsoleMonitor();row={'window':11,'pid':42,'class':'ConsoleWindowClass'}
+        with patch(__name__+'.windows_console_visibility',return_value=observed), \
+             patch(__name__+'.windows_console_process',side_effect=OSError('unavailable')):
+            monitor.retain_new(row)
+        self.assertEqual(monitor.unexpected,[row])
+        self.assertEqual(monitor.unexpected_details[0]['window_visibility'],observed)
+
+    def test_console_visibility_failed_hresult_never_authorizes_output_flags(self):
+        from unittest.mock import patch
+        load,_,_=self.fake_console_visibility(status=-2147024890,flags=7)
+        with patch.object(ctypes,'WinDLL',side_effect=load,create=True):
+            observed=windows_console_visibility(11)
+        self.assertEqual(observed['dwm_cloaked'],{'hresult':'80070006','flags':None})
+        self.assertEqual(observed['rectangle']['area'],3200)
+
+    def test_console_visibility_unavailable_dwm_retains_other_observations(self):
+        from unittest.mock import patch
+        load,_,_=self.fake_console_visibility(dwm_missing=True,visible=False,rect=(0,0,0,0))
+        with patch.object(ctypes,'WinDLL',side_effect=load,create=True):
+            observed=windows_console_visibility(11)
+        self.assertFalse(observed['is_window_visible']);self.assertFalse(observed['rectangle']['positive_area'])
+        self.assertEqual(observed['rectangle']['area'],0);self.assertIsNone(observed['dwm_cloaked'])
+        self.assertEqual(observed['errors'],[{'api':'DwmGetWindowAttribute','error_type':'OSError'}])
+        self.assertNotIn('private loader text',json.dumps(observed))
+
+    def test_console_visibility_rectangle_failure_retains_cloak_without_fabricated_area(self):
+        from unittest.mock import patch
+        load,_,_=self.fake_console_visibility(rect_ok=False,flags=0)
+        with patch.object(ctypes,'WinDLL',side_effect=load,create=True), \
+             patch.object(ctypes,'get_last_error',return_value=1400,create=True):
+            observed=windows_console_visibility(11)
+        self.assertIsNone(observed['rectangle'])
+        self.assertEqual(observed['errors'],[{'api':'GetWindowRect','winerror':1400}])
+        self.assertEqual(observed['dwm_cloaked'],{'hresult':'00000000','flags':0})
 
     def package_fixture(self, root: Path, *, slack_ready: bool = True, mac: bool = False) -> Path:
         def sha(value): return hashlib.sha256(value).hexdigest()
